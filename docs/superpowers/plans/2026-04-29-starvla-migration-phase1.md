@@ -509,8 +509,10 @@ Identify the train step where `self.completed_steps += 1` happens (typically rig
 - [ ] **Step 2: Add hook logic after `self.completed_steps += 1`**
 
 ```python
-# Insert after the completed_steps increment
-viz_cfg = self.config.trainer.get("visualization", {})
+# Insert after the completed_steps increment, INSIDE the `if self.accelerator.sync_gradients:` block
+# so it fires exactly once per completed step under gradient_accumulation_steps > 1.
+# The local variable in the train loop is `batch_vla` (not `batch`).
+viz_cfg = getattr(self.config.trainer, "visualization", None) or {}
 if viz_cfg.get("enabled", False):
     every = int(viz_cfg.get("train_every_n_steps", 1000))
     if self.completed_steps % every == 0 and self.accelerator.is_main_process:
@@ -518,7 +520,7 @@ if viz_cfg.get("enabled", False):
         if hasattr(unwrapped, "visualize_batch"):
             try:
                 viz_imgs = unwrapped.visualize_batch(
-                    batch, n_samples=int(viz_cfg.get("num_samples", 1)),
+                    batch_vla, n_samples=int(viz_cfg.get("num_samples", 1)),
                 )
                 if viz_imgs:
                     wandb.log(viz_imgs, step=self.completed_steps)
@@ -566,15 +568,10 @@ find starVLA/model/modules/uamvla/state_encoder -name __pycache__ -exec rm -rf {
 - [ ] **Step 2: Rewrite imports in all 3 files**
 
 For each `.py` file in `state_encoder/`, replace:
-- `from uamvla.data.embodiment_registry` → `from starVLA.model.modules.uamvla.data.embodiment_registry` (NOTE: this dependency will be ported in Task 12 — for now, defer the import or comment it pending Task 12)
-- `from uamvla.utils.*` → `from starVLA.utils.*`
-- `from uamvla.core.registry` → leave for now; the registry module needs to be ported or replaced by starVLA's `FRAMEWORK_REGISTRY` pattern
+- `from uamvla.data.embodiment_registry` → defer the import (use a lazy import inside `ModularStateEncoder.__init__`). Will be re-hoisted to module top in Task 14 once the data submodule lands.
+- `from uamvla.utils.*` → `from starVLA.utils.*` (only `limb_encoders.py` and `special_tokens.py` need this if at all; current source has none).
 
-Critical: `modular_state_encoder.py` imports `from uamvla.core.registry import MODALITY_ENCODER_REGISTRY` — this is a small registry decorator system. Two options:
-- (a) Port `uamvla/core/registry.py` to `starVLA/model/modules/uamvla/registry.py` (light, one file)
-- (b) Skip registry — state encoder is constructed directly by UamVLAFramework, doesn't need registry lookup
-
-Choose **(b)** — drop the `@MODALITY_ENCODER_REGISTRY.register(...)` decorator on `ModularStateEncoder` (replace with no-op or remove entirely). Document in the file header.
+Verified by grep: the source `state_encoder/` does NOT import from `uamvla.core.registry`, and `ModularStateEncoder` is NOT decorated with `@MODALITY_ENCODER_REGISTRY.register(...)` despite what earlier plan drafts assumed. No registry-decorator removal is needed. Direct construction by `UamVLAFramework` (Phase 1D) works without any registry indirection.
 
 - [ ] **Step 3: Add smoke import test**
 
@@ -694,12 +691,15 @@ Note: `pointnet2/` may have its own internal imports — leave intra-package imp
 def test_pose_components_imports():
     from starVLA.model.modules.uamvla.components.pose.pose_utils import get_pose_dim, rotation_6d_to_matrix
     from starVLA.model.modules.uamvla.components.pose.sde import init_sde
-    # PointNet2 CUDA extension may not be compiled on Mac — gate that import
+    # PointNet2Wrapper.__init__ lazy-imports the CUDA modules only at instantiation,
+    # so module-level import always succeeds on Mac (without CUDA). The try/except
+    # below is defensive only — it would fire only if `pts_encoder.py` itself
+    # introduced a top-level CUDA-dependent import in the future.
     import pytest
     try:
         from starVLA.model.modules.uamvla.components.pose.pts_encoder import PointNet2Wrapper
     except (ImportError, RuntimeError) as e:
-        pytest.skip(f"PointNet2 CUDA extension not available locally: {e}")
+        pytest.skip(f"PointNet2Wrapper module-level import failed: {e}")
 ```
 
 - [ ] **Step 4: Run test**
@@ -719,8 +719,21 @@ git commit -m "[modules/uamvla] Port components/pose (PointNet2, ScoreNet, SDE, 
 ### Task 12: Port components/denoiser, components/pixel_decoder
 
 **Files:**
+- Create: `starVLA/utils/diffusion_utils/{__init__,diffusion_utils,gaussian_diffusion,respace}.py` (Step 0 prereq — Phase 1A omission)
 - Create: `starVLA/model/modules/uamvla/components/denoiser/{__init__,common,dit,scheduler}.py`
 - Create: `starVLA/model/modules/uamvla/components/pixel_decoder/{__init__,vae}.py`
+
+> **Phase 1A omission (commit separately as Step 0):** `uamvla/utils/diffusion_utils/` was missed during Phase 1A's util port (Task 2 covered geometry/rotation/point_cloud only). `denoiser/scheduler.py:9` imports `from uamvla.utils.diffusion_utils import create_diffusion`, so it must be ported first. The 4 files are verbatim — no `uamvla.*` imports inside (all internal imports are relative). Land as a separate commit titled `[utils] Port diffusion_utils package (deferred Phase 1A dependency for denoiser scheduler)` before Step 1.
+
+- [ ] **Step 0 (prereq): Port diffusion_utils**
+
+```bash
+mkdir -p starVLA/utils/diffusion_utils
+cp -r /Users/tancilon/develop/localgit/UamVLA/uamvla/utils/diffusion_utils/. starVLA/utils/diffusion_utils/
+find starVLA/utils/diffusion_utils -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+```
+
+Add `tests/test_diffusion_utils_smoke.py` with `test_create_diffusion_imports`. Commit with the message above. Then proceed to Step 1.
 
 - [ ] **Step 1: Copy directories**
 
@@ -849,10 +862,16 @@ cp /Users/tancilon/develop/localgit/UamVLA/uamvla/data/chat_template.py         
 - `from uamvla.data.action_tokenizer` → `from starVLA.model.modules.uamvla.data.action_tokenizer`
 - `from uamvla.data.chat_template` → `from starVLA.model.modules.uamvla.data.chat_template`
 
-- [ ] **Step 3: Now go back to state_encoder/ and re-enable the embodiment_registry import that was deferred in Task 9**
+- [ ] **Step 3: Now go back to state_encoder/ and re-hoist the embodiment_registry import that was deferred in Task 9**
 
-In `state_encoder/modular_state_encoder.py` and `state_encoder/special_tokens.py`, change:
-- `from uamvla.data.embodiment_registry import get_embodiment_config` → `from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment_config`
+Only `state_encoder/modular_state_encoder.py` actually imports `embodiment_registry` (verified by grep — `special_tokens.py` does not, despite earlier plan drafts). In Task 9, the import was placed inside `ModularStateEncoder.__init__` as a lazy import. Now that the data submodule exists, hoist it back to module top:
+
+```python
+# At module top, alongside the other imports:
+from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment_config
+```
+
+Remove the lazy-import line + its explanatory comment from inside `__init__`.
 
 - [ ] **Step 4: Smoke test**
 
@@ -1159,7 +1178,7 @@ class UamVLA(baseframework):
             hidden_size=hidden_size,
             vae=self.vae,
             vision_extra=vision_extra,
-            lm_head=getattr(self.qwen_vl_interface, "lm_head", None),
+            lm_head=self.qwen_vl_interface.get_lm_head(),
             action_token_begin_id=self.config.framework.get("action_token_begin_id", 0),
         ))
 
@@ -1281,25 +1300,11 @@ Insert into `UamVLA.py`:
     def _mask_key(field_name):
         return {"pose_gt": "pose", "image_target": "recon", "image_future": "future"}.get(field_name, field_name)
 
-    def _stack_optional_field(self, examples, field):
-        # Mirrors collator.py optional-tensor stacking with zero-padding
-        # ... omitted; follow UamVLA uamvla/data/collator.py:213-280 pattern
-        raise NotImplementedError("Implement following UamVLA collator.py:213-280 pattern")
+    # `_collate_for_heads` body and helper functions live in the sibling module
+    # `starVLA/model/modules/uamvla/collator_helpers.py` (see Step 3).
 ```
 
-**NOTE**: The `_collate_for_heads` and `_stack_optional_field` logic is non-trivial. Better: have the dataloader's `collate_fn` (Task 24) produce the fully-stacked `batch_dict` directly, and `forward` receives it as input. Move the stacking to the dataloader side.
-
-Adjust the contract: dataloader returns a dict batch with all stacked fields; trainer passes batch directly to `forward(batch)`. `forward` no longer needs `_collate_for_heads`.
-
-This matches starVLA's existing pattern (each framework's `forward` takes whatever the dataloader emits).
-
-Update `forward` to accept the batch dict directly (or the `examples: List[dict]` for starVLA contract — depends on dataloader output).
-
-Looking at starVLA's QwenGR00T `forward`: it takes `examples: List[dict]` directly and processes inside. We'll follow that pattern but require the collator to ALSO emit `batch_dict` keys when `canonical_state` is in `examples`. The collator runs in the dataloader; the framework receives a hybrid (list of examples + already-stacked batch_dict via a side channel).
-
-**Cleanest resolution**: dataloader returns `examples: List[dict]` where each dict has all the fields (canonical_state, pose_gt, image_future, etc.) per sample. Framework's `forward` does the stacking inline. This keeps the starVLA `examples` contract.
-
-Re-implement `_collate_for_heads` in the framework, lifting logic from UamVLA `uamvla/data/collator.py:178-281`. Port the helper to `starVLA/model/modules/uamvla/collator_helpers.py` to keep the framework class clean.
+**Decision (resolved)**: dataloader returns `examples: List[dict]` where each dict has all per-sample fields (`canonical_state`, `pose_gt`, `image_future`, etc.). Framework's `forward` does the stacking inline via `_collate_for_heads`. This keeps the starVLA `examples` contract and matches `QwenGR00T.forward`. The 4 stacking helpers (`stack_canonical`, `stack_optional_tensor_fields`, `stack_pose_gt`, `stack_static_cam_extrinsic`) are ported from UamVLA `uamvla/data/collator.py:17-281` into a new sibling module `starVLA/model/modules/uamvla/collator_helpers.py` (see Step 3) so the framework class stays clean.
 
 - [ ] **Step 3: Port collator helpers to a sibling module**
 
@@ -1356,9 +1361,9 @@ def test_predict_action_returns_normalized_actions_key():
         from deployment.model_server.tools.image_tools import to_pil_preserve
 
         qwen_inputs = self.qwen_vl_interface.build_inputs(
-            images=[to_pil_preserve(e["image"]) for e in examples],
+            images=[[to_pil_preserve(img) for img in e["image"]] for e in examples],
             instructions=[e["lang"] for e in examples],
-            canonical_state=[e["canonical_state"] for e in examples],
+            canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
         )
         with torch.autocast("cuda", dtype=torch.bfloat16):
             backbone_out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
@@ -1366,20 +1371,39 @@ def test_predict_action_returns_normalized_actions_key():
 
         # Action head only — pose/future/recon don't run at eval
         pred_actions = self.aux_heads["action"].predict(hidden, batch=qwen_inputs)
-        # ActionHead.predict returns HeadOutput; extract token ids and decode to (B, T, 7)
-        # ... follow UamVLA's eval inference pattern: token_ids → ActionTokenizer.decode → (B, T, 7)
         normalized_actions = self._decode_action_tokens(pred_actions, batch_size=len(examples))
+        return {"normalized_actions": normalized_actions}
 
-        return {"normalized_actions": normalized_actions.detach().cpu().numpy()}
+    def _decode_action_tokens(self, head_output, batch_size: int) -> np.ndarray:
+        """Decode (B, L) argmax token ids → (B, T=action_horizon, 7) normalized actions.
 
-    def _decode_action_tokens(self, action_head_output, batch_size):
-        """Decode (B, L) action tokens → (B, T=action_horizon, 7) normalized actions.
-
-        Mirrors UamVLA uamvla/eval_runners/base_runner.py decoding logic.
+        head_output is HeadOutput(predictions={"token_ids": Tensor(B, L)}) from ActionHead.predict.
+        For Phase 1, ship a structure-correct stub that raises NotImplementedError pointing at
+        Task 24 (dataloader must produce `labels` mask) and Task 33 (L5 eval dry-run will provide
+        a real fixture and complete this method).
         """
-        # Find action tokens in output, group by chunk, decode each chunk via ActionTokenizer
-        # ... port from base_runner.py
-        raise NotImplementedError("Implement using ActionTokenizer.decode pattern")
+        action_tokenizer = ActionTokenizer(self.qwen_vl_interface.tokenizer)
+        pred_ids = head_output.predictions["token_ids"]  # (B, L)
+        H = self.action_horizon  # T
+
+        decoded = np.zeros((batch_size, H, 7), dtype=np.float32)
+        for i in range(batch_size):
+            token_ids_i = self._extract_action_tokens_for_sample(pred_ids[i], H)
+            chunk = action_tokenizer.decode(token_ids_i).reshape(H, 7)
+            decoded[i] = chunk
+        return decoded
+
+    def _extract_action_tokens_for_sample(self, pred_ids_row, action_horizon: int):
+        """Find the H*7 action token positions in pred_ids_row (a (L,) tensor).
+
+        Phase 1: requires upstream batch to provide either `labels` mask (preferred) or a
+        known `action_token_begin_id`. Wired up via Task 24 (dataloader plugin) and
+        completed via Task 33 (L5 eval dry-run).
+        """
+        raise NotImplementedError(
+            "predict_action decoding requires labels mask or action_token_begin_id "
+            "from the dataloader. See spec §4.3 — completed at Task 33 (L5 eval)."
+        )
 ```
 
 - [ ] **Step 3: Port `_decode_action_tokens` from `UamVLA/uamvla/eval_runners/base_runner.py`**
@@ -1454,12 +1478,16 @@ git commit -m "[framework] Implement UamVLA.visualize_batch dispatching to per-h
 
 ```python
     def get_lr_groups(self, lr_cfg) -> list:
+        # Exclude state_encoder params from the qwen_vl_interface group to avoid
+        # double-counting (state_encoder is a submodule of qwen_vl_interface).
+        state_enc_params = set(id(p) for p in self.qwen_vl_interface.state_encoder.parameters())
+        qwen_params = [p for p in self.qwen_vl_interface.parameters() if id(p) not in state_enc_params]
         groups = [
             {"name": "qwen_vl_interface",
-             "params": list(self.qwen_vl_interface.parameters()),
+             "params": qwen_params,
              "lr": float(lr_cfg.qwen_vl_interface)},
             {"name": "state_encoder",
-             "params": list(self.qwen_vl_interface.state_encoder.parameters()),  # state encoder lives inside backbone wrapper
+             "params": list(self.qwen_vl_interface.state_encoder.parameters()),
              "lr": float(lr_cfg.state_encoder)},
         ]
         for name, head in self.aux_heads.items():
