@@ -202,6 +202,15 @@ class baseframework(PreTrainedModel):
         out = self.qwen_vl_interface(**batch)
         return {"vlm_loss": out.loss}
 
+    def visualize_batch(self, batch: dict, n_samples: int = 1) -> dict:
+        """Default: no visualizations. Subclasses may override.
+
+        Returns dict mapping log key (e.g. "viz/pose/0") to a wandb.Image
+        or other loggable object. The trainer logs the dict via wandb.log()
+        when cfg.trainer.visualization.enabled is True.
+        """
+        return {}
+
     @classmethod
     def from_pretrained(
         cls,
