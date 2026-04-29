@@ -76,8 +76,15 @@ def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
 
 
 def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
-    """Set optimizer and scheduler."""
-    param_groups = build_param_lr_groups(model=model, cfg=cfg)
+    """Set optimizer and scheduler.
+
+    Frameworks may declare their own LR group routing via a get_lr_groups(lr_cfg)
+    method. If absent, fall back to the legacy module-name-based grouping.
+    """
+    if hasattr(model, "get_lr_groups"):
+        param_groups = model.get_lr_groups(cfg.trainer.learning_rate)
+    else:
+        param_groups = build_param_lr_groups(model=model, cfg=cfg)
     optimizer = torch.optim.AdamW(
         param_groups,
         lr=cfg.trainer.learning_rate.base,
