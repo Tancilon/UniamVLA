@@ -3,7 +3,7 @@ import pytest
 
 
 def test_libero_preprocessor_imports():
-    """Import the module and check known constants."""
+    pytest.importorskip("h5py", reason="h5py not installed; runs on remote")
     pytest.importorskip("libero", reason="LIBERO benchmark not installed; runs on remote")
     from tools.preprocess.libero_preprocessor import LiberoPreprocessor, MAX_ACTION_DIM, FRANKA_ACTION_DIM
     assert MAX_ACTION_DIM == 24
@@ -11,7 +11,7 @@ def test_libero_preprocessor_imports():
 
 
 def test_libero_preprocessor_construct_no_env():
-    """Construct without target resolver — __init__ should not require LIBERO/MuJoCo."""
+    pytest.importorskip("h5py", reason="h5py not installed; runs on remote")
     pytest.importorskip("libero", reason="LIBERO benchmark not installed; runs on remote")
     from tools.preprocess.libero_preprocessor import LiberoPreprocessor
     p = LiberoPreprocessor(suite="libero_spatial", target_object_keyword=None, target_resolver=None)
