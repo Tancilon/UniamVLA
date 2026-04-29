@@ -16,3 +16,10 @@ def test_libero_preprocessor_construct_no_env():
     from tools.preprocess.libero_preprocessor import LiberoPreprocessor
     p = LiberoPreprocessor(suite="libero_spatial", target_object_keyword=None, target_resolver=None)
     assert p.suite == "libero_spatial"
+
+
+def test_calvin_preprocessor_imports():
+    """CALVIN runs only in calvin_env conda — skip on Mac local."""
+    pytest.importorskip("calvin_env", reason="CALVIN runs on remote in calvin_env conda")
+    from tools.preprocess.calvin_preprocessor import CalvinPreprocessor
+    assert CalvinPreprocessor is not None
