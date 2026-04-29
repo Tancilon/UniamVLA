@@ -312,6 +312,20 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
+                viz_cfg = getattr(self.config.trainer, "visualization", None) or {}
+                if viz_cfg.get("enabled", False):
+                    every = int(viz_cfg.get("train_every_n_steps", 1000))
+                    if self.completed_steps % every == 0 and self.accelerator.is_main_process:
+                        unwrapped = self.accelerator.unwrap_model(self.model)
+                        if hasattr(unwrapped, "visualize_batch"):
+                            try:
+                                viz_imgs = unwrapped.visualize_batch(
+                                    batch_vla, n_samples=int(viz_cfg.get("num_samples", 1)),
+                                )
+                                if viz_imgs:
+                                    wandb.log(viz_imgs, step=self.completed_steps)
+                            except Exception as e:
+                                logger.warning(f"visualize_batch failed at step {self.completed_steps}: {e}")
 
             if self.accelerator.is_local_main_process:
                 progress_bar.set_postfix(
