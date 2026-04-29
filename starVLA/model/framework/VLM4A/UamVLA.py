@@ -323,5 +323,36 @@ class UamVLA(baseframework):
             "See docs/superpowers/specs/2026-04-29-starvla-migration-design.md §4.3."
         )
 
-    # TODO(Task 20): implement visualize_batch(examples, outputs)
+    def visualize_batch(self, batch: dict, n_samples: int = 1) -> dict:
+        """Iterate aux heads and call .visualize() on each, gathering wandb.Image entries."""
+        out = {}
+        # Recompute hidden states (the trainer doesn't always persist them)
+        hidden = self._backbone_forward_for_viz(batch)
+        for name, head in self.aux_heads.items():
+            if not hasattr(head, "visualize"):
+                continue
+            mask = batch.get(f"{name}_mask")
+            if mask is None or mask.any():
+                imgs = head.visualize(hidden, batch, mask, num_samples=n_samples)
+                for i, img in enumerate(imgs):
+                    out[f"viz/{name}/{i}"] = img
+        return out
+
+    def _backbone_forward_for_viz(self, batch):
+        """Run backbone forward on a viz batch — returns hidden states only."""
+        if "examples" in batch:
+            from starVLA.model.modules.uamvla.collator_helpers import stack_canonical
+            examples = batch["examples"]
+            qwen_inputs = self.qwen_vl_interface.build_inputs(
+                images=[e["image"] for e in examples],
+                instructions=[e["lang"] for e in examples],
+                canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
+            )
+        else:
+            # Assume batch is a pre-stacked dict already compatible with backbone forward
+            qwen_inputs = batch
+        with torch.no_grad():
+            backbone_out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
+        return backbone_out.hidden_states[-1]
+
     # TODO(Task 21): implement get_lr_groups() and supports_training_tag(tag)
