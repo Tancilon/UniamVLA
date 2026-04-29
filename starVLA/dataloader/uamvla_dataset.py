@@ -1,0 +1,194 @@
+# starVLA/dataloader/uamvla_dataset.py
+"""UamVLA dataloader plugin: reads UamVLA preprocessor JSONL → starVLA examples list.
+
+Plugin entry: get_vla_dataset(data_cfg) — invoked by starVLA trainer when
+datasets.vla_data.dataset_py == "uamvla_dataset".
+
+Spec: docs/superpowers/specs/2026-04-29-starvla-migration-design.md §5
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+import yaml
+from PIL import Image
+from torch.utils.data import Dataset
+
+from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment_config
+from starVLA.utils.point_cloud import clean_point_cloud
+
+
+REQUIRED_OPTIONAL_FIELDS = ("image_target", "image_future", "point_cloud")
+
+
+DATASET_NAMED_MIXTURES = {
+    "libero_uamvla": [
+        # (data_subdir, weight, embodiment_tag)
+        ("libero_spatial", 1.0, "franka_libero"),
+        # Phase 2: + libero_object, libero_goal, libero_10
+    ],
+}
+
+
+class UamVLADataset(Dataset):
+    """Read UamVLA JSONL → produce starVLA-compatible examples dict per __getitem__."""
+
+    def __init__(
+        self,
+        data_root: Path | str,
+        embodiment: str = "franka_libero",
+        action_horizon: int = 8,
+        max_samples: Optional[int] = None,
+        transforms=None,
+    ):
+        self.data_root = Path(data_root)
+        self.embodiment = embodiment
+        self.action_horizon = action_horizon
+        self.transforms = transforms
+
+        # Load samples
+        with open(self.data_root / "data.jsonl") as f:
+            all_samples = [json.loads(l) for l in f if l.strip()]
+        # Filter to those with required optional fields (mirrors UamVLA base_dataset.py:46-55)
+        self.samples = [s for s in all_samples
+                        if all(k in s for k in REQUIRED_OPTIONAL_FIELDS)] or all_samples
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+        # Load stats
+        with open(self.data_root / "statistics.yaml") as f:
+            self.stats = yaml.safe_load(f)
+        emb_stats = self.stats["embodiment_stats"][embodiment]
+        self.action_min = np.array(emb_stats["action_min_bound"], dtype=np.float32)
+        self.action_max = np.array(emb_stats["action_max_bound"], dtype=np.float32)
+        self.view_names = list(self.stats.get("view_names", ["static", "wrist"]))
+
+        # Embodiment adapter (stateless singleton)
+        self.adapter = get_embodiment_config(embodiment)["adapter"]
+
+        # Episode index for action chunk slicing
+        self._episode_index = {(s["episode_id"], int(s["step_idx"])): i
+                               for i, s in enumerate(self.samples)}
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx) -> dict:
+        raw = self.samples[idx]
+
+        # Load multi-view images
+        images = []
+        for img_path in raw["image"]:
+            img = Image.open(self.data_root / img_path).convert("RGB")
+            if self.transforms:
+                img = self.transforms(img)
+            images.append(img)
+
+        # Action chunk (H, 7), normalized
+        action, action_mask = self._slice_action_chunk(raw)
+
+        # Canonical state via adapter
+        canonical_state = self.adapter.to_canonical(raw)
+
+        sample = {
+            "image": images,
+            "lang": raw["instruction"],
+            "action": action,
+            "action_mask": action_mask,
+            "canonical_state": canonical_state,
+            "embodiment": self.embodiment,
+            "view_names": self.view_names,
+        }
+
+        # Optional aux head targets (loaded if present in JSONL)
+        self._load_aux_targets(raw, sample)
+        return sample
+
+    def _slice_action_chunk(self, raw):
+        H = self.action_horizon
+        eid = raw["episode_id"]
+        t = int(raw["step_idx"])
+        T = int(raw["total_steps"])
+        action = np.zeros((H, 7), dtype=np.float32)
+        mask = np.zeros((H, 7), dtype=np.int64)
+
+        for k in range(H):
+            future_t = t + k
+            if future_t >= T:
+                break
+            row_idx = self._episode_index.get((eid, future_t))
+            if row_idx is None:
+                break
+            future_raw = self.samples[row_idx]
+            # Trim 24D → 7D, then min-max normalize to [-1, 1]
+            raw_action = np.array(future_raw["action"][:7], dtype=np.float32)
+            normalized = self._normalize_action(raw_action)
+            action[k] = normalized
+            mask[k] = np.array(future_raw["action_mask"][:7], dtype=np.int64)
+        return torch.tensor(action, dtype=torch.float32), torch.tensor(mask, dtype=torch.long)
+
+    def _normalize_action(self, action):
+        """min-max → [-1, 1]."""
+        denom = (self.action_max - self.action_min) + 1e-8
+        return 2.0 * (action - self.action_min) / denom - 1.0
+
+    def _load_aux_targets(self, raw, sample):
+        """Load image_target / image_future / point_cloud / pose_gt / static_cam_extrinsic if present."""
+        if "image_target" in raw and raw["image_target"]:
+            try:
+                img = Image.open(self.data_root / raw["image_target"]).convert("RGB")
+                if self.transforms:
+                    img = self.transforms(img)
+                sample["image_target"] = img
+            except FileNotFoundError:
+                pass
+        if "image_future" in raw and raw["image_future"]:
+            try:
+                img = Image.open(self.data_root / raw["image_future"]).convert("RGB")
+                if self.transforms:
+                    img = self.transforms(img)
+                sample["image_future"] = img
+            except FileNotFoundError:
+                pass
+        if "pose_6d" in raw:
+            sample["pose_gt"] = {
+                "rotation":    torch.tensor(raw["pose_6d"]["rotation"], dtype=torch.float32),
+                "translation": torch.tensor(raw["pose_6d"]["translation"], dtype=torch.float32),
+            }
+        if "static_cam_extrinsic" in raw:
+            rot_flat = torch.tensor(raw["static_cam_extrinsic"]["rotation"], dtype=torch.float32)
+            sample["static_cam_extrinsic"] = {
+                "rotation": rot_flat.view(3, 3),
+                "translation": torch.tensor(raw["static_cam_extrinsic"]["translation"], dtype=torch.float32),
+            }
+        if "point_cloud" in raw and raw["point_cloud"]:
+            try:
+                pts = np.load(self.data_root / raw["point_cloud"])
+                pts = clean_point_cloud(pts)
+                sample["point_cloud"] = torch.tensor(pts, dtype=torch.float32)
+            except FileNotFoundError:
+                pass
+
+
+def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
+    """starVLA plugin entry point. Returns a Dataset that yields starVLA examples dicts."""
+    # data_cfg.data_mix is the mixture name; resolve to subdirs
+    data_root = Path(data_cfg.data_root_dir)
+    mixture = DATASET_NAMED_MIXTURES.get(data_cfg.data_mix)
+    if mixture is None:
+        raise ValueError(f"Unknown data_mix '{data_cfg.data_mix}'. Available: {list(DATASET_NAMED_MIXTURES)}")
+
+    # Phase 1: single embodiment, single subdir; multi-subdir support deferred
+    if len(mixture) == 1:
+        subdir, _weight, embodiment = mixture[0]
+        return UamVLADataset(
+            data_root=data_root / subdir,
+            embodiment=embodiment,
+            action_horizon=int(data_cfg.get("action_horizon", 8)),
+        )
+    # Phase 2: ConcatDataset across multiple subdirs with weights
+    raise NotImplementedError("Multi-subdir mixture deferred to Phase 2")
