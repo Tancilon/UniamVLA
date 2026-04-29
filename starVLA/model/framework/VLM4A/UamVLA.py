@@ -233,6 +233,95 @@ class UamVLA(baseframework):
 
         return batch_dict
 
-    # TODO(Task 19): implement predict_action(examples) → {"normalized_actions": ...}
+    @torch.inference_mode()
+    def predict_action(self, examples, **kwargs) -> dict:
+        """Eval-time inference: run backbone + action head only; returns normalized actions.
+
+        Only the action head runs at inference time — pose, future, and recon
+        heads are skipped.
+
+        Args:
+            examples: a single example dict or a list of example dicts.  Each
+                dict must have:
+                  - "image"  : List[PIL.Image] or np.ndarray (multi-view per §4.6)
+                  - "lang"   : str instruction
+                  - "canonical_state": canonical state tensor / array
+
+        Returns:
+            {"normalized_actions": np.ndarray of shape (B, T, 7)}
+        """
+        if not isinstance(examples, list):
+            examples = [examples]
+
+        from deployment.model_server.tools.image_tools import to_pil_preserve
+
+        # e["image"] is List[PIL.Image] per spec §4.6 (multi-view).
+        # to_pil_preserve handles nested lists natively (recurses into list).
+        qwen_inputs = self.qwen_vl_interface.build_inputs(
+            images=[[to_pil_preserve(img) for img in e["image"]] for e in examples],
+            instructions=[e["lang"] for e in examples],
+            canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
+        )
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            backbone_out = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hidden = backbone_out.hidden_states[-1]  # (B, L, H)
+
+        pred = self.aux_heads["action"].predict(hidden, batch=qwen_inputs)
+        normalized_actions = self._decode_action_tokens(pred, batch_size=len(examples))
+
+        return {"normalized_actions": normalized_actions}
+
+    def _decode_action_tokens(self, head_output, batch_size: int):
+        """Decode (B, L) argmax token ids → (B, T, 7) normalized actions as np.ndarray.
+
+        head_output is HeadOutput(predictions={"token_ids": Tensor(B, L)}) from
+        ActionHead.predict.
+
+        Phase 1 note: actual decoding is gated on Task 24 (dataloader labels
+        wiring) and Task 33 (L5 eval dry-run).  _extract_action_tokens_for_sample
+        raises NotImplementedError until that infrastructure exists.
+        """
+        import numpy as np
+        from starVLA.model.modules.uamvla.data.action_tokenizer import ActionTokenizer
+
+        # Lazy-construct ActionTokenizer with the backbone's tokenizer.
+        # No state stored on UamVLA — keeps checkpoint reload behaviour clean.
+        action_tokenizer = ActionTokenizer(self.qwen_vl_interface.tokenizer)
+
+        pred_ids = head_output.predictions["token_ids"]  # (B, L)
+        H = self.action_horizon  # T
+
+        decoded = np.zeros((batch_size, H, 7), dtype=np.float32)
+        for i in range(batch_size):
+            token_ids_i = self._extract_action_tokens_for_sample(pred_ids[i], H)  # length H*7 list
+            chunk = action_tokenizer.decode(token_ids_i).reshape(H, 7)
+            decoded[i] = chunk
+        return decoded
+
+    def _extract_action_tokens_for_sample(self, pred_ids_row, action_horizon: int):
+        """Find the action_horizon*7 action token positions in pred_ids_row ((L,) tensor).
+
+        Phase 1 strategy (in priority order):
+          1. Use labels mask from upstream batch (labels != -100 marks action positions).
+             Requires Task 24 (dataloader plugin) to wire up labels at eval time.
+          2. Scan input_ids for action_token_begin_id sentinel, then take the
+             next action_horizon*7 positions.
+             Requires action_token_begin_id to be correctly set in config.
+
+        Neither is wired up yet.  This method raises NotImplementedError until
+        Task 24 + Task 33 provide the supporting infrastructure.  Do not attempt
+        a heuristic implementation here — see the migration design doc §4.3.
+        """
+        raise NotImplementedError(
+            "predict_action decoding requires labels mask or action_token_begin_id "
+            "from the dataloader. Wire up via Task 24 (dataloader plugin) and Task 33 (L5 eval). "
+            "See docs/superpowers/specs/2026-04-29-starvla-migration-design.md §4.3."
+        )
+
     # TODO(Task 20): implement visualize_batch(examples, outputs)
     # TODO(Task 21): implement get_lr_groups() and supports_training_tag(tag)
