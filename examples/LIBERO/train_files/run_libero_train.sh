@@ -42,10 +42,9 @@ accelerate launch \
   --datasets.vla_data.per_device_batch_size 2 \
   --trainer.vla_data.video_backend torchvision_av \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.max_train_steps 80000 \
-  --trainer.save_interval 10000 \
-  --trainer.logging_frequency 100 \
-  --trainer.eval_interval 100 \
+  --trainer.save_interval 2000 \
+  --trainer.logging_frequency 10 \
+  --trainer.eval_interval 5000 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project uamvla \
