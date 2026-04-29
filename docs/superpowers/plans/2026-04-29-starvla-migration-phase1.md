@@ -2003,7 +2003,7 @@ git commit -m "[trainer] Export dataset_statistics.json on init for eval client 
 **Files:**
 - Create: `starVLA/config/training/uamvla_libero.yaml`
 
-- [ ] **Step 1: Write the YAML**
+- [x] **Step 1: Write the YAML**
 
 Copy the full YAML from spec §6 verbatim into `starVLA/config/training/uamvla_libero.yaml`. Verify structure with:
 
@@ -2012,7 +2012,7 @@ python -c "from omegaconf import OmegaConf; cfg = OmegaConf.load('starVLA/config
 ```
 Expected: `UamVLA uamvla_dataset 100000`
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add starVLA/config/training/uamvla_libero.yaml
@@ -2026,16 +2026,16 @@ git commit -m "[config] Add uamvla_libero.yaml Phase 1 training config"
 **Files:**
 - Modify: `examples/LIBERO/train_files/run_libero_train.sh`
 
-- [ ] **Step 1: Edit the marked block**
+- [x] **Step 1: Edit the marked block**
 
 Apply the diff from spec §8.3 (Framework_name=UamVLA, base_vlm, config_yaml, libero_data_root, data_mix, run_id, per_device_batch_size, wandb_project, wandb_entity).
 
-- [ ] **Step 2: Smoke check the script parses**
+- [x] **Step 2: Smoke check the script parses**
 
 Run: `bash -n examples/LIBERO/train_files/run_libero_train.sh`
 Expected: no syntax error.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add examples/LIBERO/train_files/run_libero_train.sh
@@ -2050,17 +2050,17 @@ git commit -m "[examples] Configure run_libero_train.sh for UamVLA framework"
 - Modify: `examples/LIBERO/eval_files/run_policy_server.sh`
 - Modify: `examples/LIBERO/eval_files/eval_libero.sh`
 
-- [ ] **Step 1: Apply diffs from spec §8.3**
+- [x] **Step 1: Apply diffs from spec §8.3**
 
 For server: STARVLA_DIR, LIBERO_HOME, STARVLA_PYTHON, LIBERO_PYTHON, CKPT.
 For client: STARVLA_DIR, CKPT, LIBERO_HOME, LIBERO_Python, task_suite_name=libero_spatial.
 
-- [ ] **Step 2: Smoke check**
+- [x] **Step 2: Smoke check**
 
 Run: `bash -n examples/LIBERO/eval_files/run_policy_server.sh examples/LIBERO/eval_files/eval_libero.sh`
 Expected: no syntax errors.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add examples/LIBERO/eval_files/run_policy_server.sh examples/LIBERO/eval_files/eval_libero.sh
