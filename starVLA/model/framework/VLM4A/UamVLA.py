@@ -93,6 +93,23 @@ class UamVLA(baseframework):
         self.qwen_vl_interface = build_uamvla_backbone(self.config)
         hidden_size = self.qwen_vl_interface.config.hidden_size
 
+        # Build ActionTokenizer and resize embedding table to include <ACT_i> tokens.
+        from starVLA.model.modules.uamvla.data.action_tokenizer import ActionTokenizer
+        _tokenizer = self.qwen_vl_interface.get_tokenizer()
+        _n_bins = int(self.config.framework.action_model.get("num_bins", 256))
+        self.action_tokenizer = ActionTokenizer(_tokenizer, n_bins=_n_bins)
+        try:
+            self.qwen_vl_interface.resize_token_embeddings(len(_tokenizer))
+        except TypeError:
+            # _tokenizer is a mock or does not support len(); skip resize.
+            pass
+
+        # Resolve action_token_begin_id from the newly added <ACT_0> token.
+        try:
+            _act0_id = int(_tokenizer.convert_tokens_to_ids("<ACT_0>"))
+        except (TypeError, ValueError):
+            _act0_id = 0
+
         # Aux heads
         from starVLA.model.modules.uamvla.components.pixel_decoder.vae import VAEPixelDecoder
         fut_on = self.config.framework.aux_heads.get("future", {}).get("enabled", True)
@@ -109,7 +126,7 @@ class UamVLA(baseframework):
             vae=self.vae,
             vision_extra=vision_extra,
             lm_head=self.qwen_vl_interface.get_lm_head(),
-            action_token_begin_id=self.config.framework.get("action_token_begin_id", 0),
+            action_token_begin_id=_act0_id,
         ))
 
         self.action_horizon = int(self.config.framework.action_model.future_action_window_size) + 1
@@ -129,6 +146,71 @@ class UamVLA(baseframework):
             "n_patches": ppv,
             "target_resize": side * 16,  # 320 for ppv=400
         }
+
+    def _build_labels_and_extend(
+        self, examples: list, qwen_inputs: dict
+    ) -> tuple[dict, torch.Tensor]:
+        """Append action tokens to prompt inputs and build labels tensor.
+
+        Returns:
+            extended_qwen_inputs: copy of qwen_inputs with input_ids and
+                attention_mask extended by H*7 positions per sample.
+            labels: (B, L_total) — -100 at prompt+padding positions,
+                action token IDs at action positions (or -100 for padded timesteps).
+        """
+        B = len(examples)
+        H = self.action_horizon          # total action steps
+        n_act = H * 7                    # tokens per sample
+        device = qwen_inputs["input_ids"].device
+        pad_id = int(
+            self.qwen_vl_interface.tokenizer.pad_token_id
+            if self.qwen_vl_interface.tokenizer is not None
+            and self.qwen_vl_interface.tokenizer.pad_token_id is not None
+            else 0
+        )
+
+        prompt_ids = qwen_inputs["input_ids"]       # (B, L_p)
+        prompt_mask = qwen_inputs["attention_mask"] # (B, L_p)
+        L_p = prompt_ids.shape[1]
+        L_total = L_p + n_act
+
+        new_ids = torch.full((B, L_total), pad_id, dtype=torch.long, device=device)
+        new_mask = torch.zeros(B, L_total, dtype=torch.long, device=device)
+        labels = torch.full((B, L_total), -100, dtype=torch.long, device=device)
+
+        for i, ex in enumerate(examples):
+            real_len = int(prompt_mask[i].sum().item())
+            # Copy real prompt tokens (right-padded layout from build_inputs)
+            new_ids[i, :real_len] = prompt_ids[i, :real_len]
+            new_mask[i, :real_len] = 1
+
+            action = ex["action"]         # (H, 7) float32 tensor
+            action_msk = ex["action_mask"]  # (H, 7) long tensor
+
+            tok_ids: list[int] = []
+            lbl_ids: list[int] = []
+            for h in range(H):
+                step_ids = self.action_tokenizer.encode(action[h].numpy())  # list[int] len 7
+                tok_ids.extend(step_ids)
+                # Padded timestep (all-zero mask row) → -100 in labels
+                step_valid = bool(action_msk[h].any().item())
+                lbl_ids.extend(tid if step_valid else -100 for tid in step_ids)
+
+            act_tensor = torch.tensor(tok_ids, dtype=torch.long, device=device)
+            lbl_tensor = torch.tensor(lbl_ids, dtype=torch.long, device=device)
+
+            new_ids[i, real_len:real_len + n_act] = act_tensor
+            new_mask[i, real_len:real_len + n_act] = 1
+            labels[i, real_len:real_len + n_act] = lbl_tensor
+
+        # Extend mm_token_type_ids if present (action positions get type 0 = text)
+        extended = {**qwen_inputs, "input_ids": new_ids, "attention_mask": new_mask}
+        if "mm_token_type_ids" in qwen_inputs and qwen_inputs["mm_token_type_ids"] is not None:
+            ext_mm = torch.zeros(B, L_total, dtype=qwen_inputs["mm_token_type_ids"].dtype, device=device)
+            ext_mm[:, :L_p] = qwen_inputs["mm_token_type_ids"]
+            extended["mm_token_type_ids"] = ext_mm
+
+        return extended, labels
 
     def forward(self, examples: List[dict], **kwargs) -> dict:
         """Training forward.
@@ -153,6 +235,8 @@ class UamVLA(baseframework):
             canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
         )
 
+        qwen_inputs, labels = self._build_labels_and_extend(examples, qwen_inputs)
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             backbone_out = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -161,7 +245,7 @@ class UamVLA(baseframework):
             )
             hidden = backbone_out.hidden_states[-1]  # (B, L, H)
 
-        batch_dict = self._collate_for_heads(examples, qwen_inputs)
+        batch_dict = self._collate_for_heads(examples, qwen_inputs, labels=labels)
 
         total = torch.tensor(0.0, device=hidden.device, requires_grad=True)
         log_metrics: dict = {}
@@ -180,7 +264,7 @@ class UamVLA(baseframework):
 
         return {**log_metrics, "action_loss": total}
 
-    def _collate_for_heads(self, examples: List[dict], qwen_inputs: dict) -> dict:
+    def _collate_for_heads(self, examples: List[dict], qwen_inputs: dict, labels=None) -> dict:
         """Stack per-sample optional fields into batch tensors with masks.
 
         Combines:
@@ -193,17 +277,14 @@ class UamVLA(baseframework):
             * static cam extrinsic (nested dict),
             * head-mask aliases (``recon_mask``, ``future_mask``).
 
-        ``labels`` is read via ``qwen_inputs.get("labels")``: the current
-        Qwen3-VL ``build_inputs`` does NOT emit labels (action-token labels
-        are produced by the dataloader's collate path or the ActionHead's
-        own labelization step — Task 24 territory). ``None`` flows through
-        the batch dict and ActionHead.compute_loss will fail if it tries to
-        read ``batch["labels"]`` on real training data; that gap is resolved
-        in Task 24 / Task 31, not here.
+        ``labels`` is the (B, L_total) tensor produced by
+        ``_build_labels_and_extend``: -100 at prompt+padding positions and
+        action token IDs at action positions. It is passed in directly rather
+        than read from ``qwen_inputs`` (which never carries labels).
         """
         batch_dict: dict = {
             "input_ids":   qwen_inputs["input_ids"],
-            "labels":      qwen_inputs.get("labels"),
+            "labels":      labels,
             "image":       qwen_inputs.get("pixel_values"),
             "instruction": [e["lang"] for e in examples],
         }
