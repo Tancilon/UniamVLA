@@ -174,6 +174,14 @@ class UamVLADataset(Dataset):
                 pass
 
 
+def collate_fn(batch):
+    """Pass through. The framework's forward() handles stacking via collator_helpers.
+
+    starVLA convention (see lerobot_datasets.py:19-20): trivial list passthrough.
+    """
+    return batch
+
+
 def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
     """starVLA plugin entry point. Returns a Dataset that yields starVLA examples dicts."""
     # data_cfg.data_mix is the mixture name; resolve to subdirs

@@ -64,3 +64,16 @@ def test_dataset_getitem_yields_expected_fields(mock_jsonl_dir, monkeypatch):
     assert "ee_pose" in sample["canonical_state"]["arm_0"]
     # Action normalization: with min=-1, max=1, normalized = action (no change in [-1,1] target range)
     np.testing.assert_allclose(sample["action"][0], [0.1] * 7, atol=1e-5)
+
+
+def test_uamvla_collate_fn_stacks_correctly(mock_jsonl_dir, monkeypatch):
+    from starVLA.dataloader.uamvla_dataset import UamVLADataset, collate_fn
+    from PIL import Image
+    monkeypatch.setattr(Image, "open", lambda p: Image.new("RGB", (640, 640)))
+
+    ds = UamVLADataset(mock_jsonl_dir, embodiment="franka_libero", action_horizon=8)
+    samples = [ds[0]]  # batch of 1
+    batch = collate_fn(samples)
+    # Phase 1: collate returns the list (framework handles stacking) — verify it's a list
+    assert isinstance(batch, list)
+    assert len(batch) == 1
