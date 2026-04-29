@@ -19,6 +19,12 @@ from starVLA.model.modules.uamvla.aux_heads.action_head import ActionHead
 from starVLA.model.modules.uamvla.aux_heads.pose_head import PoseHead
 from starVLA.model.modules.uamvla.aux_heads.future_head import FutureHead
 from starVLA.model.modules.uamvla.aux_heads.recon_head import ReconHead
+from starVLA.model.modules.uamvla.collator_helpers import (
+    stack_canonical,
+    stack_optional_tensor_fields,
+    stack_pose_gt,
+    stack_static_cam_extrinsic,
+)
 
 
 @dataclass
@@ -124,7 +130,109 @@ class UamVLA(baseframework):
             "target_resize": side * 16,  # 320 for ppv=400
         }
 
-    # TODO(Task 18): implement forward(examples) → {"action_loss": ..., ...per-head metrics}
+    def forward(self, examples: List[dict], **kwargs) -> dict:
+        """Training forward.
+
+        Aux head losses are summed into a single ``"action_loss"`` entry so
+        the starVLA trainer (which only knows about ``action_loss``) can
+        backprop through the multi-head model. Per-head losses + metrics
+        are also returned (detached) for logging.
+
+        Args:
+            examples: per-sample list of dicts. Each example carries the
+                inputs the backbone + heads need (image, lang,
+                canonical_state, plus optional fields like image_target,
+                image_future, point_cloud, pose_gt, static_cam_extrinsic).
+
+        Returns:
+            ``{"action_loss": Tensor, "<head>_loss": Tensor, "<head>_<metric>": ...}``
+        """
+        qwen_inputs = self.qwen_vl_interface.build_inputs(
+            images=[e["image"] for e in examples],
+            instructions=[e["lang"] for e in examples],
+            canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
+        )
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            backbone_out = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hidden = backbone_out.hidden_states[-1]  # (B, L, H)
+
+        batch_dict = self._collate_for_heads(examples, qwen_inputs)
+
+        total = torch.tensor(0.0, device=hidden.device, requires_grad=True)
+        log_metrics: dict = {}
+        for name, head in self.aux_heads.items():
+            mask = batch_dict.get(f"{name}_mask")
+            if mask is None:
+                mask = torch.ones(
+                    hidden.shape[0], dtype=torch.bool, device=hidden.device,
+                )
+            out = head.compute_loss(hidden, batch_dict, mask=mask)
+            if out.loss is not None:
+                total = total + out.loss
+                log_metrics[f"{name}_loss"] = out.loss.detach()
+            for mk, mv in out.metrics.items():
+                log_metrics[f"{name}_{mk}"] = mv
+
+        return {**log_metrics, "action_loss": total}
+
+    def _collate_for_heads(self, examples: List[dict], qwen_inputs: dict) -> dict:
+        """Stack per-sample optional fields into batch tensors with masks.
+
+        Combines:
+            * the qwen-side input ids / labels / pixel_values that
+              ``build_inputs`` already produced,
+            * the per-sample optional tensor fields
+              (``image_target``, ``image_future``, ``point_cloud``)
+              with batch-zero-padding + masks,
+            * pose targets (nested dict),
+            * static cam extrinsic (nested dict),
+            * head-mask aliases (``recon_mask``, ``future_mask``).
+
+        ``labels`` is read via ``qwen_inputs.get("labels")``: the current
+        Qwen3-VL ``build_inputs`` does NOT emit labels (action-token labels
+        are produced by the dataloader's collate path or the ActionHead's
+        own labelization step — Task 24 territory). ``None`` flows through
+        the batch dict and ActionHead.compute_loss will fail if it tries to
+        read ``batch["labels"]`` on real training data; that gap is resolved
+        in Task 24 / Task 31, not here.
+        """
+        batch_dict: dict = {
+            "input_ids":   qwen_inputs["input_ids"],
+            "labels":      qwen_inputs.get("labels"),
+            "image":       qwen_inputs.get("pixel_values"),
+            "instruction": [e["lang"] for e in examples],
+        }
+
+        # Optional tensor fields with batch-zero-padding + masks.
+        batch_dict.update(stack_optional_tensor_fields(
+            examples, ["image_target", "image_future", "point_cloud"],
+        ))
+
+        # Aux head mask aliases (heads read f"{head_name}_mask").
+        if "image_target_mask" in batch_dict:
+            batch_dict["recon_mask"] = batch_dict["image_target_mask"]
+        if "image_future_mask" in batch_dict:
+            batch_dict["future_mask"] = batch_dict["image_future_mask"]
+
+        # Pose targets (nested dict) + pose_mask.
+        pose_out = stack_pose_gt(examples)
+        if pose_out is not None:
+            batch_dict["pose_gt"] = pose_out["pose_gt"]
+            batch_dict["pose_mask"] = pose_out["pose_mask"]
+
+        # Static cam extrinsic (per-sample, optional).
+        cam_out = stack_static_cam_extrinsic(examples)
+        if cam_out is not None:
+            batch_dict["static_cam_extrinsic"] = cam_out["static_cam_extrinsic"]
+            batch_dict["static_cam_extrinsic_mask"] = cam_out["static_cam_extrinsic_mask"]
+
+        return batch_dict
+
     # TODO(Task 19): implement predict_action(examples) → {"normalized_actions": ...}
     # TODO(Task 20): implement visualize_batch(examples, outputs)
     # TODO(Task 21): implement get_lr_groups() and supports_training_tag(tag)
