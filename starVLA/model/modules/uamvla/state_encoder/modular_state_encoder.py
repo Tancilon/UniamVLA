@@ -15,6 +15,7 @@ from starVLA.model.modules.uamvla.state_encoder.limb_encoders import (
     EEPoseEncoder,
     JointEncoder,
 )
+from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment_config
 
 
 class ModularStateEncoder(nn.Module):
@@ -28,10 +29,6 @@ class ModularStateEncoder(nn.Module):
         self.embodiment = embodiment
         self.hidden_dim = hidden_dim
 
-        # Lazy import: embodiment_registry is ported in Task 14. Importing at
-        # construction time (rather than module load) lets this module be imported
-        # in tests / by tooling before the data submodule is available.
-        from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment_config
         config = get_embodiment_config(embodiment)
         # Shallow copy to prevent in-place mutation from corrupting the shared
         # registry list (see embodiment_registry.py NOTE).
