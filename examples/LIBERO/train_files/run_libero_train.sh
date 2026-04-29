@@ -40,7 +40,6 @@ accelerate launch \
   --datasets.vla_data.data_root_dir ${libero_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
   --datasets.vla_data.per_device_batch_size 2 \
-  --trainer.vla_data.video_backend torchvision_av \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.save_interval 2000 \
   --trainer.logging_frequency 10 \
