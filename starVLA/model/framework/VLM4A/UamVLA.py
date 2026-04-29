@@ -96,6 +96,7 @@ class UamVLA(baseframework):
         # Build ActionTokenizer and resize embedding table to include <ACT_i> tokens.
         from starVLA.model.modules.uamvla.data.action_tokenizer import ActionTokenizer
         _tokenizer = self.qwen_vl_interface.get_tokenizer()
+        self._tokenizer = _tokenizer
         _n_bins = int(self.config.framework.action_model.get("num_bins", 256))
         self.action_tokenizer = ActionTokenizer(_tokenizer, n_bins=_n_bins)
         try:
@@ -160,12 +161,13 @@ class UamVLA(baseframework):
         """
         B = len(examples)
         H = self.action_horizon          # total action steps
-        n_act = H * 7                    # tokens per sample
+        _act_dim = int(self.config.framework.embodiment.get("action_dim", 7))
+        n_act = H * _act_dim             # tokens per sample
         device = qwen_inputs["input_ids"].device
         pad_id = int(
-            self.qwen_vl_interface.tokenizer.pad_token_id
-            if self.qwen_vl_interface.tokenizer is not None
-            and self.qwen_vl_interface.tokenizer.pad_token_id is not None
+            self._tokenizer.pad_token_id
+            if self._tokenizer is not None
+            and self._tokenizer.pad_token_id is not None
             else 0
         )
 
@@ -190,11 +192,11 @@ class UamVLA(baseframework):
             tok_ids: list[int] = []
             lbl_ids: list[int] = []
             for h in range(H):
-                step_ids = self.action_tokenizer.encode(action[h].numpy())  # list[int] len 7
+                step_ids = self.action_tokenizer.encode(action[h].detach().cpu().numpy())  # list[int] len 7
                 tok_ids.extend(step_ids)
                 # Padded timestep (all-zero mask row) → -100 in labels
                 step_valid = bool(action_msk[h].any().item())
-                lbl_ids.extend(tid if step_valid else -100 for tid in step_ids)
+                lbl_ids.extend(step_ids if step_valid else [-100] * len(step_ids))
 
             act_tensor = torch.tensor(tok_ids, dtype=torch.long, device=device)
             lbl_tensor = torch.tensor(lbl_ids, dtype=torch.long, device=device)
@@ -368,11 +370,8 @@ class UamVLA(baseframework):
         raises NotImplementedError until that infrastructure exists.
         """
         import numpy as np
-        from starVLA.model.modules.uamvla.data.action_tokenizer import ActionTokenizer
 
-        # Lazy-construct ActionTokenizer with the backbone's tokenizer.
-        # No state stored on UamVLA — keeps checkpoint reload behaviour clean.
-        action_tokenizer = ActionTokenizer(self.qwen_vl_interface.tokenizer)
+        action_tokenizer = self.action_tokenizer
 
         pred_ids = head_output.predictions["token_ids"]  # (B, L)
         H = self.action_horizon  # T

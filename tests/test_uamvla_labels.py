@@ -16,7 +16,6 @@ def mock_tokenizer_and_action_tokenizer():
     # Real tokenizer mock: add_tokens is a no-op; convert_tokens_to_ids returns sequential ints
     mock_tok = MagicMock()
     mock_tok.pad_token_id = 0
-    call_count = [0]
     def _cvt(tok_str):
         # Return a unique int per unique string, starting from 100
         if not hasattr(_cvt, '_cache'):
