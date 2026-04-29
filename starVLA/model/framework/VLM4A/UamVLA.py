@@ -355,4 +355,28 @@ class UamVLA(baseframework):
             backbone_out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
         return backbone_out.hidden_states[-1]
 
-    # TODO(Task 21): implement get_lr_groups() and supports_training_tag(tag)
+    def get_lr_groups(self, lr_cfg) -> list:
+        # Deduplicate: exclude state_encoder params from the qwen_vl_interface group
+        # to avoid double-counting (state_encoder is a submodule of qwen_vl_interface).
+        state_enc_params = set(id(p) for p in self.qwen_vl_interface.state_encoder.parameters())
+        qwen_params = [p for p in self.qwen_vl_interface.parameters() if id(p) not in state_enc_params]
+        groups = [
+            {"name": "qwen_vl_interface",
+             "params": qwen_params,
+             "lr": float(lr_cfg.qwen_vl_interface)},
+            {"name": "state_encoder",
+             "params": list(self.qwen_vl_interface.state_encoder.parameters()),
+             "lr": float(lr_cfg.state_encoder)},
+        ]
+        for name, head in self.aux_heads.items():
+            head_cfg = self.config.framework.aux_heads[name]
+            groups.append({
+                "name": f"aux_head_{name}",
+                "params": list(head.parameters()),
+                "lr": float(head_cfg.get("lr", lr_cfg.base)),
+            })
+        return groups
+
+    def supports_training_tag(self, tag: str) -> bool:
+        # Phase 1: VLA only, no VLM co-training
+        return tag == "vla"
