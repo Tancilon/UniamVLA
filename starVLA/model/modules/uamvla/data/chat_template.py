@@ -105,7 +105,7 @@ class Qwen3ChatTemplate(ChatTemplate):
             f"Robot state: {state_tokens}\n"
             f"{view_lines}\n"
             f"<|im_end|>\n"
-            f"<|im_start|>assistant\n<think>\n\n</think>\n\n{ACTION_START_TOKEN}"
+            f"<|im_start|>assistant\n{ACTION_START_TOKEN}"
         )
 
 
@@ -116,6 +116,16 @@ class Qwen3VLChatTemplate(ChatTemplate):
     ``<|vision_start|>...<|vision_end|>``. The ``<image>`` itself is later
     expanded via :func:`expand_image_placeholders_qwen3_vl` to
     ``<|image_pad|>`` * patches_per_view.
+
+    Note on the assistant prelude: we deliberately do NOT emit an empty
+    ``<think>\\n\\n</think>\\n\\n`` block before ``<|action_start|>``. That
+    pattern is a Qwen3 *text*-version mechanism for hard-disabling the
+    thinking mode (the ``enable_thinking=False`` branch of its tokenizer
+    chat_template). Qwen3-VL-Instruct's official chat_template has no such
+    branch — its assistant turn starts directly with content after
+    ``<|im_start|>assistant\\n``. Adding the empty think block here would
+    push training away from the model's pretraining distribution and
+    burn ~6 tokens per sample for no gain. Do not add it back.
     """
 
     SYSTEM_PROMPT = _VLA_SYSTEM_PROMPT
@@ -142,5 +152,5 @@ class Qwen3VLChatTemplate(ChatTemplate):
             f"Robot state: {state_tokens}\n"
             f"{view_lines}\n"
             f"<|im_end|>\n"
-            f"<|im_start|>assistant\n<think>\n\n</think>\n\n{ACTION_START_TOKEN}"
+            f"<|im_start|>assistant\n{ACTION_START_TOKEN}"
         )
