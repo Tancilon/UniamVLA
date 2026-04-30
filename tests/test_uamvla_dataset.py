@@ -1,23 +1,10 @@
 # tests/test_uamvla_dataset.py
+# Note: `sample_dataset_dir` fixture is defined in conftest.py (shared).
 import json
 import tempfile
 from pathlib import Path
 import numpy as np
 import pytest
-
-# Real test dataset (has state_stats block needed for normalization tests)
-_REAL_DATASET_DIR = Path(__file__).resolve().parent.parent / "datasets" / "uamvla_test" / "libero_spatial"
-
-
-@pytest.fixture
-def sample_dataset_dir():
-    """Return path to the real UamVLA test dataset (libero_spatial)."""
-    if not (_REAL_DATASET_DIR / "data.jsonl").exists():
-        pytest.skip(
-            f"data.jsonl not present at {_REAL_DATASET_DIR}; "
-            f"run `python tools/preprocess/run_libero_preprocess.py` to generate."
-        )
-    return _REAL_DATASET_DIR
 
 
 @pytest.fixture
