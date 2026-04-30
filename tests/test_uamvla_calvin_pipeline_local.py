@@ -334,6 +334,7 @@ def test_yaml_loadable():
     cfg = OmegaConf.load(str(yaml_path))
 
     # Substitutions vs the LIBERO clone
+    assert cfg.run_id == "uamvla_calvin_phase1", f"run_id = {cfg.run_id!r}"
     assert cfg.framework.embodiment.name == "franka_calvin", \
         f"framework.embodiment.name = {cfg.framework.embodiment.name!r}"
     assert cfg.datasets.vla_data.data_mix == "calvin_uamvla", \
