@@ -36,7 +36,7 @@ class UamVLADefaultConfig:
         "attn_implementation": "flash_attention_2",
     })
     action_model: dict = field(default_factory=lambda: {
-        "future_action_window_size": 7,
+        "future_action_window_size": 7, # action_horizon = 7 + 1 = 8
         "num_bins": 256,
         "action_dim": 7,
     })
@@ -45,8 +45,8 @@ class UamVLADefaultConfig:
     aux_heads: dict = field(default_factory=lambda: {
         "action": {"enabled": True, "loss_weight": 1.0, "lr": 1.0e-4},
         "pose":   {"enabled": True, "loss_weight": 0.5, "lr": 1.0e-4},
-        "future": {"enabled": True, "loss_weight": 0.1, "lr": 1.0e-4},
-        "recon":  {"enabled": True, "loss_weight": 0.1, "lr": 1.0e-4},
+        "future": {"enabled": True, "loss_weight": 1.0, "lr": 1.0e-4},
+        "recon":  {"enabled": True, "loss_weight": 1.0, "lr": 1.0e-4},
     })
 
 
