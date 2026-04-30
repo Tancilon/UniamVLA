@@ -57,6 +57,11 @@ def test_prefix_hidden_states_match_between_training_and_inference():
     })
     model = UamVLA(config=cfg)
     model.eval()
+    # Force fp32 across all submodules for deterministic numerical comparison.
+    # `dtype: float32` in cfg covers the backbone load, but state_encoder /
+    # aux_heads are constructed in their own __init__ paths and may default
+    # to current dtype context — this lock ensures both paths see identical numerics.
+    model.to(torch.float32)
 
     img = Image.new("RGB", (640, 640))
     example = {
@@ -86,7 +91,11 @@ def test_prefix_hidden_states_match_between_training_and_inference():
         )
         hidden_train = out_train.hidden_states[-1]  # (1, S, H)
 
-    # Path B: inference prefill via _build_prefill_generate_kwargs, then forward
+    # Path B: inference prefill via _build_prefill_generate_kwargs, then forward.
+    # Two .model hops: (1) qwen_vl_interface.model is the HF
+    # Qwen3VLForConditionalGeneration wrapper; (2) .model.model is the inner
+    # Qwen3VLModel (no lm_head). This matches what wrapper.forward does
+    # internally — see backbone_wrapper.py: `return self.model.model(...)`.
     gen_kwargs = model._build_prefill_generate_kwargs(qwen_inputs)
     with torch.no_grad():
         out_infer = model.qwen_vl_interface.model.model(
@@ -113,7 +122,10 @@ def test_prefix_hidden_states_match_between_training_and_inference():
     h_train = hidden_train[0, p, :]
     h_infer = hidden_infer[0, p, :]
 
+    diff = (h_train - h_infer).abs()
     assert torch.allclose(h_train, h_infer, atol=1e-4), (
         f"Hidden state at <|action_start|> diverges between training and inference: "
-        f"max diff = {(h_train - h_infer).abs().max().item():.6f}"
+        f"max diff = {diff.max().item():.6f}, "
+        f"mean diff = {diff.mean().item():.6f}, "
+        f"std diff = {diff.std().item():.6f}"
     )
