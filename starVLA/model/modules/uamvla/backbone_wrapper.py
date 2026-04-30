@@ -30,6 +30,7 @@ from starVLA.model.modules.uamvla.state_encoder.modular_state_encoder import (
 )
 from starVLA.model.modules.uamvla.state_encoder.special_tokens import (
     register_state_tokens,
+    register_structural_tokens,
 )
 
 logger = logging.getLogger(__name__)
@@ -500,9 +501,10 @@ def build_uamvla_backbone(cfg) -> UamVLABackboneInterface:
         processor = None
         tokenizer = AutoTokenizer.from_pretrained(base_vlm)
 
-    # Register state special tokens via shim (resizes embeddings in-place).
+    # Register state + structural special tokens via shim (resizes embeddings in-place).
     shim = _ResizeShim(qwen_model)
     register_state_tokens(tokenizer, shim)
+    register_structural_tokens(tokenizer, shim)
 
     # State encoder dim = LM hidden size.
     text_cfg = getattr(qwen_model.config, "text_config", None)
