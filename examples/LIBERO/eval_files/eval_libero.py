@@ -163,6 +163,19 @@ def eval_libero(args: Args) -> None:
                     "lang": observation["instruction"][0],
                 }
 
+                # Spec §6.2: when ModelClient is in UamVLA state-passthrough
+                # mode, hand it the four raw fields LiberoAdapter expects.
+                # robot0_joint_pos is fetched here for the first time (the
+                # 8-D `state` concat above doesn't include it). Validated by
+                # the P1 probe (tools/probes/probe_libero_obs_keys.py).
+                if getattr(client_model, "uamvla_state_enabled", False):
+                    example_dict["uamvla_raw_state"] = {
+                        "ee_pos":        np.asarray(obs["robot0_eef_pos"],        dtype=np.float32),
+                        "ee_axis_angle": _quat2axisangle(obs["robot0_eef_quat"]).astype(np.float32),
+                        "joint_pos":     np.asarray(obs["robot0_joint_pos"],      dtype=np.float32),
+                        "gripper_qpos":  np.asarray(obs["robot0_gripper_qpos"],   dtype=np.float32),
+                    }
+
                 start_time = time.time()
 
                 response = client_model.step(example=example_dict, step=step)
