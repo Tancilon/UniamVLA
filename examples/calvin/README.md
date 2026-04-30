@@ -7,6 +7,44 @@ This document describes how to **train and evaluate StarVLA models on the Calvin
 
 ---
 
+## 🛣️ Two pipelines
+
+This directory hosts **two independent training pipelines** that share only the eval scripts in `eval_files/`:
+
+| Pipeline | Format | Training entry | Training config |
+|----------|--------|----------------|-----------------|
+| **QwenPI** (existing) | LeRobot v3.0 | `run_calvin_train.sh` | `starvla_train_calvin.yaml` |
+| **UamVLA** (this section) | UAM unified format (`data.jsonl` + `statistics.yaml`) | `run_uamvla_calvin_train.sh` | `starVLA/config/training/uamvla_calvin.yaml` |
+
+The two pipelines do not share preprocessing — pick one and stay in lane.
+
+### UamVLA quickstart
+
+1. **Preprocess** a CALVIN split into UAM format (requires the `calvin_env` conda environment):
+
+   ```bash
+   python runners/preprocess_calvin.py \
+       --input_dir /path/to/calvin/task_D_D/training \
+       --output_dir datasets/uamvla_calvin/task_D_D \
+       --dataset_source task_D_D
+   ```
+
+   The preprocessor regenerates `statistics.yaml` from the merged `data.jsonl` on every run, so re-running refreshes stats if `CalvinAdapter` ever changes.
+
+2. **Train**:
+
+   ```bash
+   bash examples/calvin/train_files/run_uamvla_calvin_train.sh
+   ```
+
+   Verify the paths inside the script first (`base_vlm`, `calvin_data_root`, `run_root_dir`).
+
+3. **Evaluate** — uses the same eval scripts as QwenPI (`run_policy_server.sh` + `eval_calvin.sh`); see §3 below.
+
+> **Known limitation (CALVIN eval state distribution gap).** UamVLA training feeds `canonical_state` to the model every step, but the current CALVIN eval client (`eval_calvin.py`) sends only `image` + `lang` to the policy server. A trained UamVLA-CALVIN checkpoint loads cleanly into the eval pipeline (after the `unnorm_key` rename in `eval_calvin.sh`) but inference uses the state-less branch — a real distribution mismatch from training. Expect avoidable success-rate loss until a CALVIN parallel of `docs/superpowers/specs/2026-04-30-uamvla-eval-state-passthrough-design.md` lands. Tracked as a follow-up spec.
+
+---
+
 ## 📊 Benchmark Results (Calvin)
 
 | Model                                     | Avg. Length | Task 1 | Task 2 | Task 3 | Task 4 | Task 5 |
