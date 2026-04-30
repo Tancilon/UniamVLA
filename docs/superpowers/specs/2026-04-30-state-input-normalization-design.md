@@ -128,14 +128,13 @@ framework:
     register_special_tokens: true
     normalization:                       # NEW
       mode: q99                          # one of: q99 | mean_std | min_max | none
-      clip: true                         # whether to clip pre-mapping
       apply_to:                          # which canonical fields to normalize
         - arm_0.ee_pose
         - arm_0.joint_pos
         - gripper_0
 ```
 
-`mode: none` skips normalization entirely (useful for ablation / debugging). Defaults match OpenVLA-OFT: `q99` + clip + apply to all canonical state fields.
+`mode: none` skips normalization entirely (useful for ablation / debugging). Defaults match OpenVLA-OFT: `q99` (which already clips per §4.3) applied to all canonical state fields.
 
 ### 4.6 Preprocessor changes
 
