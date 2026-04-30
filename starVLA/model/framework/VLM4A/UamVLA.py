@@ -379,10 +379,24 @@ class UamVLA(baseframework):
               - other kwargs: ignored (compat with diffusion-style frameworks).
 
         Returns:
-            {"normalized_actions": np.ndarray of shape (B, H, action_dim)}
+            {"normalized_actions": np.ndarray of shape (B, H, action_dim)}.
+            Values are in the same normalized action space as the dataset's
+            ``example["action"]`` (e.g. BOUNDS_Q99 for LIBERO via the dataset's
+            upstream normalizer). Callers comparing against ground-truth actions
+            must already have matching normalization applied.
         """
         if not isinstance(examples, list):
             examples = [examples]
+
+        # Validate per-example "image" is a list/tuple of views, NOT a single PIL.
+        # Without this guard, `for img in e["image"]` would iterate over PIL pixels
+        # and produce a confusing crash deep inside to_pil_preserve.
+        for i, e in enumerate(examples):
+            if not isinstance(e["image"], (list, tuple)):
+                raise TypeError(
+                    f"examples[{i}]['image'] must be a list/tuple of views; "
+                    f"got {type(e['image']).__name__}. Wrap a single view as [img]."
+                )
 
         from deployment.model_server.tools.image_tools import to_pil_preserve
         from transformers import LogitsProcessorList
