@@ -11,16 +11,22 @@ Stand up a complete CALVIN preprocessing + training pipeline on the **UamVLA** c
 1. `python runners/preprocess_calvin.py --input_dir <CALVIN-split> --output_dir <UAM-dataset>` produces a UAM-format dataset consumable by `UamVLADataset`.
 2. `bash examples/calvin/train_files/run_uamvla_calvin_train.sh` trains the UamVLA model on that dataset.
 
-The eval path stays untouched; the existing `examples/calvin/eval_files/` (policy server + `eval_calvin.py`) is reused as-is once a checkpoint is produced.
+The eval logic stays substantially untouched — the existing `examples/calvin/eval_files/` (policy server + `eval_calvin.py`) is reused. The only eval-side change in this spec is a **single-line `unnorm_key` rename** (see G7) so that a freshly trained UamVLA-CALVIN checkpoint can be loaded by `ModelClient` without a hard `assert` failure.
 
 ## 2. Out of Scope
 
-- Any change to evaluation code (`examples/calvin/eval_files/`, `eval_calvin.py`, policy server scripts, `eval_libero` parallels).
+- Any change to evaluation **logic** beyond the one-line `unnorm_key` rename in `eval_calvin.sh`. Specifically, this spec does **NOT** add a CALVIN-side eval-time state passthrough (see §2.1 below).
 - The QwenPI-on-CALVIN line (`examples/calvin/train_files/starvla_train_calvin.yaml`, `run_calvin_train.sh`) stays untouched. Both pipelines coexist under `examples/calvin/`.
 - LIBERO preprocessor refactor (e.g., extracting `write_statistics` into `BasePreprocessor`). YAGNI for now.
 - Incremental processing across multiple splits into one output dir. CALVIN preprocessor today doesn't support it; this spec doesn't add it.
 - Training hyperparameter tuning specific to CALVIN. We clone LIBERO settings 1:1; tuning is a follow-up after the first baseline.
 - Multi-mixture training (combining CALVIN + LIBERO into one run). One CALVIN mixture per training run.
+
+### 2.1 Known limitation: CALVIN eval has a train/eval state distribution gap
+
+UamVLA training feeds every batch a `canonical_state` (`UamVLA.py:276–280`), and inference splices state embeddings only when `canonical_state` is supplied (`UamVLA.py:480–495`). The CALVIN eval client (`eval_calvin.py:144–148`) currently sends **only** `{"image": [...], "lang": ...}` to the policy server — no state. As a result, a UamVLA-CALVIN checkpoint will load and run, but every eval step uses the state-less branch, which is a real distribution mismatch from training. Expected impact: avoidable success-rate loss; the magnitude is empirical.
+
+This mirrors the LIBERO defect that `docs/superpowers/specs/2026-04-30-uamvla-eval-state-passthrough-design.md` is fixing on the LIBERO side. That spec explicitly excludes CALVIN (its §2 non-goals). Closing the gap on the CALVIN side requires changing `eval_calvin.py` (extract `robot_obs` from the calvin_env step output) and `ModelClient` (run `CalvinAdapter` + `StateNormalizer` client-side, push `canonical_state` over WebSocket). That work is **deferred to a follow-up spec** ("CALVIN eval state passthrough") and is **NOT** delivered here.
 
 ## 3. Current State
 
@@ -45,6 +51,7 @@ The eval path stays untouched; the existing `examples/calvin/eval_files/` (polic
 | G4 | `starVLA/config/training/uamvla_calvin.yaml` | Missing. The existing `examples/calvin/train_files/starvla_train_calvin.yaml` is for the QwenPI framework. |
 | G5 | `examples/calvin/train_files/run_uamvla_calvin_train.sh` | Missing. The existing `run_calvin_train.sh` launches QwenPI. |
 | G6 | Local pipeline test (no `calvin_env` required) | Missing. The existing smoke test only verifies imports. |
+| G7 | `examples/calvin/eval_files/eval_calvin.sh` `unnorm_key` value | Hardcoded to `"franka"`. **Hard-blocks eval**: a UamVLA-CALVIN checkpoint writes `dataset_statistics.json` keyed by embodiment (`"franka_calvin"`, see `train_starvla.py:217–221`); `ModelClient._check_unnorm_key` (`model2libero_interface.py:241–245`) asserts the user-supplied key exists in the stats — assertion fires immediately on load. |
 
 ## 4. Data Flow
 
@@ -187,8 +194,25 @@ All other fields **identical**, including:
 
 - Full aux_heads block (action / pose / future / recon all enabled).
 - `state_encoder.normalization.apply_to: [arm_0.ee_pose, arm_0.joint_pos, gripper_0]` — the canonical schema CALVIN produces matches LIBERO byte-for-byte.
-- `image_size: 640` (Qwen3-VL transform target; preprocessor renders at 256×256, dataloader transform handles the upscale).
+- `image_size: 640` field carried over verbatim from the LIBERO yaml.
 - Trainer block: same LRs, scheduler, batch size, grad accumulation, optimizer settings.
+
+#### Note on `image_size` and image token count
+
+`image_size: 640` in the yaml is **not consumed** by the UamVLA training path. Verified at design time:
+
+- `get_vla_dataset` (`uamvla_dataset.py:233–238`) does not read `image_size` and does not construct or pass a transform to `UamVLADataset`.
+- `UamVLADataset.__init__` defaults `transforms=None`; `__getitem__` skips resizing when `transforms` is None.
+- `backbone_wrapper.build_inputs` (`backbone_wrapper.py:278–283`) hands PIL images **as-is** to `Qwen3VLProcessor` with no `min_pixels`/`max_pixels` override.
+- Other frameworks in the repo (`QwenPI.py:236–238`, `QwenDual.py:242–246`, etc.) do consume an `obs_image_size` field via `resize_images(...)`, but the `UamVLA.py` framework does not; `image_size` is effectively a dead field there.
+
+The actual image token count per view comes from whatever `Qwen3VLProcessor` produces from a 256×256 input under the processor config shipped with the chosen Qwen3-VL checkpoint. UamVLA's future/recon heads hardcode `patches_per_view = 400` (`UamVLA.py:181`); a mismatch surfaces as a `slice_image_tokens` failure inside those heads.
+
+**Risk acceptance and verification**: LIBERO renders at the same 256×256 and trains successfully with the same `ppv = 400` and the same backbone wrapper, which is strong empirical evidence that `Qwen3VLProcessor`'s defaults yield 400 tokens for 256×256 input under this codebase's Qwen3-VL config. CALVIN preprocessing produces images at the identical resolution (verified — both `tools/preprocess/libero_preprocessor.py:40–41` and `tools/preprocess/calvin_preprocessor.py:138–139` use `RENDER_W = RENDER_H = 256`), so the same outcome is expected.
+
+To make this guarantee explicit rather than assumed, the §7.2 remote e2e procedure asserts the actual token count produced by the live processor for a CALVIN sample (see §7.2 step 4). Any divergence surfaces immediately on the first remote run, not weeks later as a head-firing crash.
+
+We do **not** delete the `image_size` field from the cloned yaml in this spec — keeping LIBERO and CALVIN yamls structurally identical aids cross-comparison. Removing dead fields is a separate cleanup, out of scope here.
 
 ### 5.4 Preprocessor CLI (G1)
 
@@ -249,6 +273,31 @@ Add a "**UamVLA path**" section at the top distinguishing it from the existing Q
 
 - One-paragraph statement that the directory hosts two independent training pipelines (QwenPI via LeRobot format; UamVLA via UAM unified format) and they share only the eval scripts in `eval_files/`.
 - Quickstart for the UamVLA path: preprocess command (referring to `runners/preprocess_calvin.py`), train command (referring to `run_uamvla_calvin_train.sh`).
+- A short "**Known limitation**" callout linking to §2.1: a UamVLA-CALVIN checkpoint runs through `eval_calvin.sh` once G7 is applied, but eval uses the state-less inference branch — full state passthrough is a follow-up spec.
+
+### 5.7 Eval `unnorm_key` rename (G7)
+
+**File**: `examples/calvin/eval_files/eval_calvin.sh`
+
+Change the hardcoded value:
+
+```bash
+# Before:
+unnorm_key="franka"
+
+# After:
+unnorm_key="franka_calvin"
+```
+
+Why: `train_starvla.py:_save_dataset_statistics_json` (lines 217–221) writes `dataset_statistics.json` keyed by `embodiment` — for UamVLA-CALVIN that key is `"franka_calvin"`. `ModelClient._check_unnorm_key` (`model2libero_interface.py:241–245`) hard-asserts the user-supplied key exists in the loaded stats. Without this rename, every UamVLA-CALVIN checkpoint load fires:
+
+```
+AssertionError: The `unnorm_key` you chose is not in the set of available dataset statistics, ...
+```
+
+This is the **only** eval-side change in this spec. The rename does not affect QwenPI eval runs in practice because QwenPI keys its stats differently (the QwenPI launcher would need its own pass), and no existing QwenPI-CALVIN run currently uses `unnorm_key="franka"` as a load-bearing value (its launcher has independent control). Running the rename does not affect LIBERO eval (which has its own shell script).
+
+Alternative considered and rejected: drop `--args.unnorm-key` entirely so `ModelClient._check_unnorm_key` falls through to `next(iter(norm_stats.keys()))` (`model2libero_interface.py:233–239`). That would make the script auto-pick the only key. Reason rejected: silent auto-pick masks future bugs where a checkpoint accidentally writes multiple stat keys; an explicit name is grep-able and matches the LIBERO-side eval convention.
 
 ## 6. Data Contract
 
@@ -369,7 +418,7 @@ Steps:
    - At least one image present in each of `images/obs/static/`, `images/obs/wrist/`, `images/target/`, `images/future/`.
    - At least one `.npy` in `point_clouds/`.
 
-4. 2-step training smoke:
+4. 2-step training smoke + image-token-count assertion:
    ```bash
    python starVLA/training/train_starvla.py \
        --config_yaml starVLA/config/training/uamvla_calvin.yaml \
@@ -377,7 +426,19 @@ Steps:
        --is_debug True \
        --trainer.max_train_steps 2
    ```
-   Expectation: completes 2 training steps without exception; loss is finite.
+   Expectations:
+   - Completes 2 training steps without exception; loss is finite.
+   - **Vision token count matches `ppv = 400`**. Before merging the spec deliverables, the operator inserts a one-time print/log in `backbone_wrapper.build_inputs` (or runs the model with `Qwen3VLProcessor` standalone) to confirm that a 256×256 image yields 400 tokens per view (= 20×20 grid after merge2). Suggested probe — drop a `logger.info(f"[ppv-probe] vision token count per view: {tok_count}")` after `proc_out = self.processor(...)` in `backbone_wrapper.py:278`, run the 2-step smoke, then remove. If the count differs, future/recon heads will fire `slice_image_tokens` errors at training time; resolve before declaring §7.2 green by adjusting `Qwen3VLProcessor`'s `min_pixels`/`max_pixels` or by upscaling images before processor invocation. Document the resolved value in the spec follow-up if any change is needed.
+
+5. **Eval-load smoke** (after a checkpoint is produced — even a 2-step one is enough to test the load path):
+   ```bash
+   bash examples/calvin/eval_files/run_policy_server.sh   # in starVLA env
+   # in another terminal, calvin_env activated:
+   bash examples/calvin/eval_files/eval_calvin.sh \
+       --args.pretrained-path <path-to-2step-ckpt> \
+       --args.num_sequences 1
+   ```
+   Expectation: server boots, ModelClient loads the checkpoint without firing the `unnorm_key` assertion (proves G7 is correctly applied), single eval episode runs to completion. Result quality is irrelevant at this stage — this is an integration check, not a benchmark.
 
 ### 7.3 What the existing smoke test still covers
 
@@ -395,10 +456,11 @@ Each step is a TDD checkpoint: write failing test → implement → confirm gree
 | 4 | **CLI runner** (G1) | `runners/preprocess_calvin.py` (new) | `test_cli_help`, `test_cli_required_args` |
 | 5 | **Training yaml** (G4) | `starVLA/config/training/uamvla_calvin.yaml` (new) | `test_yaml_loadable` |
 | 6 | **Launcher script** (G5) | `examples/calvin/train_files/run_uamvla_calvin_train.sh` (new) | Manual: `bash -n run_uamvla_calvin_train.sh` (syntax check) |
-| 7 | **README addendum** | `examples/calvin/README.md` — add UamVLA section | Manual review |
-| 8 | **Remote e2e (manual, not auto)** | — | `bash run_uamvla_calvin_train.sh` after `preprocess_calvin.py` on the debug dataset, in a `calvin_env`-equipped environment |
+| 7 | **Eval `unnorm_key` rename** (G7) | `examples/calvin/eval_files/eval_calvin.sh` — `unnorm_key="franka"` → `unnorm_key="franka_calvin"` | Manual: §7.2 step 5 (eval-load smoke). |
+| 8 | **README addendum** | `examples/calvin/README.md` — add UamVLA section + known-limitation callout | Manual review |
+| 9 | **Remote e2e (manual, not auto)** | — | `bash run_uamvla_calvin_train.sh` after `preprocess_calvin.py` on the debug dataset, in a `calvin_env`-equipped environment. Includes the §7.2 step 4 vision-token-count probe and step 5 eval-load smoke. |
 
-Tasks 1–7 are runnable on macOS (the developer's local box) without `calvin_env`. Task 8 is the gating remote check before merging.
+Tasks 1–8 are runnable on macOS (the developer's local box) without `calvin_env`. Task 9 is the gating remote check before merging.
 
 ## 9. Risks & Mitigations
 
@@ -410,6 +472,9 @@ Tasks 1–7 are runnable on macOS (the developer's local box) without `calvin_en
 | Synthetic fixture in §7.1 drifts from real CALVIN data shape over time. | Fixture is built using the same `CalvinAdapter` and constants the real preprocessor uses (`FRANKA_ACTION_DIM`, `MAX_ACTION_DIM`, `EMBODIMENT`). Any future schema change forces both real + fixture to update together. |
 | `state_stats` block written by the migration is computed using `CalvinAdapter`. If `CalvinAdapter` changes (e.g., gripper normalization constant), old preprocessed datasets will have stale stats. | `statistics.yaml` is regenerated from `data.jsonl` on every `merge_shards_and_write_stats` call. Re-running the preprocessor refreshes stats. Document this in the README. |
 | `robot_obs_mean/std` deletion breaks something we missed in the grep. | The repo-wide grep at design time returned only the calvin preprocessor itself and historical plan docs. If a hidden consumer surfaces, restore the legacy block as a one-line fallback alongside the new schema (cheap reversal). |
+| **Train/eval state distribution gap** (§2.1). Trained UamVLA-CALVIN ckpts run, but eval steps go through the state-less branch in `UamVLA.predict_action`. Realized SR will be lower than what training metrics suggest. | Acknowledged limitation. Documented in §2.1 and §5.6 README callout. Closed by the deferred CALVIN eval state passthrough spec; not blocking this spec's deliverables. |
+| **`Qwen3VLProcessor` produces ≠ 400 tokens for 256×256 input under the actual loaded Qwen3-VL config**, causing `slice_image_tokens` failure in future/recon heads at training time. | LIBERO trains successfully under the same hardware/config combination → strong empirical evidence the count is 400 for 256×256. §7.2 step 4 adds an explicit one-time probe before declaring the spec green; if the probe fails, fix `min_pixels`/`max_pixels` (or pre-resize) before merging — not after. |
+| **Multiple eval `.sh` scripts under `examples/calvin/eval_files/` rely on a hardcoded `unnorm_key="franka"`** beyond `eval_calvin.sh`. | At design time, `eval_calvin.sh` is the only consumer found. If a parallel eval script (e.g., `auto_eval_*.sh`) appears later with the same hardcoded key, apply the same rename — pattern is established. |
 
 ## 10. Naming Convention Summary
 
