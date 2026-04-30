@@ -76,3 +76,50 @@ def register_state_tokens(tokenizer, backbone) -> dict[str, int]:
         ", ".join(f"{tok}={tid}" for tok, tid in token_ids.items())
     )
     return token_ids
+
+
+# ---------------------------------------------------------------------------
+# Structural tokens — segment markers used by inference-time logits processors
+# (e.g. <|action_start|> as a generate-time sentinel for the action chunk).
+# Co-located with state tokens because both are bootstrap-time, embodiment-
+# independent, and registered via the same HF add_special_tokens path.
+# ---------------------------------------------------------------------------
+
+STRUCTURAL_SPECIAL_TOKENS: list[str] = [
+    "<|action_start|>",
+]
+
+
+def register_structural_tokens(tokenizer, backbone) -> dict[str, int]:
+    """Register structural special tokens (e.g. <|action_start|>) with the tokenizer.
+
+    Same contract as register_state_tokens: idempotent, resizes embeddings on
+    first call only, returns dict[token_str -> token_id].
+    """
+    n_added = tokenizer.add_special_tokens(
+        {"additional_special_tokens": STRUCTURAL_SPECIAL_TOKENS}
+    )
+    if n_added > 0:
+        new_size = len(tokenizer)
+        backbone.resize_token_embeddings(new_size)
+        logger.info(
+            f"[Structural Tokens] Registered {n_added} new structural tokens. "
+            f"Resized embeddings to {new_size}."
+        )
+
+    embeds = (backbone.get_embed_tokens() if hasattr(backbone, "get_embed_tokens")
+              else backbone.get_input_embeddings())
+    embed_size = embeds.weight.shape[0]
+    if embed_size != len(tokenizer):
+        raise RuntimeError(
+            f"Vocab/embedding size mismatch after structural token registration: "
+            f"tokenizer={len(tokenizer)}, embeddings={embed_size}"
+        )
+
+    token_ids = {tok: tokenizer.convert_tokens_to_ids(tok)
+                 for tok in STRUCTURAL_SPECIAL_TOKENS}
+    logger.debug(
+        "[Structural Tokens] Token IDs: " +
+        ", ".join(f"{tok}={tid}" for tok, tid in token_ids.items())
+    )
+    return token_ids
