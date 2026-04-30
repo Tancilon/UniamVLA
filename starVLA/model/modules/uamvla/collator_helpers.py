@@ -32,21 +32,24 @@ def stack_canonical(state_list: list[dict]) -> dict:
     Supported shapes:
         {"limb_id": tensor}                          # flat
         {"limb_id": {"key": tensor, "key2": tensor}} # nested (1 level)
-    Deeper nesting (e.g., {"limb": {"sub": {"key": tensor}}}) is NOT
-    supported and will produce TypeError from torch.stack on dicts.
-    Update this helper if Phase 2 multi-finger gripper / per-joint
-    structures need deeper nesting.
+    Each leaf is wrapped in ``torch.as_tensor`` so callers may pass numpy
+    arrays (e.g. WebSocket-deserialized canonical_state from the eval
+    client) without manual conversion.
     """
     template = state_list[0]
     out: dict = {}
     for limb_id, val in template.items():
         if isinstance(val, dict):
             out[limb_id] = {
-                k: torch.stack([s[limb_id][k] for s in state_list], dim=0)
+                k: torch.stack(
+                    [torch.as_tensor(s[limb_id][k]) for s in state_list], dim=0
+                )
                 for k in val.keys()
             }
         else:
-            out[limb_id] = torch.stack([s[limb_id] for s in state_list], dim=0)
+            out[limb_id] = torch.stack(
+                [torch.as_tensor(s[limb_id]) for s in state_list], dim=0
+            )
     return out
 
 
