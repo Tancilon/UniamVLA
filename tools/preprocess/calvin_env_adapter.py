@@ -46,7 +46,20 @@ def make_calvin_env_adapter(dataset_path: str) -> "CalvinEnvAdapter":
     """
     from calvin_env.envs.play_table_env import get_env  # noqa: WPS433
 
-    env = get_env(str(dataset_path), show_gui=False)
+    # Drop the tactile camera from obs_space: instantiating
+    # calvin_env.camera.tactile_sensor.TactileSensor opens a GL/Xlib
+    # context that fails on headless servers without an X display
+    # (`'NoneType' object has no attribute 'XRenderFindVisualFormat'`).
+    # Preprocess only needs static + gripper RGB-D — matches the eval
+    # env builder in docs/.../calvin-eval-setup.md.
+    env = get_env(
+        str(dataset_path),
+        show_gui=False,
+        obs_space={
+            "rgb_obs": ["rgb_static", "rgb_gripper"],
+            "depth_obs": ["depth_static", "depth_gripper"],
+        },
+    )
     try:
         return CalvinEnvAdapter(env)
     except Exception:
