@@ -7,7 +7,7 @@ export calvin_python=/path/to/your/conda/envs/calvin/bin/python
 
 host="127.0.0.1"
 base_port=5694
-unnorm_key="franka"
+unnorm_key="franka_calvin"
 your_ckpt=results/Checkpoints/0123_starvla_qwen3_calvin_task_D_D/checkpoints/steps_30000_pytorch_model.pt
 
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
