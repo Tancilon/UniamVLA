@@ -325,7 +325,7 @@ class LiberoPreprocessor(BasePreprocessor):
         if camera_intrinsics is not None:
             all_samples = self._load_all_samples(output_path)
             if all_samples:
-                self._write_statistics(
+                self.write_statistics(
                     all_samples, output_path, camera_intrinsics
                 )
             else:
@@ -662,13 +662,16 @@ class LiberoPreprocessor(BasePreprocessor):
         geom_bodyids = env.sim.model.geom_bodyid
         return [i for i in range(len(geom_bodyids)) if geom_bodyids[i] == body_id]
 
-    def _write_statistics(
+    def write_statistics(
         self,
         samples: list[dict],
         output_path: Path,
         camera_intrinsics: dict,
     ):
         """Compute normalization statistics and write statistics.yaml.
+
+        Public method — can be called independently of process() to recompute
+        stats from an existing list of samples (e.g. after loading data.jsonl).
 
         Action stats: min/max bounds (unchanged).
         State stats (NEW): per-field q01/q99/min/max/mean/std over the CANONICAL

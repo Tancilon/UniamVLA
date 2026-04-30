@@ -28,7 +28,7 @@ def test_calvin_preprocessor_imports():
 def test_state_stats_block_written_with_canonical_layout(tmp_path):
     """statistics.yaml must contain state_stats with canonical-shape per-field stats.
 
-    Exercises _write_statistics directly with synthetic samples (no MuJoCo env
+    Exercises write_statistics directly with synthetic samples (no MuJoCo env
     required) — mirrors the module-level import style of the existing smoke tests.
     """
     import math
@@ -69,7 +69,7 @@ def test_state_stats_block_written_with_canonical_layout(tmp_path):
         target_object_keyword=None,
         target_resolver=None,
     )
-    preprocessor._write_statistics(samples, tmp_path, camera_intrinsics)
+    preprocessor.write_statistics(samples, tmp_path, camera_intrinsics)
 
     stats_file = tmp_path / "statistics.yaml"
     assert stats_file.exists(), "statistics.yaml was not written"
