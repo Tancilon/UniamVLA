@@ -571,50 +571,6 @@ class UamVLA(baseframework):
             decoded[b] = chunk
         return decoded
 
-    def _decode_action_tokens(self, head_output, batch_size: int):
-        """Decode (B, L) argmax token ids → (B, T, 7) normalized actions as np.ndarray.
-
-        head_output is HeadOutput(predictions={"token_ids": Tensor(B, L)}) from
-        ActionHead.predict.
-
-        Phase 1 note: actual decoding is gated on Task 24 (dataloader labels
-        wiring) and Task 33 (L5 eval dry-run).  _extract_action_tokens_for_sample
-        raises NotImplementedError until that infrastructure exists.
-        """
-        import numpy as np
-
-        action_tokenizer = self.action_tokenizer
-
-        pred_ids = head_output.predictions["token_ids"]  # (B, L)
-        H = self.action_horizon  # T
-
-        decoded = np.zeros((batch_size, H, 7), dtype=np.float32)
-        for i in range(batch_size):
-            token_ids_i = self._extract_action_tokens_for_sample(pred_ids[i], H)  # length H*7 list
-            chunk = action_tokenizer.decode(token_ids_i).reshape(H, 7)
-            decoded[i] = chunk
-        return decoded
-
-    def _extract_action_tokens_for_sample(self, pred_ids_row, action_horizon: int):
-        """Find the action_horizon*7 action token positions in pred_ids_row ((L,) tensor).
-
-        Phase 1 strategy (in priority order):
-          1. Use labels mask from upstream batch (labels != -100 marks action positions).
-             Requires Task 24 (dataloader plugin) to wire up labels at eval time.
-          2. Scan input_ids for action_token_begin_id sentinel, then take the
-             next action_horizon*7 positions.
-             Requires action_token_begin_id to be correctly set in config.
-
-        Neither is wired up yet.  This method raises NotImplementedError until
-        Task 24 + Task 33 provide the supporting infrastructure.  Do not attempt
-        a heuristic implementation here — see the migration design doc §4.3.
-        """
-        raise NotImplementedError(
-            "predict_action decoding requires labels mask or action_token_begin_id "
-            "from the dataloader. Wire up via Task 24 (dataloader plugin) and Task 33 (L5 eval). "
-            "See docs/superpowers/specs/2026-04-29-starvla-migration-design.md §4.3."
-        )
-
     def visualize_batch(self, batch: dict, n_samples: int = 1) -> dict:
         """Iterate aux heads and call .visualize() on each, gathering wandb.Image entries."""
         out = {}
