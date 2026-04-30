@@ -53,7 +53,7 @@ These are unresolved against repo evidence. Each becomes a probe in §8.1.
 
 - **R1**: Does the LIBERO env's `obs` dict expose `robot0_joint_pos` with shape `(7,)`? No code in this repo reads it; cannot verify offline. **Fallback if absent**: this design is blocked; revisit with IK reconstruction or a state-less training option.
 - **R2**: Is `_quat2axisangle(robot0_eef_quat)` numerically equivalent to HDF5 `obs/ee_ori` (within ~1e-5)? Both are robosuite-derived in principle; not unit-tested in this repo.
-- **R3**: Can `libero_env` (Py 3.8) import `StateNormalizer` (which transitively imports `starVLA.dataloader.gr00t_lerobot.transform.state_action.Normalizer`)? `model2libero_interface.py` already imports `starVLA.model.tools`, but the `Normalizer` chain may pull heavier deps. **Fallback if it fails**: inline the q99 math in the client (≈30 LOC; just a per-field affine transform from `q01/q99`).
+- **R3**: Can `libero_env` (Py 3.8) import `StateNormalizer` (which transitively imports `starVLA.dataloader.gr00t_lerobot.transform.state_action.Normalizer`)? `model2libero_interface.py` already imports `starVLA.model.tools`, but the `Normalizer` chain may pull heavier deps. **Fallback if it fails**: inline the full `Normalizer.forward(mode="q99")` semantics in the client — see §6.3.1 for the four required steps (NOT a bare affine transform; the `q01==q99` mask and final `clamp(-1, 1)` are load-bearing for train/eval equivalence).
 
 ## 5. Architecture
 
@@ -99,10 +99,17 @@ Key architectural choice: **conversion happens client-side** (in `model2libero_i
 
 **File**: [`starVLA/training/train_starvla.py`](../../../starVLA/training/train_starvla.py)
 
-Extend `_save_dataset_statistics_json()` to also copy the source `statistics.yaml` verbatim into the checkpoint output directory. After the change, `<output_dir>/` contains:
+Extend `_save_dataset_statistics_json()` to also copy the source `statistics.yaml` verbatim into the **`output_dir`** (the trainer's `run_root_dir / run_id` directory at [train_starvla.py:58](../../../starVLA/training/train_starvla.py#L58)). This is the same directory `read_mode_config` resolves as `run_dir = checkpoint_pt.parents[1]` ([share_tools.py:375](../../../starVLA/model/framework/share_tools.py#L375)) and the same directory where `dataset_statistics.json` already lives.
 
+After the change, `<output_dir>/` contains:
+
+- `config.yaml`
 - `dataset_statistics.json` — action stats, schema unchanged (consumed by official `unnormalize_actions`).
 - `statistics.yaml` — full UamVLA stats (consumed by client-side `StateNormalizer` for state input).
+- `checkpoints/steps_*.pt`
+- `final_model/`
+
+`statistics.yaml` lives at the run-dir level — **not** inside `checkpoints/` or `final_model/` — to mirror the existing `dataset_statistics.json` placement and stay compatible with `read_mode_config`'s path resolution.
 
 Implementation: one `shutil.copy(stats_yaml, output_dir / "statistics.yaml")` after the existing JSON write, guarded by the same `is_main_process` and existence checks. No new schema introduced.
 
@@ -110,20 +117,21 @@ Implementation: one `shutil.copy(stats_yaml, output_dir / "statistics.yaml")` af
 
 **File**: [`examples/LIBERO/eval_files/eval_libero.py`](../../../examples/LIBERO/eval_files/eval_libero.py)
 
-Augment the per-step `example_dict` (currently `{"image": [...], "lang": ...}` at lines 161-165) with one new key:
+Augment the per-step `example_dict` (currently `{"image": [...], "lang": ...}` at lines 161-165) with `uamvla_raw_state`, **gated on `client_model.uamvla_state_enabled`** (a public attribute exposed by `ModelClient`, see §6.3.1). This avoids reading `obs["robot0_joint_pos"]` for non-UamVLA models — which would crash if the key isn't present.
 
 ```python
-example_dict["uamvla_raw_state"] = {
-    "ee_pos":        np.asarray(obs["robot0_eef_pos"],        dtype=np.float32),
-    "ee_axis_angle": _quat2axisangle(obs["robot0_eef_quat"]).astype(np.float32),
-    "joint_pos":     np.asarray(obs["robot0_joint_pos"],      dtype=np.float32),
-    "gripper_qpos":  np.asarray(obs["robot0_gripper_qpos"],   dtype=np.float32),
-}
+if getattr(client_model, "uamvla_state_enabled", False):
+    example_dict["uamvla_raw_state"] = {
+        "ee_pos":        np.asarray(obs["robot0_eef_pos"],        dtype=np.float32),
+        "ee_axis_angle": _quat2axisangle(obs["robot0_eef_quat"]).astype(np.float32),
+        "joint_pos":     np.asarray(obs["robot0_joint_pos"],      dtype=np.float32),
+        "gripper_qpos":  np.asarray(obs["robot0_gripper_qpos"],   dtype=np.float32),
+    }
 ```
 
 The 8-D `state` concatenation at lines 145-152 stays as-is (it lives in `observation["observation.state"]` and is harmless; not consumed by UamVLA).
 
-The new key is **UamVLA-specific by name**. Non-UamVLA `ModelClient` instances ignore it. The naming makes its scope obvious to any reader.
+The new key is **UamVLA-specific by name**. Non-UamVLA `ModelClient` instances never see it (gate skips assembly entirely). The naming makes its scope obvious to any reader.
 
 ### 6.3 Client-side conversion
 
@@ -131,15 +139,33 @@ The new key is **UamVLA-specific by name**. Non-UamVLA `ModelClient` instances i
 
 #### 6.3.1 `__init__` extension
 
-After `self.action_norm_stats = self.get_action_stats(...)`, attempt to load state-side artifacts:
+Two pre-existing bugs in the current `__init__` block ([model2libero_interface.py:34, 57](../../../examples/LIBERO/eval_files/model2libero_interface.py#L34-L57)) bite this design and must be fixed first:
+
+- **B1**: `self.unnorm_key = unnorm_key` (line 34) stores the raw constructor arg. `eval_libero.py` doesn't pass `unnorm_key`, so `self.unnorm_key = None` after `__init__`. The local `_check_unnorm_key` call inside `get_action_stats` resolves it but **does not write back to self**.
+- **B2**: `policy_ckpt_path` is a `.pt` file path (e.g. `<run_dir>/checkpoints/steps_50000_pytorch_model.pt`, see `run_policy_server.sh`). `read_mode_config` correctly extracts `run_dir = parents[1]`. Anything that needs the run-dir directly (e.g. `<run_dir>/statistics.yaml`) must replicate this — `Path(policy_ckpt_path) / "statistics.yaml"` is **wrong** because the `.pt` file is not a directory.
+
+The new `__init__` block (replaces lines 34 and 57, adds state-side block):
 
 ```python
-self._uamvla_state_enabled = False
-stats_yaml_path = Path(policy_ckpt_path) / "statistics.yaml"
+# Resolve unnorm_key once, write back to self (fixes B1).
+_, norm_stats = read_mode_config(policy_ckpt_path)
+self.unnorm_key = self._check_unnorm_key(norm_stats, unnorm_key)
+self.action_norm_stats = norm_stats[self.unnorm_key]["action"]
+
+# Resolve run_dir from the .pt file path (fixes B2; mirrors read_mode_config).
+run_dir = Path(policy_ckpt_path).parents[1]
+
+# Try to load UamVLA state-side artifacts.
+self.uamvla_state_enabled = False  # public attribute — gates §6.2 assembly
+stats_yaml_path = run_dir / "statistics.yaml"
 if stats_yaml_path.exists():
     with open(stats_yaml_path) as f:
         stats_dict = yaml.safe_load(f)
-    if "state_stats" in stats_dict and self.unnorm_key in stats_dict["state_stats"]:
+    if (
+        isinstance(stats_dict, dict)
+        and "state_stats" in stats_dict
+        and self.unnorm_key in stats_dict["state_stats"]
+    ):
         from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
         from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
         self._adapter = LiberoAdapter()
@@ -148,29 +174,37 @@ if stats_yaml_path.exists():
             embodiment=self.unnorm_key,
             mode="q99",
         )
-        self._uamvla_state_enabled = True
+        self.uamvla_state_enabled = True
 ```
 
-Detection rule: UamVLA mode iff `statistics.yaml` exists in the ckpt dir AND it contains `state_stats[unnorm_key]`. This makes the change opt-in by the trainer (only UamVLA trainer writes `statistics.yaml`); other frameworks remain untouched.
+`uamvla_state_enabled` is intentionally a **public attribute** so eval_libero.py can gate its raw-state assembly on it (§6.2).
 
-If R3 turns out to fail (StateNormalizer cannot import in libero_env), the fallback is to replace `StateNormalizer` with an inline q99 transform here — still keyed by the YAML's `state_stats[embodiment]` `q01/q99` arrays. The detection logic and external behavior stay the same.
+Detection rule: UamVLA mode iff `statistics.yaml` exists in the run dir AND it contains `state_stats[<resolved unnorm_key>]`. Opt-in by the trainer; other frameworks remain untouched.
+
+**R3 fallback** (if `StateNormalizer` cannot import in libero_env): replace the `from starVLA....StateNormalizer` import with an inline implementation that **fully reproduces** [`Normalizer.forward(mode="q99")`](../../../starVLA/dataloader/gr00t_lerobot/transform/state_action.py#L114-L135) semantics:
+1. Load `q01`, `q99` per field from `state_stats[embodiment][field]`.
+2. Per-element mask `q01 != q99`; affine `(x - q01) / (q99 - q01) * 2 - 1` only on masked positions.
+3. Pass-through `x` on positions where `q01 == q99`.
+4. Final `torch.clamp(normalized, -1, 1)`.
+
+Steps 2–4 are non-negotiable for train/eval equivalence. A pure affine transform without (2)–(4) **breaks** §7 contract #5.
 
 #### 6.3.2 `step()` extension
 
 In `step()` ([model2libero_interface.py:76-98](../../../examples/LIBERO/eval_files/model2libero_interface.py#L76-L98)), the per-frame `example` dict is wrapped into `vla_input["examples"] = [example]` and sent to the server. Insert the conversion **after `example["image"] = images`** (line 91) and **before** building `vla_input`:
 
 ```python
-if self._uamvla_state_enabled:
-    raw = example.pop("uamvla_raw_state", None)
-    if raw is not None:
-        canonical = self._adapter.to_canonical(raw)
-        canonical = self._state_normalizer(canonical)
-        example["canonical_state"] = _to_numpy_leaves(canonical)  # see §6.3.3
+# Always pop the raw-state key — even if state-passthrough is disabled — so it
+# never reaches the server (cleanliness; protects against future kwarg sniffing).
+raw = example.pop("uamvla_raw_state", None)
+
+if self.uamvla_state_enabled and raw is not None:
+    canonical = self._adapter.to_canonical(raw)
+    canonical = self._state_normalizer(canonical)
+    example["canonical_state"] = _to_numpy_leaves(canonical)  # see §6.3.3
 ```
 
-`pop` (not `get`) ensures `uamvla_raw_state` is **consumed** and not forwarded — the server's `framework.predict_action(examples=[example], ...)` would otherwise receive a stray key inside `example` (and `UamVLA.predict_action` does iterate `example` keys via `e.get("canonical_state")`, so spurious keys are tolerated, but cleanliness wins).
-
-If `_uamvla_state_enabled` is False, `uamvla_raw_state` (if present) is dropped silently — UamVLA absent ⇒ raw state has nowhere to go. This keeps non-UamVLA paths unaffected.
+The `pop` is **unconditional** so the wire format never carries `uamvla_raw_state` regardless of state-passthrough toggle. The conversion itself is gated on `uamvla_state_enabled`. If the gate is False, the popped raw state is simply discarded (matches §6.2 — eval_libero.py also won't assemble it in that case, so this branch is mostly defensive).
 
 #### 6.3.3 Tensor serialization
 
@@ -255,7 +289,65 @@ Assert: both branches' nested dicts have identical keys, shapes, dtypes, and `to
 
 The test is informative even though both sides use the same constructors — it locks in the contract: any future divergence (e.g., the trainer adding an extra clamp / quantization that the eval side doesn't mirror) breaks the test loudly. This is the load-bearing test for §7.
 
-### 8.3 Integration test — server boot + single infer
+### 8.3 Fake-client wiring test (catches the contract bugs §8.2 misses)
+
+§8.2 calls the same constructors twice and is structurally tautological — it cannot detect:
+- The default-`unnorm_key=None` bug (B1 in §6.3.1) — §8.2 always passes `"franka_libero"` explicitly.
+- The wrong `statistics.yaml` path (B2) — §8.2 reads the YAML directly, not via `policy_ckpt_path` resolution.
+
+`tests/test_eval_state_passthrough_wiring.py` covers these by exercising `ModelClient.__init__` and `step()` with realistic inputs, against a stubbed WebSocket client that captures the outbound payload (no real server).
+
+Fixture:
+```
+tmpdir/
+├── config.yaml                     ← minimal valid stub
+├── dataset_statistics.json         ← {"franka_libero": {"action": {"min":..., "max":..., "mask":...}}}
+├── statistics.yaml                 ← copy of fixture data with state_stats[franka_libero]
+└── checkpoints/
+    └── fake.pt                     ← empty file (read_mode_config only checks suffix)
+```
+
+Test:
+```python
+def test_modelclient_state_passthrough_engages_with_default_unnorm_key():
+    client = ModelClient(
+        policy_ckpt_path=tmpdir / "checkpoints" / "fake.pt",
+        unnorm_key=None,             # default — must still resolve correctly
+        host="0.0.0.0", port=0,
+    )
+    # Replace the WebSocket client with a stub that records payloads.
+    client.client = StubClient()
+
+    # Assertions on init resolution (catches B1 + B2)
+    assert client.unnorm_key == "franka_libero"          # was None pre-fix
+    assert client.uamvla_state_enabled is True           # path resolution worked
+
+    # Build a representative per-frame example with a UamVLA raw_state attached.
+    example = {
+        "image": [np.zeros((224, 224, 3), dtype=np.uint8)] * 2,
+        "lang": "task description",
+        "uamvla_raw_state": {
+            "ee_pos":        np.zeros(3, dtype=np.float32),
+            "ee_axis_angle": np.zeros(3, dtype=np.float32),
+            "joint_pos":     np.zeros(7, dtype=np.float32),
+            "gripper_qpos":  np.zeros(2, dtype=np.float32),
+        },
+    }
+    client.step(example, step=0)
+
+    # Inspect what was sent over the (stubbed) wire.
+    sent = client.client.last_payload
+    sent_example = sent["examples"][0]
+    assert "uamvla_raw_state" not in sent_example                # popped (§6.3.2 unconditional)
+    assert "canonical_state" in sent_example                      # injected
+    assert sent_example["canonical_state"]["arm_0"]["ee_pose"].shape == (9,)
+    assert sent_example["canonical_state"]["arm_0"]["joint_pos"].shape == (7,)
+    assert sent_example["canonical_state"]["gripper_0"].shape == (1,)
+```
+
+A second test variant flips one bit — passes a checkpoint path **without** a sibling `statistics.yaml` — and asserts `uamvla_state_enabled is False`, no `canonical_state` is sent, and `uamvla_raw_state` (if accidentally present in `example`) is still popped.
+
+### 8.4 Integration test — server boot + single infer
 
 Spin up the model server with a real (or mock) UamVLA ckpt that has `statistics.yaml`. From a separate process, instantiate `ModelClient` and call `step()` once with a hand-built `example_dict` containing `uamvla_raw_state`. Assert:
 - The server's `predict_action` receives `canonical_state` with the expected nested shape/dtype.
@@ -263,7 +355,7 @@ Spin up the model server with a real (or mock) UamVLA ckpt that has `statistics.
 
 A `print()` of the received `canonical_state` shapes inside `predict_action` (gated by env var, removed before merge) is sufficient to eyeball the contract during the dry run.
 
-### 8.4 End-to-end SR observation (not a gating test)
+### 8.5 End-to-end SR observation (not a gating test)
 
 Run LIBERO Spatial for ≥10 episodes in two configurations:
 - **Baseline**: ckpt without `statistics.yaml` ⇒ client falls back to state-less (current behavior).
@@ -282,7 +374,8 @@ Record SR for both. The expected result is a clear improvement under state-passt
 | `tools/probes/probe_libero_obs_keys.py` | new (P1) | +20 |
 | `tests/test_libero_quat_axisangle_alignment.py` | new (P2) | +40 |
 | `tests/test_train_eval_state_alignment.py` | new (§8.2) | +60 |
-| `tests/test_eval_state_passthrough_integration.py` | new (§8.3, may be marked `slow`) | +50 |
+| `tests/test_eval_state_passthrough_wiring.py` | new (§8.3, fake-client) | +90 |
+| `tests/test_eval_state_passthrough_integration.py` | new (§8.4, may be marked `slow`) | +50 |
 
 No deletions. No edits to `UamVLA.predict_action`, the WebSocket transport, the dataloader, or the preprocessor.
 
@@ -291,10 +384,12 @@ No deletions. No edits to `UamVLA.predict_action`, the WebSocket transport, the 
 Single PR. Order of merging within the PR is irrelevant (changes are additive), but for review clarity:
 
 1. §6.1 (trainer copy)
-2. §6.2 (eval driver new key)
-3. §6.3 (client conversion)
-4. §8.1 probes + §8.2 alignment unit test
-5. §8.3 integration test
+2. §6.3 (client `__init__` rewrite — fixes B1/B2 + state-passthrough init)
+3. §6.3.2 (`step()` conversion + unconditional pop)
+4. §6.2 (eval driver gates raw-state assembly on `client.uamvla_state_enabled`)
+5. §6.4 (server-side `stack_canonical` `as_tensor` wrap)
+6. §8.1 probes + §8.2 alignment + §8.3 fake-client wiring tests
+7. §8.4 integration test
 
 If any of P1/P2/P3 fail, surface to the author before continuing — design assumptions are violated and the spec should be revisited rather than worked around.
 
