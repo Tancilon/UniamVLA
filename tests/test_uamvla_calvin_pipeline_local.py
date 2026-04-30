@@ -144,3 +144,128 @@ def test_calvin_uamvla_mixture_registered():
     assert DATASET_NAMED_MIXTURES["calvin_uamvla"] == [
         ("task_D_D", 1.0, "franka_calvin"),
     ]
+
+
+# ============================================================================
+# Task 3: synthetic-fixture dataset chain test
+# ============================================================================
+
+def _build_synthetic_calvin_dataset(tmp_path: Path, n_samples: int = 6) -> Path:
+    """Build a complete CALVIN-shape UAM dataset under tmp_path.
+
+    Produces:
+      - data.jsonl with `n_samples` rows (one episode of length n_samples)
+      - statistics.yaml with embodiment_stats[franka_calvin] + state_stats[franka_calvin]
+      - dummy 256x256 RGB jpgs at every referenced image path
+      - 1024×3 zero point clouds at every referenced point_cloud path
+      - dummy 256×256 float32 depth npys at every referenced depth path
+
+    Stats are computed from the same fixture data run through CalvinAdapter,
+    keeping the fixture self-consistent (q99 != q01 → StateNormalizer
+    actually transforms values, so downstream tests can detect it).
+    """
+    from PIL import Image
+
+    samples = _make_synthetic_calvin_samples(n=n_samples)
+
+    # Augment each sample with the aux fields a real CALVIN preprocessor would write.
+    for s in samples:
+        sid = s["id"]
+        s["image_target"] = f"images/target/{sid}.jpg"
+        s["image_future"] = f"images/future/{s['episode_id']}.jpg"
+        s["depth_static"] = f"depth/static/{sid}.npy"
+        s["depth_wrist"]  = f"depth/wrist/{sid}.npy"
+        s["point_cloud"]  = f"point_clouds/{sid}.npy"
+        s["pose_6d"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],  # identity 6D rot
+            "translation": [0.0, 0.0, 0.0],
+            "object_id":   "test_object",
+        }
+        s["static_cam_extrinsic"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "translation": [0.0, 0.0, 0.0],
+        }
+        s["wrist_cam_extrinsic"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "translation": [0.0, 0.0, 0.0],
+        }
+
+    # Create directory tree.
+    for sub in (
+        "images/obs/static", "images/obs/wrist",
+        "images/target", "images/future",
+        "depth/static", "depth/wrist",
+        "point_clouds",
+    ):
+        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+
+    # Write data.jsonl.
+    with open(tmp_path / "data.jsonl", "w") as f:
+        for s in samples:
+            f.write(json.dumps(s) + "\n")
+
+    # Write dummy media files.
+    blank_rgb = Image.new("RGB", (256, 256), color=(127, 127, 127))
+    pc_zeros = np.zeros((1024, 3), dtype=np.float32)
+    depth_zeros = np.zeros((256, 256), dtype=np.float32)
+    futures_written: set[str] = set()
+    for s in samples:
+        for img_rel in s["image"] + [s["image_target"]]:
+            blank_rgb.save(tmp_path / img_rel, quality=95)
+        if s["image_future"] not in futures_written:
+            blank_rgb.save(tmp_path / s["image_future"], quality=95)
+            futures_written.add(s["image_future"])
+        np.save(tmp_path / s["point_cloud"], pc_zeros)
+        np.save(tmp_path / s["depth_static"], depth_zeros)
+        np.save(tmp_path / s["depth_wrist"], depth_zeros)
+
+    # Compute stats by running samples through CalvinAdapter (self-consistent).
+    from tools.preprocess.calvin_preprocessor import _write_statistics
+    intrinsics = {
+        "static": {"fx": 100.0, "fy": 100.0, "cx": 128.0, "cy": 128.0},
+        "wrist":  {"fx": 100.0, "fy": 100.0, "cx": 128.0, "cy": 128.0},
+    }
+    _write_statistics(samples, tmp_path, intrinsics)
+
+    return tmp_path
+
+
+def test_synthetic_dataset_loads(tmp_path):
+    """End-to-end: synthetic CALVIN fixture → UamVLADataset → canonical_state w/ q99."""
+    import torch
+    from starVLA.dataloader.uamvla_dataset import UamVLADataset
+    from starVLA.model.modules.uamvla.data.embodiment_adapter import CalvinAdapter
+
+    data_root = _build_synthetic_calvin_dataset(tmp_path, n_samples=6)
+
+    ds = UamVLADataset(
+        data_root=data_root,
+        embodiment="franka_calvin",
+        action_horizon=8,
+        normalization={
+            "mode": "q99",
+            "apply_to": ["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
+        },
+    )
+
+    assert len(ds) == 6, f"expected 6 samples, got {len(ds)}"
+
+    sample = ds[0]
+    cs = sample["canonical_state"]
+    assert cs["arm_0"]["ee_pose"].shape == (9,), cs["arm_0"]["ee_pose"].shape
+    assert cs["arm_0"]["joint_pos"].shape == (7,), cs["arm_0"]["joint_pos"].shape
+    assert cs["gripper_0"].shape == (1,), cs["gripper_0"].shape
+
+    assert sample["action"].shape == (8, 7), sample["action"].shape
+    assert sample["action_mask"].shape == (8, 7), sample["action_mask"].shape
+
+    # State normalizer should have actually transformed the values. Recompute
+    # the raw (pre-normalizer) canonical state independently and verify the
+    # post-normalizer tensor differs. If they match, StateNormalizer silently
+    # no-oped (e.g., mode='none' fell through, or stats were degenerate).
+    raw_canonical = CalvinAdapter().to_canonical(ds.samples[0])
+    raw_ee_pose = raw_canonical["arm_0"]["ee_pose"]
+    assert not torch.allclose(cs["arm_0"]["ee_pose"], raw_ee_pose), (
+        "Post-normalizer ee_pose equals raw canonical — StateNormalizer no-oped. "
+        "Check that mode='q99' is wired and state_stats has non-degenerate q01/q99."
+    )
