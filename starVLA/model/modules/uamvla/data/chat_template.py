@@ -14,10 +14,12 @@ QWEN3_VL_VISION_END = "<|vision_end|>"
 QWEN3_VL_IMAGE_PAD = "<|image_pad|>"
 
 # Structural marker for the action chunk in the assistant turn.
-# Registered as a single special token by register_structural_tokens (see
-# state_encoder/special_tokens.py). Used by inference-time LogitsProcessors
-# to trigger action-bin masking in generate().
-ACTION_START_TOKEN = "<|action_start|>"
+# Re-exported from state_encoder.special_tokens (the registration site is
+# the single source of truth for the literal string). Used by inference-time
+# LogitsProcessors to trigger action-bin masking in generate().
+from starVLA.model.modules.uamvla.state_encoder.special_tokens import (  # noqa: E402
+    ACTION_START_TOKEN,
+)
 
 
 def expand_image_placeholders(text: str, patches_per_view: int) -> str:

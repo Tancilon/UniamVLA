@@ -25,6 +25,7 @@ from starVLA.model.modules.uamvla.collator_helpers import (
     stack_pose_gt,
     stack_static_cam_extrinsic,
 )
+from starVLA.model.modules.uamvla.state_encoder.special_tokens import ACTION_START_TOKEN
 
 
 @dataclass
@@ -115,14 +116,14 @@ class UamVLA(baseframework):
         # at backbone-build time. Hard-error on silent unk_token_id collisions so that
         # a missing register_structural_tokens() call surfaces here, not at training time.
         try:
-            _action_start_id = int(_tokenizer.convert_tokens_to_ids("<|action_start|>"))
+            _action_start_id = int(_tokenizer.convert_tokens_to_ids(ACTION_START_TOKEN))
             _unk_id = getattr(_tokenizer, "unk_token_id", None)
             if _action_start_id is None or (
                 _unk_id is not None and _action_start_id == _unk_id
             ):
                 raise RuntimeError(
-                    "<|action_start|> was not registered as a special token. "
-                    "Did you call register_structural_tokens() in build_uamvla_backbone?"
+                    f"{ACTION_START_TOKEN} was not registered as a special token. "
+                    f"Did you call register_structural_tokens() in build_uamvla_backbone?"
                 )
         except (TypeError, ValueError):
             # Mock tokenizer in unit tests — convert_tokens_to_ids returned a non-int.

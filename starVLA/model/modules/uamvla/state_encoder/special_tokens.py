@@ -85,8 +85,13 @@ def register_state_tokens(tokenizer, backbone) -> dict[str, int]:
 # independent, and registered via the same HF add_special_tokens path.
 # ---------------------------------------------------------------------------
 
+# Single source of truth for the action-start sentinel string. chat_template.py
+# and UamVLA.py both import this constant rather than spelling the literal,
+# preventing drift across modules.
+ACTION_START_TOKEN: str = "<|action_start|>"
+
 STRUCTURAL_SPECIAL_TOKENS: list[str] = [
-    "<|action_start|>",
+    ACTION_START_TOKEN,
 ]
 
 

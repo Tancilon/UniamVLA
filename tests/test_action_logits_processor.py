@@ -129,3 +129,12 @@ def test_processor_raises_on_out_of_bounds_action_range():
     # vocab=200 by default in _scores; action_end_id = 180+50 = 230 > 200 → must raise
     with pytest.raises(ValueError, match="exceeds vocab size"):
         p(torch.tensor([[1, 2, 3]]), _scores(B=1))
+
+
+def test_action_logits_processor_reexported_at_package_level():
+    """Caller-friendly import path: from starVLA.model.modules.uamvla.inference import ActionLogitsProcessor."""
+    from starVLA.model.modules.uamvla.inference import ActionLogitsProcessor as PkgImport
+    from starVLA.model.modules.uamvla.inference.action_logits_processor import (
+        ActionLogitsProcessor as DirectImport,
+    )
+    assert PkgImport is DirectImport
