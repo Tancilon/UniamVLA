@@ -14,6 +14,7 @@ Conventions:
 import argparse
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Tuple
@@ -229,6 +230,18 @@ class VLATrainer(TrainerUtils):
         with open(out_path, "w") as f:
             json.dump(out, f, indent=2)
         logger.info(f"Wrote dataset_statistics.json to {out_path}")
+        self._copy_stats_yaml_to_run_dir(stats_yaml, Path(self.config.output_dir))
+
+    @staticmethod
+    def _copy_stats_yaml_to_run_dir(stats_yaml_src: Path, output_dir: Path) -> None:
+        """Copy UamVLA statistics.yaml into the run dir if the source exists.
+
+        Mirrors the dataset_statistics.json placement so read_mode_config's
+        run_dir = checkpoint_pt.parents[1] resolution finds both files.
+        """
+        if stats_yaml_src.exists():
+            shutil.copy(stats_yaml_src, output_dir / "statistics.yaml")
+            logger.info(f"Copied statistics.yaml to {output_dir}")
 
     def _init_checkpointing(self):
         """Initialize checkpoint directory and handle checkpoint loading."""
