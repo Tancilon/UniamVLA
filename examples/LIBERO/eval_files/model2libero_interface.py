@@ -11,6 +11,25 @@ from examples.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
 from starVLA.model.tools import read_mode_config
 
 
+def _to_numpy_leaves(d: dict) -> dict:
+    """Walk a 1-level nested dict; convert torch.Tensor leaves to numpy.
+
+    Used at the WebSocket boundary: msgpack-numpy serializes numpy.ndarray
+    natively but not torch.Tensor. Server-side stack_canonical accepts numpy
+    after the §6.4 torch.as_tensor wrap.
+    """
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = {
+                kk: vv.detach().cpu().numpy() if hasattr(vv, "detach") else vv
+                for kk, vv in v.items()
+            }
+        else:
+            out[k] = v.detach().cpu().numpy() if hasattr(v, "detach") else v
+    return out
+
+
 class ModelClient:
     def __init__(
         self,
