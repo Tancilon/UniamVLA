@@ -96,12 +96,7 @@ x_norm    = 2 * (x_clipped - q01) / (q99 - q01) - 1     # → [-1, 1]
 
 Edge case: if `q01 == q99` for some dimension (constant feature), pass through unchanged (matches existing `Normalizer.mode == "q99"` behavior at `state_action.py:121`).
 
-Currently `Normalizer` at `state_action.py:114-131` implements the linear formula but **does not clip** before mapping. The spec requires adding a clip step. Two options:
-
-- **(A)** Add `clip=True` flag to existing `Normalizer.mode == "q99"`, default `True`. Backward compat: action transforms that rely on un-clipped behavior must opt out. *Lower risk if grep shows no current usage relies on un-clipped q99.*
-- **(B)** Apply clipping in the new state-side normalizer wrapper without touching `Normalizer`.
-
-**Decision: option (A)**. q99 clipping is mathematically the standard semantics; un-clipped is the unusual variant. Existing actions use `min_max`, not `q99`, so flipping the default is safe. Audit step in plan.
+**Finding (2026-04-30, during plan):** `Normalizer.q99` at `state_action.py:114-135` **already clips** to `[-1, 1]` via `torch.clamp` at line 135. The full sequence is: linear map → clamp. This matches OpenVLA-OFT's `BOUNDS_Q99` recipe end-to-end. No change to `state_action.py` is required.
 
 ### 4.4 Where normalization is applied
 
@@ -204,7 +199,6 @@ No production datasets exist yet — this is pre-Phase-2 — so no production mi
 | `tools/preprocess/libero_preprocessor.py` | Compute canonical-space stats; remove deprecated robot_obs |
 | `starVLA/model/modules/uamvla/data/state_normalizer.py` | **New**: `StateNormalizer` class |
 | `starVLA/dataloader/uamvla_dataset.py` | Wire `StateNormalizer` into `__getitem__` |
-| `starVLA/dataloader/gr00t_lerobot/transform/state_action.py` | Add `clip=True` default to `Normalizer.mode == "q99"` |
 | `starVLA/config/training/uamvla_libero.yaml` | Add `normalization` block |
 | `tests/test_state_normalizer.py` | **New**: unit tests |
 | `tests/test_libero_preprocessor.py` | Extend: assert state_stats schema |
