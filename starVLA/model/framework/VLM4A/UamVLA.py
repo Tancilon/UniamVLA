@@ -111,6 +111,24 @@ class UamVLA(baseframework):
             _act0_id = int(_tokenizer.convert_tokens_to_ids("<ACT_0>"))
         except (TypeError, ValueError):
             _act0_id = 0
+        self._act0_id = _act0_id
+
+        # Verify <ACT_i> token IDs are contiguous (required for ActionLogitsProcessor
+        # and _decode_generated_actions). Skip on mock tokenizers that return the
+        # same id for every <ACT_*> query.
+        try:
+            _act_last_id = int(_tokenizer.convert_tokens_to_ids(f"<ACT_{_n_bins - 1}>"))
+            if _act_last_id != _act0_id and _act_last_id != _act0_id + _n_bins - 1:
+                raise RuntimeError(
+                    f"Action token IDs are not contiguous: <ACT_0>={_act0_id}, "
+                    f"<ACT_{_n_bins - 1}>={_act_last_id}, "
+                    f"expected {_act0_id + _n_bins - 1}. "
+                    "ActionLogitsProcessor and _decode_generated_actions require "
+                    "contiguous IDs."
+                )
+        except (TypeError, ValueError):
+            # Mock tokenizer in unit tests; cannot verify.
+            pass
 
         # Resolve action_start_id from the structural <|action_start|> token registered
         # at backbone-build time. Hard-error on silent unk_token_id collisions so that
