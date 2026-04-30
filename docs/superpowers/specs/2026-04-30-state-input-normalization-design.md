@@ -207,4 +207,4 @@ No production datasets exist yet — this is pre-Phase-2 — so no production mi
 
 ## 9. Estimated effort
 
-Small-to-medium. ~1-2 days of focused work. Most of the surface is mechanical (compute stats, plumb config, write YAML); the only delicate spot is the `Normalizer.clip` behavior change, which needs an audit of existing q99 usage to confirm no callers depend on un-clipped output.
+Small-to-medium. ~1-2 days of focused work. The surface is mostly mechanical: compute per-field stats in the preprocessor, plumb config, write YAML, and compose the existing `Normalizer` (see §4.3) in a thin `StateNormalizer` wrapper. No `state_action.py` changes are needed.
