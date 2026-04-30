@@ -317,3 +317,34 @@ def test_cli_required_args_missing_output():
     )
     assert result.returncode != 0, "Missing --output_dir should fail"
     assert "output_dir" in result.stderr.lower() or "output_dir" in result.stdout.lower()
+
+
+# ============================================================================
+# Task 5: training yaml loadable
+# ============================================================================
+
+def test_yaml_loadable():
+    """uamvla_calvin.yaml exists, parses, and has the expected substitutions."""
+    pytest.importorskip("omegaconf")
+    from omegaconf import OmegaConf
+
+    yaml_path = ROOT / "starVLA" / "config" / "training" / "uamvla_calvin.yaml"
+    assert yaml_path.exists(), f"missing {yaml_path}"
+
+    cfg = OmegaConf.load(str(yaml_path))
+
+    # Substitutions vs the LIBERO clone
+    assert cfg.framework.embodiment.name == "franka_calvin", \
+        f"framework.embodiment.name = {cfg.framework.embodiment.name!r}"
+    assert cfg.datasets.vla_data.data_mix == "calvin_uamvla", \
+        f"datasets.vla_data.data_mix = {cfg.datasets.vla_data.data_mix!r}"
+    assert cfg.datasets.vla_data.data_root_dir == "datasets/uamvla_calvin", \
+        f"datasets.vla_data.data_root_dir = {cfg.datasets.vla_data.data_root_dir!r}"
+
+    # Identical-to-LIBERO contract checks (catch yaml drift):
+    assert list(cfg.framework.state_encoder.normalization.apply_to) == [
+        "arm_0.ee_pose", "arm_0.joint_pos", "gripper_0",
+    ], f"unexpected state normalization apply_to: {cfg.framework.state_encoder.normalization.apply_to}"
+    assert cfg.framework.name == "UamVLA"
+    assert cfg.framework.action_model.action_dim == 7
+    assert cfg.framework.action_model.future_action_window_size == 7
