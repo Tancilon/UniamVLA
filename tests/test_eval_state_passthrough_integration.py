@@ -42,7 +42,7 @@ def test_canonical_state_survives_msgpack_and_stack(tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
     (run_dir / "checkpoints").mkdir(parents=True)
     (run_dir / "checkpoints" / "fake.pt").write_bytes(b"")
-    _stats_yaml_path = _stats_yaml(run_dir)
+    _stats_yaml(run_dir)  # writes statistics.yaml under run_dir
 
     # ----- Stub read_mode_config
     monkeypatch.setattr(

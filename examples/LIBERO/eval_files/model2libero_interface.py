@@ -103,10 +103,16 @@ class ModelClient:
                 from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
                 from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
                 self._adapter = LiberoAdapter()
+                # Pin apply_to to the training-side field list so future
+                # state_stats schema additions cannot silently diverge between
+                # train (uamvla_libero.yaml: state_encoder.normalization.apply_to)
+                # and eval. Today this exactly matches the three canonical
+                # franka_libero fields written by the preprocessor.
                 self._state_normalizer = StateNormalizer(
                     stats_dict=stats_dict,
                     embodiment=self.unnorm_key,
                     mode="q99",
+                    apply_to=["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
                 )
                 self.uamvla_state_enabled = True
                 print(f"*** UamVLA state passthrough enabled (stats: {stats_yaml_path}) ***")
@@ -254,10 +260,8 @@ class ModelClient:
 
     @staticmethod
     def _check_unnorm_key(norm_stats, unnorm_key):
-        """
-        Duplicate helper (retained for backward compatibility).
-        See primary _check_unnorm_key above.
-        """
+        """Resolve unnorm_key against norm_stats: pick the sole entry if None,
+        otherwise validate the requested key is present."""
         if unnorm_key is None:
             assert len(norm_stats) == 1, (
                 f"Your model was trained on more than one dataset, "

@@ -9,6 +9,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def pytest_configure(config):
+    """Register custom markers used by tests in this repo."""
+    config.addinivalue_line("markers", "slow: integration tests that exercise full pipelines")
+    config.addinivalue_line(
+        "markers",
+        "libero_env: tests that require the libero_env conda environment / LIBERO sim deps",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------

@@ -57,6 +57,13 @@ def _hand_raw_obs() -> dict:
     }
 
 
+# apply_to is explicit on both sides — matches the training config
+# (uamvla_libero.yaml: state_encoder.normalization.apply_to) and the eval
+# client's pinned list. Keeping it explicit here forecloses default-None
+# divergence if state_stats grows new fields in the future.
+_APPLY_TO = ["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"]
+
+
 def _train_side(stats_yaml: Path, raw: dict) -> dict:
     """Mirror UamVLADataset.__getitem__'s normalization sub-pipeline
     (see uamvla_dataset.py:71-82, 105-106)."""
@@ -66,7 +73,10 @@ def _train_side(stats_yaml: Path, raw: dict) -> dict:
     with open(stats_yaml) as f:
         stats_dict = yaml.safe_load(f)
     adapter = LiberoAdapter()
-    normalizer = StateNormalizer(stats_dict=stats_dict, embodiment="franka_libero", mode="q99")
+    normalizer = StateNormalizer(
+        stats_dict=stats_dict, embodiment="franka_libero", mode="q99",
+        apply_to=_APPLY_TO,
+    )
     return normalizer(adapter.to_canonical(raw))
 
 
@@ -79,7 +89,10 @@ def _eval_side(stats_yaml: Path, raw: dict) -> dict:
     with open(stats_yaml) as f:
         stats_dict = yaml.safe_load(f)
     adapter = LiberoAdapter()
-    normalizer = StateNormalizer(stats_dict=stats_dict, embodiment="franka_libero", mode="q99")
+    normalizer = StateNormalizer(
+        stats_dict=stats_dict, embodiment="franka_libero", mode="q99",
+        apply_to=_APPLY_TO,
+    )
     return normalizer(adapter.to_canonical(raw))
 
 
