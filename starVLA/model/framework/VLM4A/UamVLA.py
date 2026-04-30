@@ -398,6 +398,32 @@ class UamVLA(baseframework):
 
         return {"normalized_actions": normalized_actions}
 
+    def _extract_generated_tail(
+        self,
+        generated_ids: torch.Tensor,
+        prompt_len: int,
+        chunk_len: int,
+    ) -> torch.Tensor:
+        """Return generated new-token IDs from either prompt+new or new-only sequences.
+
+        HuggingFace `generate(inputs_embeds=...)` may return (B, S_prompt + N_new)
+        or (B, N_new) depending on model and version. Normalize to "new tokens only"
+        before downstream decoding.
+        """
+        seq_len = int(generated_ids.shape[1])
+
+        # New-only return: usually exactly chunk_len, or shorter if generation stopped early.
+        if seq_len <= chunk_len:
+            return generated_ids
+
+        # Prompt+new return: slice after the prompt. This is the expected path when
+        # input_ids are supplied to generate().
+        if seq_len >= prompt_len:
+            return generated_ids[:, prompt_len:]
+
+        # Defensive fallback for unusual wrappers: keep the final action window.
+        return generated_ids[:, -chunk_len:]
+
     def _decode_action_tokens(self, head_output, batch_size: int):
         """Decode (B, L) argmax token ids → (B, T, 7) normalized actions as np.ndarray.
 
