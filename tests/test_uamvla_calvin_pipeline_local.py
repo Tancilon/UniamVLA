@@ -169,6 +169,10 @@ def _build_synthetic_calvin_dataset(tmp_path: Path, n_samples: int = 6) -> Path:
     samples = _make_synthetic_calvin_samples(n=n_samples)
 
     # Augment each sample with the aux fields a real CALVIN preprocessor would write.
+    # Note: depth_static / depth_wrist / wrist_cam_extrinsic are NOT consumed by
+    # UamVLADataset._load_aux_targets (see uamvla_dataset.py:153-186). They are
+    # included here for parity with the real preprocessor's JSONL schema; future
+    # tasks/heads that consume them will not need a fixture change.
     for s in samples:
         sid = s["id"]
         s["image_target"] = f"images/target/{sid}.jpg"
