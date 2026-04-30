@@ -22,10 +22,18 @@ def qwen3vl_model():
             "skipping real-model smoke (track as L5 follow-up if needed)."
         )
     pytest.importorskip("transformers")
-    from transformers import Qwen3VLForConditionalGeneration
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        _QWEN3_VL_PATH, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True,
-    )
+    try:
+        from transformers import Qwen3VLForConditionalGeneration
+    except ImportError as e:
+        pytest.skip(
+            f"Qwen3VLForConditionalGeneration not in this transformers version: {e}"
+        )
+    try:
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            _QWEN3_VL_PATH, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True,
+        )
+    except (OSError, ValueError) as e:
+        pytest.skip(f"Failed to load checkpoint at {_QWEN3_VL_PATH}: {e}")
     return model
 
 
