@@ -273,3 +273,47 @@ def test_synthetic_dataset_loads(tmp_path):
         "Post-normalizer ee_pose equals raw canonical — StateNormalizer no-oped. "
         "Check that mode='q99' is wired and state_stats has non-degenerate q01/q99."
     )
+
+
+# ============================================================================
+# Task 4: CLI runner argument parsing
+# ============================================================================
+
+CLI_PATH = ROOT / "runners" / "preprocess_calvin.py"
+
+
+def test_cli_help():
+    """`--help` exits 0 and lists all six expected args."""
+    result = subprocess.run(
+        [sys.executable, str(CLI_PATH), "--help"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"--help exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    for arg in (
+        "--input_dir", "--output_dir", "--dataset_source",
+        "--num_workers", "--default_scene",
+        "--on_resolve_failure", "--on_missing_target",
+    ):
+        assert arg in result.stdout, f"--help output missing {arg}\n{result.stdout}"
+
+
+def test_cli_required_args_missing_input():
+    """Omitting --input_dir fails with non-zero exit."""
+    result = subprocess.run(
+        [sys.executable, str(CLI_PATH), "--output_dir", "/tmp/x"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0, "Missing --input_dir should fail"
+    assert "input_dir" in result.stderr.lower() or "input_dir" in result.stdout.lower()
+
+
+def test_cli_required_args_missing_output():
+    """Omitting --output_dir fails with non-zero exit."""
+    result = subprocess.run(
+        [sys.executable, str(CLI_PATH), "--input_dir", "/tmp/x"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0, "Missing --output_dir should fail"
+    assert "output_dir" in result.stderr.lower() or "output_dir" in result.stdout.lower()
