@@ -25,6 +25,12 @@ framework:
   state_encoder:
     type: modular
     register_special_tokens: true
+    normalization:
+      mode: q99                # one of: q99 | mean_std | min_max | none
+      apply_to:                # canonical field paths to normalize
+        - arm_0.ee_pose
+        - arm_0.joint_pos
+        - gripper_0
   vae:
     path: ckpt/pretrained_vae
   aux_heads:
