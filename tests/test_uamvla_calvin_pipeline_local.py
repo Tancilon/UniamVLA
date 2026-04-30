@@ -10,16 +10,16 @@ Coverage:
 """
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
+import json         # noqa: F401 — used by Task 3 fixture builder
+import subprocess   # noqa: F401 — used by Task 4 CLI tests
+import sys          # noqa: F401 — used by Task 4 CLI tests
 from pathlib import Path
 
 import numpy as np
-import pytest
+import pytest      # noqa: F401 — used by Task 3 (importorskip) / Task 5 (importorskip)
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent  # noqa: F841 — used by Task 4 CLI_PATH
 
 
 # ============================================================================

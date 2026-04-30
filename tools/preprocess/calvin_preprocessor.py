@@ -410,6 +410,12 @@ def _write_statistics(
 ) -> None:
     from starVLA.model.modules.uamvla.data.embodiment_adapter import CalvinAdapter
 
+    if len(samples) < 2:
+        logger.warning(
+            f"Computing statistics over only {len(samples)} sample(s); "
+            f"q01/q99/std will be degenerate. Consider preprocessing more episodes."
+        )
+
     actions_7d = np.array(
         [s["action"][:FRANKA_ACTION_DIM] for s in samples], dtype=np.float64,
     )
@@ -459,6 +465,8 @@ def _write_statistics(
     }
     with open(output_dir / "statistics.yaml", "w") as f:
         yaml.dump(stats, f, default_flow_style=False, sort_keys=False)
+
+    logger.info(f"Wrote statistics.yaml ({len(samples)} samples)")
 
 
 # ---------- CalvinPreprocessor orchestrator ----------------------------------
