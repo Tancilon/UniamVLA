@@ -258,7 +258,7 @@ Cloned from `examples/calvin/train_files/run_calvin_train.sh` (the QwenPI launch
 - `config_yaml=./starVLA/config/training/uamvla_calvin.yaml`  *(was QwenPI yaml)*
 - `calvin_data_root=datasets/uamvla_calvin`  *(was LeRobot-format path)*
 - `data_mix=calvin_uamvla`  *(was `calvin_task_D_D`)*
-- `run_id=0430_uamvla_calvin_task_D_D`
+- `run_id=uamvla_calvin_phase1`
 - `wandb_project=uamvla_calvin`
 
 Drop QwenPI-only flags: `--framework.qwenvl.base_vlm`, `--datasets.vla_data.per_device_batch_size 4`, `--trainer.vla_data.video_backend torchvision_av`. UamVLA reads these from the yaml directly.
@@ -361,7 +361,7 @@ Test cases:
 
 1. **`test_calvin_uamvla_mixture_registered`** — assert `DATASET_NAMED_MIXTURES["calvin_uamvla"]` equals `[("task_D_D", 1.0, "franka_calvin")]`.
 
-2. **`test_cli_help`** — invoke `python runners/preprocess_calvin.py --help` via subprocess, assert exit code 0 and that the six expected args appear in stdout.
+2. **`test_cli_help`** — invoke `python runners/preprocess_calvin.py --help` via subprocess, assert exit code 0 and that the seven expected args appear in stdout.
 
 3. **`test_cli_required_args`** — invoke without `--input_dir` / `--output_dir`, assert non-zero exit.
 
