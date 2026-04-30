@@ -408,15 +408,37 @@ def _write_statistics(
     output_dir: Path,
     camera_intrinsics: dict,
 ) -> None:
+    from starVLA.model.modules.uamvla.data.embodiment_adapter import CalvinAdapter
+
     actions_7d = np.array(
         [s["action"][:FRANKA_ACTION_DIM] for s in samples], dtype=np.float64,
     )
-    # NOTE: CALVIN preprocessor still writes legacy robot_obs_mean/std until a
-    # future PR migrates it to the new state_stats schema (mirrors LIBERO Task 3).
-    # Out of scope for the current state-input-normalization feature; tracked as
-    # deliberate tech debt. CALVIN datasets cannot be consumed by StateNormalizer
-    # until this migration completes.
-    robot_obs = np.array([s["robot_obs"] for s in samples], dtype=np.float64)
+
+    # Per-field stats over the CANONICAL representation produced by CalvinAdapter,
+    # keyed by dotted path matching the canonical_state nested dict.
+    adapter = CalvinAdapter()
+    field_buffers: dict[str, list[np.ndarray]] = {
+        "arm_0.ee_pose":   [],
+        "arm_0.joint_pos": [],
+        "gripper_0":       [],
+    }
+    for s in samples:
+        canonical = adapter.to_canonical(s)  # reads s["robot_obs"] (15-dim)
+        field_buffers["arm_0.ee_pose"].append(canonical["arm_0"]["ee_pose"].numpy())
+        field_buffers["arm_0.joint_pos"].append(canonical["arm_0"]["joint_pos"].numpy())
+        field_buffers["gripper_0"].append(canonical["gripper_0"].numpy())
+
+    franka_state_stats: dict[str, dict] = {}
+    for path, vals in field_buffers.items():
+        arr = np.stack(vals).astype(np.float64)  # (N, D)
+        franka_state_stats[path] = {
+            "q01":  np.quantile(arr, 0.01, axis=0).tolist(),
+            "q99":  np.quantile(arr, 0.99, axis=0).tolist(),
+            "min":  arr.min(axis=0).tolist(),
+            "max":  arr.max(axis=0).tolist(),
+            "mean": arr.mean(axis=0).tolist(),
+            "std":  arr.std(axis=0).tolist(),
+        }
 
     stats = {
         "view_names": ["static", "wrist"],
@@ -428,8 +450,7 @@ def _write_statistics(
                 "action_max_bound": actions_7d.max(axis=0).tolist(),
             },
         },
-        "robot_obs_mean": robot_obs.mean(axis=0).tolist(),
-        "robot_obs_std": robot_obs.std(axis=0).tolist(),
+        "state_stats": {EMBODIMENT: franka_state_stats},
         "cameras": {
             "static": {"intrinsic": camera_intrinsics["static"]},
             "wrist":  {"intrinsic": camera_intrinsics["wrist"]},
