@@ -41,6 +41,8 @@ class ActionLogitsProcessor(LogitsProcessor):
         self.action_chunk_len = int(action_chunk_len)
         # Lazily allocated on first __call__ once we know batch size + device.
         self._remaining: torch.Tensor | None = None
+        self._last_seq_len: int = -1
+        self._bounds_checked: bool = False
 
     def __call__(
         self,
@@ -50,11 +52,37 @@ class ActionLogitsProcessor(LogitsProcessor):
         B = scores.shape[0]
         device = scores.device
 
+        # One-time bounds check: action range must lie within vocab.
+        # Catches misconfig (e.g. action_end_id past vocab tail) at the first call
+        # rather than silently mis-masking via Python slice truncation.
+        if not self._bounds_checked:
+            vocab = scores.shape[1]
+            if self.action_end_id > vocab:
+                raise ValueError(
+                    f"ActionLogitsProcessor: action range "
+                    f"[{self.action_begin_id}, {self.action_end_id}) exceeds vocab size {vocab}. "
+                    f"Check action_begin_id + n_bins against tokenizer vocab."
+                )
+            if self.action_begin_id < 0:
+                raise ValueError(
+                    f"ActionLogitsProcessor: action_begin_id={self.action_begin_id} is negative."
+                )
+            self._bounds_checked = True
+
         # Lazy-init / re-init if batch size changed across calls.
         if self._remaining is None or self._remaining.shape[0] != B:
             self._remaining = torch.zeros(B, dtype=torch.long, device=device)
         elif self._remaining.device != device:
             self._remaining = self._remaining.to(device)
+
+        # Detect new generate() call: sequence length shrank vs. last call.
+        # Within a single generate(), seq_len only grows; a shorter input_ids
+        # means a fresh prompt arrived. Reset all state to avoid carrying over
+        # mid-action-segment counters into the new generation.
+        cur_seq_len = int(input_ids.shape[1])
+        if cur_seq_len < self._last_seq_len:
+            self._remaining.zero_()
+        self._last_seq_len = cur_seq_len
 
         # Detect entry: did the last-generated token equal action_start_id?
         last_tokens = input_ids[:, -1]

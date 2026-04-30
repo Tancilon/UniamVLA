@@ -103,3 +103,29 @@ def test_processor_resets_counter_on_re_entry():
     out = p(torch.tensor([[42, 101, 42]]), _scores(1).clone())
     # Should be masked again (counter reset to action_chunk_len=2)
     assert torch.isinf(out[0, 0])
+
+
+def test_processor_resets_state_on_new_generate_call():
+    """Reusing an instance across generate() calls: state must auto-reset
+    when a shorter input_ids (new prompt) arrives."""
+    p = _make_processor(action_begin_id=100, n_bins=4, action_chunk_len=3)
+
+    # Simulate generate() call 1: enter action mode at step 0, advance to step 1.
+    p(torch.tensor([[1, 2, 3, 42]]), _scores(B=1).clone())  # seq_len=4, just entered, _remaining→2 after decrement
+    p(torch.tensor([[1, 2, 3, 42, 101]]), _scores(B=1).clone())  # seq_len=5, still masking, _remaining→1
+
+    # Simulate generate() call 2 with a fresh, shorter prompt — should reset state.
+    # The first token of the new prompt is NOT action_start, so masking should be OFF.
+    out = p(torch.tensor([[5, 6]]), _scores(B=1).clone())  # seq_len=2 < 5
+    expected = _scores(B=1)
+    assert torch.equal(out, expected), (
+        "state did not reset on new generate(): mask still active in fresh sequence"
+    )
+
+
+def test_processor_raises_on_out_of_bounds_action_range():
+    """If action range exceeds vocab, raise ValueError on first call."""
+    p = _make_processor(action_begin_id=180, n_bins=50, action_chunk_len=2)
+    # vocab=200 by default in _scores; action_end_id = 180+50 = 230 > 200 → must raise
+    with pytest.raises(ValueError, match="exceeds vocab size"):
+        p(torch.tensor([[1, 2, 3]]), _scores(B=1))
