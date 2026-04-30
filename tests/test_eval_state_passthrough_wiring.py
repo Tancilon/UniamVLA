@@ -152,3 +152,53 @@ def test_state_passthrough_disabled_when_yaml_absent(make_client):
     """statistics.yaml absent ⇒ flag stays False; non-UamVLA models unaffected."""
     client = make_client(unnorm_key=None, with_stats_yaml=False)
     assert client.uamvla_state_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# step() pop + convert behavior.
+# ---------------------------------------------------------------------------
+def _build_example_with_raw_state():
+    return {
+        "image": [np.zeros((224, 224, 3), dtype=np.uint8) for _ in range(2)],
+        "lang": "pick up the bowl",
+        "uamvla_raw_state": {
+            "ee_pos":        np.array([0.1, 0.0, 0.5], dtype=np.float32),
+            "ee_axis_angle": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            "joint_pos":     np.zeros(7, dtype=np.float32),
+            "gripper_qpos":  np.array([0.02, 0.02], dtype=np.float32),
+        },
+    }
+
+
+def test_step_pops_raw_state_and_injects_canonical_state(make_client):
+    client = make_client(unnorm_key=None)
+    example = _build_example_with_raw_state()
+    client.step(example, step=0)
+
+    sent = client.client.last_payload
+    assert "examples" in sent
+    sent_example = sent["examples"][0]
+
+    # Raw state must be popped (cleanliness: never on the wire).
+    assert "uamvla_raw_state" not in sent_example
+    # Canonical state must be injected with the expected nested shape.
+    assert "canonical_state" in sent_example
+    canonical = sent_example["canonical_state"]
+    assert canonical["arm_0"]["ee_pose"].shape == (9,)
+    assert canonical["arm_0"]["joint_pos"].shape == (7,)
+    assert canonical["gripper_0"].shape == (1,)
+    # Leaves must be numpy (msgpack-numpy can serialize them).
+    assert isinstance(canonical["arm_0"]["ee_pose"], np.ndarray)
+
+
+def test_step_pops_raw_state_even_when_passthrough_disabled(make_client):
+    """If statistics.yaml is absent the gate is False, but step() must still
+    pop uamvla_raw_state so it never reaches the wire."""
+    client = make_client(unnorm_key=None, with_stats_yaml=False)
+    example = _build_example_with_raw_state()
+    client.step(example, step=0)
+
+    sent = client.client.last_payload
+    sent_example = sent["examples"][0]
+    assert "uamvla_raw_state" not in sent_example
+    assert "canonical_state" not in sent_example

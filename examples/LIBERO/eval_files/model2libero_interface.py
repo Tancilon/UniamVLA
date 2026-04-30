@@ -144,6 +144,16 @@ class ModelClient:
 
         images = [self._resize_image(image) for image in images]
         example["image"] = images
+
+        # Spec §6.3.2: always pop the UamVLA raw-state key so it never reaches
+        # the wire. Conversion to canonical_state is gated on
+        # uamvla_state_enabled (see __init__).
+        raw = example.pop("uamvla_raw_state", None)
+        if self.uamvla_state_enabled and raw is not None:
+            canonical = self._adapter.to_canonical(raw)
+            canonical = self._state_normalizer(canonical)
+            example["canonical_state"] = _to_numpy_leaves(canonical)
+
         vla_input = {
             "examples": [example],
             "do_sample": False,
