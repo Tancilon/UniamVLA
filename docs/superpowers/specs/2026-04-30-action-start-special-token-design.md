@@ -123,6 +123,8 @@ Both `Qwen3ChatTemplate` (SigLIP path, currently unused but kept for compat) and
 
 Add an optional class-level constant `ACTION_START_TOKEN = "<|action_start|>"` on the base `ChatTemplate` so downstream code can reference it symbolically rather than hardcoding the string.
 
+**Implementation note (post-implementation amendment):** the `_VLA_SYSTEM_PROMPT` originally ended with the descriptive clause `"...action tokens that begin with <action_start>. Do not output natural language."` This clause was removed during implementation. Reason: keeping the literal in the system prompt — once `<|action_start|>` becomes a single special token — would either create dual occurrences of the token in the prompt (encouraging the model to imitate system instructions in its own output) or require relaxing the chat-template test's `count == 1` contract. The descriptive mention was informational, not load-bearing — the model learns marker position from training labels and from the assistant turn's `<|action_start|>`. Cleaner final clause: `"...action tokens. Do not output natural language."`
+
 ### 4.5 Framework-level wiring (`UamVLA.py`)
 
 In `UamVLA.__init__` ([`UamVLA.py:108-112`](starVLA/model/framework/VLM4A/UamVLA.py#L108-L112)), alongside `_act0_id`:
