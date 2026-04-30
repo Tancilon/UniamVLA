@@ -5,6 +5,7 @@ from typing import Dict, Optional, Sequence
 import cv2 as cv
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 from examples.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
@@ -50,9 +51,18 @@ class ModelClient:
         # build client to connect server policy
         self.client = WebsocketClientPolicy(host, port)
         self.policy_setup = policy_setup
-        self.unnorm_key = unnorm_key
 
-        print(f"*** policy_setup: {policy_setup}, unnorm_key: {unnorm_key} ***")
+        # ----- Resolve unnorm_key once and write back to self (fixes B1).
+        # eval_libero.py does not pass unnorm_key; the staticmethod in
+        # get_action_stats resolved it locally but did NOT update self.
+        # Doing it here makes self.unnorm_key authoritative for both
+        # action stats and state stats lookups.
+        _, _norm_stats = read_mode_config(policy_ckpt_path)
+        self.unnorm_key = self._check_unnorm_key(_norm_stats, unnorm_key)
+        self.action_norm_stats = _norm_stats[self.unnorm_key]["action"]
+
+        print(f"*** policy_setup: {policy_setup}, unnorm_key: {self.unnorm_key} ***")
+
         self.use_ddim = use_ddim
         self.num_ddim_steps = num_ddim_steps
         self.image_size = image_size
@@ -73,8 +83,33 @@ class ModelClient:
             self.action_ensembler = None
         self.num_image_history = 0
 
-        self.action_norm_stats = self.get_action_stats(self.unnorm_key, policy_ckpt_path=policy_ckpt_path)
         self.action_chunk_size = self.get_action_chunk_size(policy_ckpt_path=policy_ckpt_path)
+
+        # ----- UamVLA opt-in state-passthrough setup (fixes B2 + spec §6.3.1).
+        # statistics.yaml lives at the run dir level (mirrors dataset_statistics.json).
+        # read_mode_config resolves run_dir = checkpoint_pt.parents[1] so we use the
+        # same logic here.
+        self.uamvla_state_enabled = False  # public; gates eval_libero.py assembly
+        run_dir = Path(policy_ckpt_path).parents[1]
+        stats_yaml_path = run_dir / "statistics.yaml"
+        if stats_yaml_path.exists():
+            with open(stats_yaml_path) as f:
+                stats_dict = yaml.safe_load(f)
+            if (
+                isinstance(stats_dict, dict)
+                and "state_stats" in stats_dict
+                and self.unnorm_key in stats_dict["state_stats"]
+            ):
+                from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
+                from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
+                self._adapter = LiberoAdapter()
+                self._state_normalizer = StateNormalizer(
+                    stats_dict=stats_dict,
+                    embodiment=self.unnorm_key,
+                    mode="q99",
+                )
+                self.uamvla_state_enabled = True
+                print(f"*** UamVLA state passthrough enabled (stats: {stats_yaml_path}) ***")
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
