@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from omegaconf import OmegaConf
 
 
@@ -23,9 +23,9 @@ def _build_minimal_uamvla(monkeypatch, n_bins=256, hidden_size=4, vocab_size=400
 
     # Tokenizer that registers <ACT_i> tokens at sequential ids and supports add_tokens.
     class _FakeTokenizer:
-        unk_token_id = 1
-        padding_side = "right"
         def __init__(self):
+            self.unk_token_id = 1
+            self.padding_side = "right"
             self._vocab = {}
             self._next = 100
         def add_tokens(self, tokens):
@@ -222,7 +222,6 @@ def test_predict_action_uses_left_padding_temporarily_and_restores_tokenizer(mon
             "pixel_values": torch.zeros(B, 3, 32, 32),
             "image_grid_thw": torch.tensor([[1, 4, 4]] * B),
         }
-    model.qwen_vl_interface.build_inputs = fake_build_inputs
     act_ids = torch.full((1, chunk_len), model._act0_id, dtype=torch.long)
     generated_ids = torch.cat(
         [torch.zeros(1, prompt_len, dtype=torch.long), act_ids], dim=1
@@ -231,7 +230,8 @@ def test_predict_action_uses_left_padding_temporarily_and_restores_tokenizer(mon
         model, fake_backbone, generated_ids,
         prompt_len=prompt_len, hidden_size=hidden_size,
     )
-    # The patch above re-set build_inputs; re-set our observer build_inputs again
+    # Override the MagicMock build_inputs installed by _patch_predict_dependencies
+    # with our observer that records tokenizer.padding_side at call time.
     model.qwen_vl_interface.build_inputs = fake_build_inputs
 
     model.predict_action(_make_examples(B=1))
