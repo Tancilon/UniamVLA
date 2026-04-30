@@ -35,6 +35,11 @@ def stack_canonical(state_list: list[dict]) -> dict:
     Each leaf is wrapped in ``torch.as_tensor`` so callers may pass numpy
     arrays (e.g. WebSocket-deserialized canonical_state from the eval
     client) without manual conversion.
+
+    Deeper nesting (e.g., {"limb": {"sub": {"key": tensor}}}) is NOT
+    supported and will produce TypeError from torch.stack on dicts.
+    Update this helper if Phase 2 multi-finger gripper / per-joint
+    structures need deeper nesting.
     """
     template = state_list[0]
     out: dict = {}
