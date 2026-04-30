@@ -44,6 +44,7 @@ class UamVLADataset(Dataset):
         action_horizon: int = 8,
         max_samples: Optional[int] = None,
         transforms=None,
+        normalization: Optional[dict] = None,
     ):
         self.data_root = Path(data_root)
         self.embodiment = embodiment
@@ -70,6 +71,16 @@ class UamVLADataset(Dataset):
         # Embodiment adapter (stateless singleton)
         self.adapter = get_embodiment_config(embodiment)["adapter"]
 
+        # State normalizer: build from stats already loaded into self.stats.
+        from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
+        norm_cfg = normalization or {"mode": "q99"}
+        self.state_normalizer = StateNormalizer(
+            stats_dict=self.stats,
+            embodiment=embodiment,
+            mode=norm_cfg.get("mode", "q99"),
+            apply_to=norm_cfg.get("apply_to"),
+        )
+
         # Episode index for action chunk slicing
         self._episode_index = {(s["episode_id"], int(s["step_idx"])): i
                                for i, s in enumerate(self.samples)}
@@ -91,8 +102,8 @@ class UamVLADataset(Dataset):
         # Action chunk (H, 7), normalized
         action, action_mask = self._slice_action_chunk(raw)
 
-        # Canonical state via adapter
-        canonical_state = self.adapter.to_canonical(raw)
+        # Canonical state via adapter, then apply state normalizer
+        canonical_state = self.state_normalizer(self.adapter.to_canonical(raw))
 
         sample = {
             "image": images,
@@ -184,11 +195,37 @@ def collate_fn(batch):
 
 def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
     """starVLA plugin entry point. Returns a Dataset that yields starVLA examples dicts."""
-    # data_cfg.data_mix is the mixture name; resolve to subdirs
     data_root = Path(data_cfg.data_root_dir)
     mixture = DATASET_NAMED_MIXTURES.get(data_cfg.data_mix)
     if mixture is None:
         raise ValueError(f"Unknown data_mix '{data_cfg.data_mix}'. Available: {list(DATASET_NAMED_MIXTURES)}")
+
+    # Pull state encoder normalization config if present.
+    framework = getattr(data_cfg, "framework", None) or kwargs.get("framework")
+    norm_cfg = None
+    if framework is not None:
+        # Handle both OmegaConf DictConfig (attribute access) and plain dict (key access).
+        if hasattr(framework, "state_encoder"):
+            state_enc = framework.state_encoder
+        elif isinstance(framework, dict):
+            state_enc = framework.get("state_encoder", {})
+        else:
+            state_enc = None
+        if state_enc is not None:
+            if hasattr(state_enc, "normalization"):
+                raw_norm = state_enc.normalization
+            elif isinstance(state_enc, dict):
+                raw_norm = state_enc.get("normalization")
+            else:
+                raw_norm = None
+            if raw_norm is not None:
+                # Convert OmegaConf DictConfig → plain dict so UamVLADataset
+                # can call .get() on it. Lazy-import to avoid hard dep in tests.
+                try:
+                    from omegaconf import OmegaConf
+                    norm_cfg = OmegaConf.to_container(raw_norm, resolve=True)
+                except (ImportError, Exception):
+                    norm_cfg = dict(raw_norm) if not isinstance(raw_norm, dict) else raw_norm
 
     # Phase 1: single embodiment, single subdir; multi-subdir support deferred
     if len(mixture) == 1:
@@ -197,6 +234,7 @@ def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
             data_root=data_root / subdir,
             embodiment=embodiment,
             action_horizon=int(data_cfg.get("action_horizon", 8)),
+            normalization=norm_cfg,
         )
     # Phase 2: ConcatDataset across multiple subdirs with weights
     raise NotImplementedError("Multi-subdir mixture deferred to Phase 2")
