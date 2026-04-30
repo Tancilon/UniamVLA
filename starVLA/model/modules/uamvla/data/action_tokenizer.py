@@ -24,7 +24,7 @@ class ActionTokenizer:
         action_tokens = [f"<ACT_{i}>" for i in range(n_bins)]
         tokenizer.add_tokens(action_tokens)
 
-        self.bin_edges = np.linspace(min_action, max_action, n_bins)
+        self.bin_edges = np.linspace(min_action, max_action, n_bins + 1)
         self.bin_centers = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0
 
         self.bin_to_token_id = {
@@ -37,7 +37,7 @@ class ActionTokenizer:
         """Continuous actions -> discrete bin indices -> token IDs."""
         clipped = np.clip(actions, self.bin_edges[0], self.bin_edges[-1])
         bins = np.digitize(clipped, self.bin_edges) - 1
-        bins = np.clip(bins, 0, self.n_bins - 2)
+        bins = np.clip(bins, 0, self.n_bins - 1)
         return [self.bin_to_token_id[int(b)] for b in bins]
 
     def decode(self, token_ids: list[int]) -> np.ndarray:
