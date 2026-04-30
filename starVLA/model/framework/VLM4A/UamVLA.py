@@ -126,6 +126,8 @@ class UamVLA(baseframework):
                 )
         except (TypeError, ValueError):
             # Mock tokenizer in unit tests — convert_tokens_to_ids returned a non-int.
+            # NOTE: Do NOT widen this to `except Exception`; doing so would swallow
+            # the RuntimeError above and silently mis-tokenize at training time.
             _action_start_id = -1
         self.action_start_id = _action_start_id
 
