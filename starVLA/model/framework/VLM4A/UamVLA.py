@@ -14,7 +14,10 @@ import torch.nn as nn
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
 from starVLA.model.tools import FRAMEWORK_REGISTRY
-from starVLA.model.modules.uamvla.backbone_wrapper import build_uamvla_backbone
+from starVLA.model.modules.uamvla.backbone_wrapper import (
+    _replace_state_tokens,
+    build_uamvla_backbone,
+)
 from starVLA.model.modules.uamvla.aux_heads.action_head import ActionHead
 from starVLA.model.modules.uamvla.aux_heads.pose_head import PoseHead
 from starVLA.model.modules.uamvla.aux_heads.future_head import FutureHead
@@ -405,9 +408,10 @@ class UamVLA(baseframework):
         The state splice is identical to the training forward path. We keep the
         original input_ids in the generation kwargs so generation-time helpers
         and logits processors can see the textual prompt.
-        """
-        from starVLA.model.modules.uamvla.backbone_wrapper import _replace_state_tokens
 
+        This method does NOT run any transformer layers — only embedding lookup
+        and state splicing. The transformer runs inside model.generate().
+        """
         iface = self.qwen_vl_interface
         input_ids = qwen_inputs["input_ids"]
         canonical_state = qwen_inputs.get("canonical_state")
@@ -429,7 +433,7 @@ class UamVLA(baseframework):
 
         # Preserve or derive mm_token_type_ids for Qwen3-VL multimodal generation.
         mm_token_type_ids = qwen_inputs.get("mm_token_type_ids")
-        if mm_token_type_ids is None and hasattr(iface, "_derive_mm_token_type_ids"):
+        if mm_token_type_ids is None:
             mm_token_type_ids = iface._derive_mm_token_type_ids(
                 input_ids=input_ids,
                 pixel_values=qwen_inputs.get("pixel_values"),

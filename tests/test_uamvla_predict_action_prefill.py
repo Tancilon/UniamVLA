@@ -57,7 +57,7 @@ def test_prefill_calls_state_encoder_when_canonical_state_given():
     stub, B, S, hidden_size = _make_stub()
     qi = _make_qwen_inputs(B, S, with_canonical_state=True)
     with patch(
-        "starVLA.model.modules.uamvla.backbone_wrapper._replace_state_tokens"
+        "starVLA.model.framework.VLM4A.UamVLA._replace_state_tokens"
     ) as mock_replace:
         mock_replace.return_value = torch.zeros(B, S, hidden_size)
         gen_kwargs = stub._build_prefill_generate_kwargs(qi)
