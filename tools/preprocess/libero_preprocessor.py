@@ -668,20 +668,49 @@ class LiberoPreprocessor(BasePreprocessor):
         output_path: Path,
         camera_intrinsics: dict,
     ):
-        """Compute normalization statistics and write statistics.yaml."""
+        """Compute normalization statistics and write statistics.yaml.
+
+        Action stats: min/max bounds (unchanged).
+        State stats (NEW): per-field q01/q99/min/max/mean/std over the CANONICAL
+            representation produced by LiberoAdapter.to_canonical(), keyed by
+            dotted path matching the canonical_state nested dict.
+        """
         import yaml
+
+        from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
 
         actions_7d = np.array(
             [s["action"][:FRANKA_ACTION_DIM] for s in samples]
         )
-        # TODO(state-encoder PR#2): drop robot_obs_mean/std once BaseDataset stops reading robot_obs.
-        #                           Statistics for ee_pos / ee_axis_angle / joint_pos / gripper_qpos will
-        #                           be computed by EmbodimentAdapter consumers as needed.
-        #                           Affected sites for PR#2 cleanup:
-        #                             - uamvla/data/statistics.py (3-dim default for robot_obs_mean/std)
-        #                             - tests/conftest.py (3-dim fixture in sample_dataset_dir)
-        #                             - tests/test_data.py (3-dim robot_obs_mean fixture entries)
-        robot_obs = np.array([s["robot_obs"] for s in samples])
+
+        # Canonical-space state stats: run adapter per sample, accumulate per field.
+        adapter = LiberoAdapter()
+        field_buffers: dict[str, list[np.ndarray]] = {
+            "arm_0.ee_pose": [],
+            "arm_0.joint_pos": [],
+            "gripper_0": [],
+        }
+        for s in samples:
+            canonical = adapter.to_canonical(s)
+            field_buffers["arm_0.ee_pose"].append(
+                canonical["arm_0"]["ee_pose"].numpy()
+            )
+            field_buffers["arm_0.joint_pos"].append(
+                canonical["arm_0"]["joint_pos"].numpy()
+            )
+            field_buffers["gripper_0"].append(canonical["gripper_0"].numpy())
+
+        franka_state_stats: dict[str, dict] = {}
+        for field_path, vals in field_buffers.items():
+            arr = np.stack(vals).astype(np.float64)  # (N, D)
+            franka_state_stats[field_path] = {
+                "q01":  np.quantile(arr, 0.01, axis=0).tolist(),
+                "q99":  np.quantile(arr, 0.99, axis=0).tolist(),
+                "min":  arr.min(axis=0).tolist(),
+                "max":  arr.max(axis=0).tolist(),
+                "mean": arr.mean(axis=0).tolist(),
+                "std":  arr.std(axis=0).tolist(),
+            }
 
         stats = {
             "view_names": ["static", "wrist"],
@@ -693,15 +722,10 @@ class LiberoPreprocessor(BasePreprocessor):
                     "action_max_bound": actions_7d.max(axis=0).tolist(),
                 },
             },
-            "robot_obs_mean": robot_obs.mean(axis=0).tolist(),
-            "robot_obs_std": robot_obs.std(axis=0).tolist(),
+            "state_stats": {"franka_libero": franka_state_stats},
             "cameras": {
-                "static": {
-                    "intrinsic": camera_intrinsics[STATIC_CAM],
-                },
-                "wrist": {
-                    "intrinsic": camera_intrinsics[WRIST_CAM],
-                },
+                "static": {"intrinsic": camera_intrinsics[STATIC_CAM]},
+                "wrist":  {"intrinsic": camera_intrinsics[WRIST_CAM]},
             },
             "point_cloud": {
                 "num_points": NUM_POINTS,
