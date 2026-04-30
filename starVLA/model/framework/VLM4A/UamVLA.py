@@ -111,6 +111,24 @@ class UamVLA(baseframework):
         except (TypeError, ValueError):
             _act0_id = 0
 
+        # Resolve action_start_id from the structural <|action_start|> token registered
+        # at backbone-build time. Hard-error on silent unk_token_id collisions so that
+        # a missing register_structural_tokens() call surfaces here, not at training time.
+        try:
+            _action_start_id = int(_tokenizer.convert_tokens_to_ids("<|action_start|>"))
+            _unk_id = getattr(_tokenizer, "unk_token_id", None)
+            if _action_start_id is None or (
+                _unk_id is not None and _action_start_id == _unk_id
+            ):
+                raise RuntimeError(
+                    "<|action_start|> was not registered as a special token. "
+                    "Did you call register_structural_tokens() in build_uamvla_backbone?"
+                )
+        except (TypeError, ValueError):
+            # Mock tokenizer in unit tests — convert_tokens_to_ids returned a non-int.
+            _action_start_id = -1
+        self.action_start_id = _action_start_id
+
         # Aux heads
         from starVLA.model.modules.uamvla.components.pixel_decoder.vae import VAEPixelDecoder
         fut_on = self.config.framework.aux_heads.get("future", {}).get("enabled", True)
