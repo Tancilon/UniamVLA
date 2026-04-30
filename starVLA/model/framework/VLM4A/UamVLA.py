@@ -424,6 +424,51 @@ class UamVLA(baseframework):
         # Defensive fallback for unusual wrappers: keep the final action window.
         return generated_ids[:, -chunk_len:]
 
+    def _decode_generated_actions(
+        self,
+        generated_ids: torch.Tensor,
+        prompt_len: int,
+        H: int,
+        action_dim: int,
+    ) -> np.ndarray:
+        """Extract action tokens from the generated tail and decode to normalized actions.
+
+        Strategy: normalize generate() return shape via _extract_generated_tail, then
+        scan for action token ids in [_act0_id, _act0_id + n_bins). Tokens outside
+        the range are skipped defensively. Length is normalized to H * action_dim
+        via mid_bin padding (action ≈ 0) on shortfall, or truncation on overflow.
+
+        Args:
+            generated_ids: (B, S_prompt + N_new) or (B, N_new) long tensor from model.generate
+            prompt_len: number of prompt tokens (= inputs_embeds.shape[1])
+            H: action horizon
+            action_dim: action dimensionality (typically 7 for Franka)
+
+        Returns:
+            np.ndarray of shape (B, H, action_dim), float32, in normalized action space
+        """
+        B = generated_ids.shape[0]
+        chunk_len = H * action_dim
+        n_bins = int(self.config.framework.action_model.get("num_bins", 256))
+        act_min = self._act0_id
+        act_max = self._act0_id + n_bins  # exclusive
+        mid_id = self._act0_id + n_bins // 2
+
+        new_ids = self._extract_generated_tail(generated_ids, prompt_len, chunk_len)
+
+        decoded = np.zeros((B, H, action_dim), dtype=np.float32)
+        for b in range(B):
+            row = new_ids[b]
+            mask = (row >= act_min) & (row < act_max)
+            action_ids = row[mask].tolist()
+            if len(action_ids) < chunk_len:
+                action_ids += [mid_id] * (chunk_len - len(action_ids))
+            elif len(action_ids) > chunk_len:
+                action_ids = action_ids[:chunk_len]
+            chunk = self.action_tokenizer.decode(action_ids).reshape(H, action_dim)
+            decoded[b] = chunk
+        return decoded
+
     def _decode_action_tokens(self, head_output, batch_size: int):
         """Decode (B, L) argmax token ids → (B, T, 7) normalized actions as np.ndarray.
 
