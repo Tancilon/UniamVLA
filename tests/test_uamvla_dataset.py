@@ -38,8 +38,6 @@ def mock_jsonl_dir(tmp_path):
                 "action_max_bound": [1.0] * 7,
             },
         },
-        "robot_obs_mean": [0.0, 0.0, 0.0],
-        "robot_obs_std": [1.0, 1.0, 1.0],
     }
     import yaml
     (tmp_path / "statistics.yaml").write_text(yaml.dump(stats))

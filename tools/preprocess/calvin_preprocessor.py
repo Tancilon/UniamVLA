@@ -411,13 +411,11 @@ def _write_statistics(
     actions_7d = np.array(
         [s["action"][:FRANKA_ACTION_DIM] for s in samples], dtype=np.float64,
     )
-    # TODO(state-encoder PR#2): drop robot_obs_mean/std once BaseDataset stops reading robot_obs.
-    #                           Statistics for ee_pos / ee_quat / joint_pos / gripper_qpos will
-    #                           be computed by EmbodimentAdapter consumers as needed.
-    #                           Affected sites for PR#2 cleanup:
-    #                             - tools/statistics.py (3-dim default for robot_obs_mean/std)
-    #                             - tests/conftest.py (3-dim fixture in sample_dataset_dir)
-    #                             - tests/test_data.py (3-dim robot_obs_mean fixture entries)
+    # NOTE: CALVIN preprocessor still writes legacy robot_obs_mean/std until a
+    # future PR migrates it to the new state_stats schema (mirrors LIBERO Task 3).
+    # Out of scope for the current state-input-normalization feature; tracked as
+    # deliberate tech debt. CALVIN datasets cannot be consumed by StateNormalizer
+    # until this migration completes.
     robot_obs = np.array([s["robot_obs"] for s in samples], dtype=np.float64)
 
     stats = {

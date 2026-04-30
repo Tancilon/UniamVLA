@@ -18,8 +18,6 @@ class DatasetStatistics:
     max_action_dim: int
     view_names: list[str] = field(default_factory=list)
     embodiment_stats: dict[str, EmbodimentStats] = field(default_factory=dict)
-    robot_obs_mean: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    robot_obs_std: np.ndarray = field(default_factory=lambda: np.ones(3))
     scene_obs_mean: np.ndarray | None = None
     scene_obs_std: np.ndarray | None = None
 
@@ -49,8 +47,6 @@ class DatasetStatistics:
             max_action_dim=data["max_action_dim"],
             view_names=view_names,
             embodiment_stats=embodiment_stats,
-            robot_obs_mean=np.array(data["robot_obs_mean"]),
-            robot_obs_std=np.array(data["robot_obs_std"]),
             scene_obs_mean=np.array(data["scene_obs_mean"]) if "scene_obs_mean" in data else None,
             scene_obs_std=np.array(data["scene_obs_std"]) if "scene_obs_std" in data else None,
         )

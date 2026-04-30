@@ -22,10 +22,9 @@ class BasePreprocessor(ABC):
         """Auto-compute normalization params from sample list.
 
         Builds a single-embodiment DatasetStatistics from raw samples.
-        Each sample must have keys 'action' (1-D array) and 'robot_obs' (1-D array).
+        Each sample must have key 'action' (1-D array).
         """
         actions = np.array([s["action"] for s in samples])
-        robot_obs = np.array([s["robot_obs"] for s in samples])
         action_dim = actions.shape[1]
         es = EmbodimentStats(
             action_dim=action_dim,
@@ -36,8 +35,6 @@ class BasePreprocessor(ABC):
             max_action_dim=action_dim,
             view_names=view_names or [],
             embodiment_stats={embodiment: es},
-            robot_obs_mean=robot_obs.mean(axis=0),
-            robot_obs_std=robot_obs.std(axis=0),
             scene_obs_mean=None,
             scene_obs_std=None,
         )

@@ -679,6 +679,12 @@ class LiberoPreprocessor(BasePreprocessor):
 
         from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
 
+        if len(samples) < 2:
+            logger.warning(
+                f"Computing statistics over only {len(samples)} sample(s); "
+                f"q01/q99/std will be degenerate. Consider preprocessing more episodes."
+            )
+
         actions_7d = np.array(
             [s["action"][:FRANKA_ACTION_DIM] for s in samples]
         )

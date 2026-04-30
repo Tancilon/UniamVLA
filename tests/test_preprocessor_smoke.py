@@ -93,6 +93,9 @@ def test_state_stats_block_written_with_canonical_layout(tmp_path):
             assert len(per_field[stat_key]) == dim, (
                 f"{field_path}.{stat_key} expected dim {dim}, got {len(per_field[stat_key])}"
             )
-        # Sanity: q01 <= q99 element-wise
-        for q1, q9 in zip(per_field["q01"], per_field["q99"]):
+        # Quantile interpolation invariant: min <= q01 <= q99 <= max element-wise.
+        for mn, q1, q9, mx in zip(per_field["min"], per_field["q01"],
+                                   per_field["q99"], per_field["max"]):
+            assert mn <= q1 + 1e-6, f"{field_path}: min ({mn}) > q01 ({q1})"
             assert q1 <= q9 + 1e-6, f"{field_path}: q01 ({q1}) > q99 ({q9})"
+            assert q9 <= mx + 1e-6, f"{field_path}: q99 ({q9}) > max ({mx})"
