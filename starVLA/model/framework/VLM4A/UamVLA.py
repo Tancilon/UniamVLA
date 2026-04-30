@@ -398,6 +398,55 @@ class UamVLA(baseframework):
 
         return {"normalized_actions": normalized_actions}
 
+    def _build_prefill_generate_kwargs(self, qwen_inputs: dict) -> dict:
+        """Prefill: embed input_ids, splice in state-token embeddings, and return
+        kwargs suitable for model.generate().
+
+        The state splice is identical to the training forward path. We keep the
+        original input_ids in the generation kwargs so generation-time helpers
+        and logits processors can see the textual prompt.
+        """
+        from starVLA.model.modules.uamvla.backbone_wrapper import _replace_state_tokens
+
+        iface = self.qwen_vl_interface
+        input_ids = qwen_inputs["input_ids"]
+        canonical_state = qwen_inputs.get("canonical_state")
+
+        embed_tokens = iface.get_embed_tokens()
+        base_embeds = embed_tokens(input_ids)
+
+        if canonical_state is not None:
+            state_embeds = iface.state_encoder(canonical_state)
+            inputs_embeds = _replace_state_tokens(
+                inputs_embeds=base_embeds,
+                input_ids=input_ids,
+                state_embeds=state_embeds,
+                embodiment=iface.embodiment,
+                tokenizer=iface.tokenizer,
+            )
+        else:
+            inputs_embeds = base_embeds
+
+        # Preserve or derive mm_token_type_ids for Qwen3-VL multimodal generation.
+        mm_token_type_ids = qwen_inputs.get("mm_token_type_ids")
+        if mm_token_type_ids is None and hasattr(iface, "_derive_mm_token_type_ids"):
+            mm_token_type_ids = iface._derive_mm_token_type_ids(
+                input_ids=input_ids,
+                pixel_values=qwen_inputs.get("pixel_values"),
+                provided=None,
+            )
+
+        gen_kwargs = {
+            "input_ids": input_ids,
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": qwen_inputs.get("attention_mask"),
+            "pixel_values": qwen_inputs.get("pixel_values"),
+            "image_grid_thw": qwen_inputs.get("image_grid_thw"),
+        }
+        if mm_token_type_ids is not None:
+            gen_kwargs["mm_token_type_ids"] = mm_token_type_ids
+        return {k: v for k, v in gen_kwargs.items() if v is not None}
+
     def _extract_generated_tail(
         self,
         generated_ids: torch.Tensor,
