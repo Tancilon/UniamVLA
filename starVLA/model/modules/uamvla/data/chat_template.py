@@ -13,6 +13,12 @@ QWEN3_VL_VISION_START = "<|vision_start|>"
 QWEN3_VL_VISION_END = "<|vision_end|>"
 QWEN3_VL_IMAGE_PAD = "<|image_pad|>"
 
+# Structural marker for the action chunk in the assistant turn.
+# Registered as a single special token by register_structural_tokens (see
+# state_encoder/special_tokens.py). Used by inference-time LogitsProcessors
+# to trigger action-bin masking in generate().
+ACTION_START_TOKEN = "<|action_start|>"
+
 
 def expand_image_placeholders(text: str, patches_per_view: int) -> str:
     """Replace each '<image>' occurrence with patches_per_view copies.
@@ -71,7 +77,7 @@ _VLA_SYSTEM_PROMPT = (
     "You are a vision-language-action policy. Given an instruction, one or more "
     "camera views, the embodiment type, and the current robot state, predict a "
     "chunk of future actions over the next H timesteps as a sequence of discrete "
-    "action tokens that begin with <action_start>. Do not output natural language."
+    "action tokens. Do not output natural language."
 )
 
 
@@ -97,7 +103,7 @@ class Qwen3ChatTemplate(ChatTemplate):
             f"Robot state: {state_tokens}\n"
             f"{view_lines}\n"
             f"<|im_end|>\n"
-            f"<|im_start|>assistant\n<think>\n\n</think>\n\n<action_start>"
+            f"<|im_start|>assistant\n<think>\n\n</think>\n\n{ACTION_START_TOKEN}"
         )
 
 
@@ -134,5 +140,5 @@ class Qwen3VLChatTemplate(ChatTemplate):
             f"Robot state: {state_tokens}\n"
             f"{view_lines}\n"
             f"<|im_end|>\n"
-            f"<|im_start|>assistant\n<think>\n\n</think>\n\n<action_start>"
+            f"<|im_start|>assistant\n<think>\n\n</think>\n\n{ACTION_START_TOKEN}"
         )
