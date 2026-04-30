@@ -129,3 +129,18 @@ def test_write_statistics_no_legacy_keys(tmp_path):
         "Legacy key 'robot_obs_mean' must be removed in the new schema."
     assert "robot_obs_std" not in stats, \
         "Legacy key 'robot_obs_std' must be removed in the new schema."
+
+
+# ============================================================================
+# Task 2: mixture registry entry
+# ============================================================================
+
+def test_calvin_uamvla_mixture_registered():
+    from starVLA.dataloader.uamvla_dataset import DATASET_NAMED_MIXTURES
+
+    assert "calvin_uamvla" in DATASET_NAMED_MIXTURES, (
+        f"Missing 'calvin_uamvla' mixture; available: {list(DATASET_NAMED_MIXTURES)}"
+    )
+    assert DATASET_NAMED_MIXTURES["calvin_uamvla"] == [
+        ("task_D_D", 1.0, "franka_calvin"),
+    ]

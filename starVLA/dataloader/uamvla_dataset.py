@@ -31,6 +31,9 @@ DATASET_NAMED_MIXTURES = {
         ("libero_spatial", 1.0, "franka_libero"),
         # Phase 2: + libero_object, libero_goal, libero_10
     ],
+    "calvin_uamvla": [
+        ("task_D_D", 1.0, "franka_calvin"),
+    ],
 }
 
 
