@@ -1,5 +1,4 @@
 """Tests for register_structural_tokens — adds <|action_start|> as a single special token."""
-import pytest
 
 
 class _FakeTokenizer:
