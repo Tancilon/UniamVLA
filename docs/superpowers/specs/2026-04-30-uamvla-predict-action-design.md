@@ -101,7 +101,7 @@ predict_action(examples, **kwargs)
 ```
 
 **Key design choices** (all confirmed during brainstorming):
-1. **Prefill+generate split (Plan B)** — compute `inputs_embeds` via the wrapper's state-splice path, but still pass the original `input_ids` into `generate()`. This keeps prompt token IDs visible to logits processors and Qwen3-VL generation helpers while preserving training-equivalent state-token embeddings.
+1. **Prefill+generate split (Plan A)** — compute `inputs_embeds` via the wrapper's state-splice path, but still pass the original `input_ids` into `generate()`. This keeps prompt token IDs visible to logits processors and Qwen3-VL generation helpers while preserving training-equivalent state-token embeddings.
 2. **Default `ActionLogitsProcessor`** — after `<|action_start|>`, generation is constrained to `<ACT_i>` tokens by default. ID-range scan remains in the decoder as a final guard and as the opt-out fallback when `constrain_action_logits=False`.
 3. **Return-shape aware token extraction** — do not assume `generated_ids[:, prompt_len:]`. HF model/version combinations can return prompt+new IDs or new-only IDs when `inputs_embeds` are involved. The decoder must normalize either shape before ID-range scanning.
 4. **Greedy decoding** (`do_sample=False`) — matches OpenVLA / QwenFast; action prediction is deterministic.
@@ -366,6 +366,7 @@ def predict_action(self, examples: Union[dict, List[dict]], **kwargs) -> dict:
 #### Strong invariants
 1. **Generated-output shape is normalized before decoding** — support both `(B, S_prompt + N_new)` and `(B, N_new)`; never rely unconditionally on `generated_ids[:, prompt_len:]`.
 2. **Inference padding is left-sided and local** — `predict_action` temporarily changes tokenizer padding side only while building inference inputs, then restores the previous value.
+   - **Concurrency precondition**: this mutation is process-global on the shared tokenizer object. `predict_action` MUST NOT be called concurrently from multiple threads in the same process. All current callers satisfy this: `train_starvla.py:397` is a single-GPU serial call, and `parallel_eval/eval_libero_model.py` uses `multiprocessing` (each worker has its own tokenizer instance). If any future caller introduces threading, switch to a per-call private tokenizer or a lock around the padding-side mutation.
 3. **Action-token IDs are contiguous or fail fast** — default logits masking and range scan require `<ACT_0>...<ACT_{n-1}>` to occupy `[self._act0_id, self._act0_id + n_bins)`.
 4. **Default generation is action-constrained** — after `<|action_start|>`, `ActionLogitsProcessor` masks non-action logits for exactly `H × action_dim` steps unless explicitly disabled by caller kwargs.
 5. **Training `forward` is unchanged** — all training tests stay green; this spec touches only the inference path.
