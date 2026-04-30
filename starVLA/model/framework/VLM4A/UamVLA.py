@@ -360,45 +360,94 @@ class UamVLA(baseframework):
 
     @torch.inference_mode()
     def predict_action(self, examples, **kwargs) -> dict:
-        """Eval-time inference: run backbone + action head only; returns normalized actions.
+        """Eval-time inference: autoregressive action chunk generation.
 
-        Only the action head runs at inference time — pose, future, and recon
-        heads are skipped.
+        Builds prompt + state-spliced inputs_embeds, calls model.generate with
+        ActionLogitsProcessor active by default, and decodes the generated
+        action tokens via ID-range scan.
 
         Args:
-            examples: a single example dict or a list of example dicts.  Each
-                dict must have:
-                  - "image"  : List[PIL.Image] or np.ndarray (multi-view per §4.6)
-                  - "lang"   : str instruction
-                  - "canonical_state": canonical state tensor / array
+            examples: a single example dict or list of example dicts. Each must have:
+              - "image": List[PIL.Image] or np.ndarray (multi-view per spec §4.6)
+              - "lang": str instruction
+              - "canonical_state": canonical state tensor / dict (or omit for all examples
+                if state-less inference is desired; mixing within a batch raises ValueError)
+            **kwargs:
+              - constrain_action_logits (bool, default True): if True, apply
+                ActionLogitsProcessor to constrain post-<|action_start|> logits to
+                action-bin tokens. Set False for ablations / debugging.
+              - other kwargs: ignored (compat with diffusion-style frameworks).
 
         Returns:
-            {"normalized_actions": np.ndarray of shape (B, T, 7)}
+            {"normalized_actions": np.ndarray of shape (B, H, action_dim)}
         """
         if not isinstance(examples, list):
             examples = [examples]
 
         from deployment.model_server.tools.image_tools import to_pil_preserve
+        from transformers import LogitsProcessorList
+        from starVLA.model.modules.uamvla.inference import ActionLogitsProcessor
 
-        # e["image"] is List[PIL.Image] per spec §4.6 (multi-view).
-        # to_pil_preserve handles nested lists natively (recurses into list).
-        qwen_inputs = self.qwen_vl_interface.build_inputs(
-            images=[[to_pil_preserve(img) for img in e["image"]] for e in examples],
-            instructions=[e["lang"] for e in examples],
-            canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
-        )
+        # Reject mixed canonical_state presence (stack_canonical can't handle partial dicts).
+        states = [e.get("canonical_state") for e in examples]
+        has_state = [s is not None for s in states]
+        if any(has_state) and not all(has_state):
+            raise ValueError(
+                "predict_action requires canonical_state for all examples or none; "
+                "mixed presence is not supported."
+            )
+
+        # Inference uses left padding so each row's last non-pad prompt token
+        # aligns to the same column (required for batched generate to step
+        # uniformly). NOTE: this mutates a process-global tokenizer attribute;
+        # do not call predict_action from multiple threads in the same process.
+        tokenizer = self.qwen_vl_interface.tokenizer
+        old_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            qwen_inputs = self.qwen_vl_interface.build_inputs(
+                images=[[to_pil_preserve(img) for img in e["image"]] for e in examples],
+                instructions=[e["lang"] for e in examples],
+                canonical_state=stack_canonical(states) if all(has_state) else None,
+            )
+        finally:
+            tokenizer.padding_side = old_padding_side
+
+        gen_kwargs = self._build_prefill_generate_kwargs(qwen_inputs)
+
+        H = self.action_horizon
+        action_dim = int(self.config.framework.embodiment.get("action_dim", 7))
+        chunk_len = H * action_dim
+        n_bins = int(self.config.framework.action_model.get("num_bins", 256))
+
+        constrain_action_logits = kwargs.get("constrain_action_logits", True)
+        logits_processor = None
+        if constrain_action_logits:
+            logits_processor = LogitsProcessorList([
+                ActionLogitsProcessor(
+                    action_start_id=self.action_start_id,
+                    action_begin_id=self._act0_id,
+                    n_bins=n_bins,
+                    action_chunk_len=chunk_len,
+                )
+            ])
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            backbone_out = self.qwen_vl_interface(
-                **qwen_inputs,
-                output_hidden_states=True,
-                return_dict=True,
+            generated_ids = self.qwen_vl_interface.model.generate(
+                **gen_kwargs,
+                max_new_tokens=chunk_len,
+                min_new_tokens=chunk_len,
+                logits_processor=logits_processor,
+                do_sample=False,
+                use_cache=True,
             )
-            hidden = backbone_out.hidden_states[-1]  # (B, L, H)
 
-        pred = self.aux_heads["action"].predict(hidden, batch=qwen_inputs)
-        normalized_actions = self._decode_action_tokens(pred, batch_size=len(examples))
-
+        normalized_actions = self._decode_generated_actions(
+            generated_ids,
+            prompt_len=gen_kwargs["inputs_embeds"].shape[1],
+            H=H,
+            action_dim=action_dim,
+        )
         return {"normalized_actions": normalized_actions}
 
     def _build_prefill_generate_kwargs(self, qwen_inputs: dict) -> dict:
