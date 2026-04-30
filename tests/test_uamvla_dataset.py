@@ -12,8 +12,11 @@ _REAL_DATASET_DIR = Path(__file__).resolve().parent.parent / "datasets" / "uamvl
 @pytest.fixture
 def sample_dataset_dir():
     """Return path to the real UamVLA test dataset (libero_spatial)."""
-    if not _REAL_DATASET_DIR.exists():
-        pytest.skip(f"Real test dataset not found at {_REAL_DATASET_DIR}")
+    if not (_REAL_DATASET_DIR / "data.jsonl").exists():
+        pytest.skip(
+            f"data.jsonl not present at {_REAL_DATASET_DIR}; "
+            f"run `python tools/preprocess/run_libero_preprocess.py` to generate."
+        )
     return _REAL_DATASET_DIR
 
 
@@ -155,3 +158,26 @@ def test_canonical_state_mode_none_passes_raw_values(sample_dataset_dir):
     expected = LiberoAdapter().to_canonical(raw)
     assert torch.allclose(sample["canonical_state"]["arm_0"]["ee_pose"],
                           expected["arm_0"]["ee_pose"])
+
+
+def test_get_vla_dataset_forwards_framework_normalization(sample_dataset_dir, monkeypatch):
+    """Verify YAML's framework.state_encoder.normalization actually reaches UamVLADataset."""
+    pytest.importorskip("omegaconf")
+    from omegaconf import OmegaConf
+    from starVLA.dataloader.uamvla_dataset import get_vla_dataset
+
+    cfg = OmegaConf.create({
+        "data_root_dir": str(sample_dataset_dir.parent),
+        "data_mix": "libero_uamvla",
+        "action_horizon": 8,
+    })
+    framework = OmegaConf.create({
+        "state_encoder": {
+            "normalization": {"mode": "none", "apply_to": []},
+        },
+    })
+
+    ds = get_vla_dataset(data_cfg=cfg, framework=framework)
+    assert ds.state_normalizer.mode == "none", (
+        f"Expected normalizer mode='none' from framework config, got {ds.state_normalizer.mode!r}"
+    )

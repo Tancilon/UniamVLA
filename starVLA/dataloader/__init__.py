@@ -61,7 +61,7 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
     elif dataset_py == "uamvla_dataset":
         from starVLA.dataloader.uamvla_dataset import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
-        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg)
+        vla_dataset = get_vla_dataset(data_cfg=vla_dataset_cfg, framework=cfg.framework)
         vla_train_dataloader = DataLoader(
             vla_dataset,
             batch_size=vla_dataset_cfg.per_device_batch_size,

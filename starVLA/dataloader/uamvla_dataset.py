@@ -224,8 +224,8 @@ def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
                 try:
                     from omegaconf import OmegaConf
                     norm_cfg = OmegaConf.to_container(raw_norm, resolve=True)
-                except (ImportError, Exception):
-                    norm_cfg = dict(raw_norm) if not isinstance(raw_norm, dict) else raw_norm
+                except ImportError:
+                    norm_cfg = dict(raw_norm) if raw_norm is not None else None
 
     # Phase 1: single embodiment, single subdir; multi-subdir support deferred
     if len(mixture) == 1:
