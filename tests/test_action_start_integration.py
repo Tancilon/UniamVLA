@@ -58,25 +58,40 @@ def test_action_start_token_round_trips_through_real_tokenizer():
 def test_no_old_action_start_literal_remains_in_codebase():
     """Belt-and-suspenders: assert no Python file under starVLA/ or tests/
     still references the old literal '<action_start>'."""
+    import pathlib
     import subprocess
+
+    # Anchor paths off __file__ so the test is robust to pytest's cwd. Without
+    # this, running from a sibling dir produces grep returncode=2 (path not
+    # found) which the original `if returncode == 0:` guard silently swallowed.
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    starvla_dir = repo_root / "starVLA"
+    tests_dir = repo_root / "tests"
+
     result = subprocess.run(
-        ["grep", "-rn", "<action_start>", "starVLA/", "tests/", "--include=*.py"],
+        ["grep", "-rn", "<action_start>",
+         str(starvla_dir), str(tests_dir), "--include=*.py"],
         capture_output=True, text=True,
     )
-    # grep returns 1 when no matches found — that's what we want.
+    # grep: 0 = matches found, 1 = no matches, 2 = error. Anything else is bug.
+    assert result.returncode in (0, 1), (
+        f"grep failed (rc={result.returncode}): {result.stderr}"
+    )
+
     # Note: tests/test_chat_template.py has the old literal inside negative
     # assertions ('not in out' checks), and this very test file also names the
     # literal in its docstrings and grep argument. Both are legitimate; we
-    # allowlist them and require ZERO matches anywhere else.
+    # allowlist them via substring match (path-prefix-independent) and require
+    # ZERO matches anywhere else.
     if result.returncode == 0:
-        allowed_prefixes = (
+        allowed_substrings = (
             "tests/test_chat_template.py:",
             "tests/test_action_start_integration.py:",
         )
         lines = result.stdout.strip().split("\n")
         non_test_matches = [
             line for line in lines
-            if not line.startswith(allowed_prefixes)
+            if not any(s in line for s in allowed_substrings)
         ]
         assert not non_test_matches, (
             "Old literal still present in production code:\n"
