@@ -108,7 +108,14 @@ def test_q01_equals_q99_passes_through():
     inp = _make_canonical()
     inp["gripper_0"] = torch.tensor([0.5], dtype=torch.float32)
     out = norm(inp)
+    # In-range value passes through (Normalizer's degenerate-case fallback)
     assert torch.allclose(out["gripper_0"], torch.tensor([0.5]))
+
+    # Out-of-range constant: passthrough then clamp to [-1, 1] (inherited from Normalizer.q99)
+    inp_high = _make_canonical()
+    inp_high["gripper_0"] = torch.tensor([5.0], dtype=torch.float32)
+    out_high = norm(inp_high)
+    assert torch.allclose(out_high["gripper_0"], torch.tensor([1.0]))
 
 
 def test_missing_state_stats_raises_when_mode_not_none():
@@ -131,3 +138,15 @@ def test_missing_embodiment_in_state_stats_raises():
         StateNormalizer(
             stats_dict=_make_stats_dict(), embodiment="franka_other", mode="q99"
         )
+
+
+def test_constructor_does_not_mutate_input_stats_dict():
+    """Building a StateNormalizer must not turn list-valued stats into tensors in caller's dict."""
+    stats = _make_stats_dict()
+    StateNormalizer(stats_dict=stats, embodiment="franka_libero", mode="q99")
+    # Stats dict should still contain plain Python lists, not torch.Tensors
+    ee = stats["state_stats"]["franka_libero"]["arm_0.ee_pose"]
+    assert isinstance(ee["q01"], list), f"q01 mutated to {type(ee['q01']).__name__}"
+    assert isinstance(ee["q99"], list)
+    assert isinstance(ee["min"], list)
+    assert isinstance(ee["max"], list)

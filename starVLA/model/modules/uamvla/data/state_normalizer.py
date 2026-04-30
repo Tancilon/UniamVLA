@@ -62,8 +62,11 @@ class StateNormalizer:
         for field_path, field_stats in emb_stats.items():
             if apply_to is not None and field_path not in apply_to:
                 continue
+            # Normalizer.__init__ mutates its `statistics` dict in place
+            # (state_action.py:105-106 replaces each value with torch.tensor(...)).
+            # Deep-copy so the caller's stats_dict stays unmodified.
             self._normalizers[field_path] = Normalizer(
-                mode=mode, statistics=dict(field_stats)
+                mode=mode, statistics=copy.deepcopy(field_stats)
             )
 
     def __call__(self, canonical_state: dict) -> dict:
