@@ -283,7 +283,7 @@ CLI_PATH = ROOT / "runners" / "preprocess_calvin.py"
 
 
 def test_cli_help():
-    """`--help` exits 0 and lists all six expected args."""
+    """`--help` exits 0 and lists all seven expected args."""
     result = subprocess.run(
         [sys.executable, str(CLI_PATH), "--help"],
         capture_output=True, text=True, timeout=30,

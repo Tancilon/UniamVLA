@@ -1,13 +1,6 @@
 """CLI entry point for CALVIN → UamVLA dataset preprocessing.
 
 Usage:
-    # Process the debug dataset (the path on the spec author's local box):
-    python runners/preprocess_calvin.py \\
-        --input_dir /Users/tancilon/develop/localgit/UamVLA/datasets/calvin_debug_dataset/training \\
-        --output_dir datasets/uamvla_calvin/task_D_D \\
-        --dataset_source calvin_debug
-
-    # Process a real task_D_D split:
     python runners/preprocess_calvin.py \\
         --input_dir /path/to/calvin/task_D_D/training \\
         --output_dir datasets/uamvla_calvin/task_D_D \\
