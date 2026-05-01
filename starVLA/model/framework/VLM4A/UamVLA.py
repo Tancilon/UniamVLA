@@ -708,9 +708,9 @@ class UamVLA(baseframework):
         for name, head in self.aux_heads.items():
             if not hasattr(head, "visualize"):
                 continue
-            mask = batch_dict.get(f"{name}_mask")
-            if mask is None:
-                mask = torch.ones(hidden.shape[0], dtype=torch.bool, device=hidden.device)
+            mask = _resolve_head_mask(
+                name, batch_dict, hidden.shape[0], hidden.device,
+            )
             if not mask.any():
                 continue
             # Forward optional head-owned viz state (e.g. PoseHead.camera_params,

@@ -568,3 +568,62 @@ def test_resolve_head_mask_defaults_for_missing_keys():
     assert out is explicit, (
         "present mask key must be returned unchanged (no copy, no recompute)"
     )
+
+
+# ============================================================================
+# Test C (this PR): collator invariant — _resolve_head_mask precondition
+# ============================================================================
+
+def test_all_occluded_batch_collator_invariant():
+    """Lock in the precondition the §3.3 framework patch relies on.
+
+    When every sample in a batch lacks an aux field, stack_optional_tensor_fields
+    must omit BOTH the field tensor and its `_mask` key from the output dict.
+    The all-False default in _resolve_head_mask is the right choice EXACTLY
+    because the helper sees the mask key as missing — if a future refactor
+    started inserting an empty-tensor + all-False mask, this test would catch
+    the drift (Test B's "missing key" branch would no longer be exercised in
+    production, even though Test B itself would still pass).
+
+    Mixed case is also covered: when at least one sample has the field, both
+    the field tensor and the all-True (or partial-True) mask must be present.
+    """
+    import torch
+    from starVLA.model.modules.uamvla.collator_helpers import (
+        stack_optional_tensor_fields,
+    )
+
+    # Case 1: every sample lacks image_target and point_cloud.
+    samples = [
+        {"image_future": torch.zeros(3, 224, 224)},
+        {"image_future": torch.zeros(3, 224, 224)},
+    ]
+    batch = stack_optional_tensor_fields(
+        samples, ["image_target", "image_future", "point_cloud"],
+    )
+    assert "image_target"      not in batch
+    assert "image_target_mask" not in batch
+    assert "point_cloud"       not in batch
+    assert "point_cloud_mask"  not in batch
+    assert "image_future"      in batch
+    assert "image_future_mask" in batch
+    assert batch["image_future_mask"].dtype == torch.bool
+    assert batch["image_future_mask"].all(), (
+        "every sample has image_future → mask is all-True"
+    )
+
+    # Case 2: mixed — sample 0 has image_target, sample 1 does not.
+    samples_mixed = [
+        {"image_target": torch.zeros(3, 224, 224),
+         "image_future": torch.zeros(3, 224, 224)},
+        {"image_future": torch.zeros(3, 224, 224)},
+    ]
+    batch_mixed = stack_optional_tensor_fields(
+        samples_mixed, ["image_target", "image_future"],
+    )
+    assert "image_target"      in batch_mixed
+    assert "image_target_mask" in batch_mixed
+    assert batch_mixed["image_target_mask"].tolist() == [True, False], (
+        f"mixed mask must be [True, False], got "
+        f"{batch_mixed['image_target_mask'].tolist()}"
+    )
