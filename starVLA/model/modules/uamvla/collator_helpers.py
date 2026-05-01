@@ -127,9 +127,13 @@ def stack_pose_gt(samples: Sequence[dict]) -> Optional[dict]:
     if not any("pose_gt" in s for s in samples):
         return None
 
-    # Find first present rotation as template (preserves shape, e.g. (6,) for 6D rep).
+    # Find first present rotation/translation as templates. Both fillers use
+    # zeros_like(template) so dtype AND device follow the present samples —
+    # critical when input tensors are on GPU (a literal `torch.zeros(3)` would
+    # default to CPU, causing torch.stack to crash with cross-device error).
     present = next(s for s in samples if "pose_gt" in s)
     rot_template = present["pose_gt"]["rotation"]
+    trans_template = present["pose_gt"]["translation"]
 
     rotations = []
     translations = []
@@ -141,7 +145,7 @@ def stack_pose_gt(samples: Sequence[dict]) -> Optional[dict]:
             mask.append(True)
         else:
             rotations.append(torch.zeros_like(rot_template))
-            translations.append(torch.zeros(3))
+            translations.append(torch.zeros_like(trans_template))
             mask.append(False)
 
     return {

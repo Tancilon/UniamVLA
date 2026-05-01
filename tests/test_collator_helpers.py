@@ -122,6 +122,41 @@ def test_stack_pose_gt_mixed_and_absent():
     assert torch.equal(out["pose_mask"], torch.tensor([True, False, True]))
 
 
+def test_stack_pose_gt_missing_slot_inherits_template_device():
+    """Regression: missing-slot fillers must follow the present sample's device.
+
+    When the dataset emits partial-aux rows (CALVIN preprocess partial-aux
+    retention spec), some samples lack `pose_gt`. The else-branch filler must
+    use ``torch.zeros_like(template)`` — not ``torch.zeros(3)`` — so the
+    filler tensor inherits the template's device. Otherwise, when the present
+    samples are on GPU, ``torch.stack([cuda, cpu, cuda])`` raises:
+
+        RuntimeError: Expected all tensors to be on the same device,
+                      but found at least two devices, cuda:N and cpu
+
+    PyTorch's `meta` device reproduces the same cross-device guard on
+    macOS / CPU-only CI without needing a real GPU.
+    """
+    # Place the present sample's pose_gt on the meta device. Filler must
+    # follow — if the implementation hardcodes torch.zeros(3) (CPU), stack
+    # raises "Tensor on device cpu is not on the expected device meta".
+    rot_meta = torch.zeros(6, device="meta")
+    trans_meta = torch.zeros(3, device="meta")
+    samples = [
+        {"pose_gt": {"rotation": rot_meta, "translation": trans_meta}},
+        {},  # missing — filler must inherit meta device
+    ]
+
+    out = stack_pose_gt(samples)  # Pre-fix this raises RuntimeError; post-fix succeeds.
+
+    assert out is not None
+    pose = out["pose_gt"]
+    assert pose["rotation"].device == torch.device("meta"), pose["rotation"].device
+    assert pose["translation"].device == torch.device("meta"), pose["translation"].device
+    assert pose["rotation"].shape == (2, 6)
+    assert pose["translation"].shape == (2, 3)
+
+
 def test_stack_static_cam_extrinsic_mixed_and_absent():
     """stack_static_cam_extrinsic returns None when absent everywhere; stacks with zero-pad otherwise."""
     # Case 1: nothing → None
