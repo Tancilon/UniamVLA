@@ -54,7 +54,7 @@ accelerate launch \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project uamvla_calvin \
-  --wandb_entity tancilon \
+  --wandb_entity tancilon1-fudan-university-school-of-management \
   # --is_debug True
 
 
