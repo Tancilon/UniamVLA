@@ -487,3 +487,21 @@ def test_partial_aux_row_loads(tmp_path):
         assert ds[i]["canonical_state"]["arm_0"]["ee_pose"].shape == (9,)
         assert ds[i]["canonical_state"]["arm_0"]["joint_pos"].shape == (7,)
         assert ds[i]["canonical_state"]["gripper_0"].shape == (1,)
+
+
+def test_calvin_abc_d_uamvla_mixture_registered():
+    """The post-fix task_ABC_D data root is reachable from a mixture key."""
+    from starVLA.dataloader.uamvla_dataset import DATASET_NAMED_MIXTURES
+
+    assert "calvin_abc_d_uamvla" in DATASET_NAMED_MIXTURES, (
+        f"Missing 'calvin_abc_d_uamvla' mixture; available: "
+        f"{list(DATASET_NAMED_MIXTURES)}"
+    )
+    assert DATASET_NAMED_MIXTURES["calvin_abc_d_uamvla"] == [
+        ("task_ABC_D", 1.0, "franka_calvin"),
+    ], DATASET_NAMED_MIXTURES["calvin_abc_d_uamvla"]
+
+    # Backward-compat: the prior calvin_uamvla -> task_D_D entry must remain.
+    assert DATASET_NAMED_MIXTURES["calvin_uamvla"] == [
+        ("task_D_D", 1.0, "franka_calvin"),
+    ], DATASET_NAMED_MIXTURES["calvin_uamvla"]

@@ -42,7 +42,10 @@ DATASET_NAMED_MIXTURES = {
         # Phase 2: + libero_object, libero_goal, libero_10
     ],
     "calvin_uamvla": [
-        ("task_D_D", 1.0, "franka_calvin"),
+        ("task_D_D", 1.0, "franka_calvin"),         # existing — kept for backward compat
+    ],
+    "calvin_abc_d_uamvla": [
+        ("task_ABC_D", 1.0, "franka_calvin"),
     ],
 }
 
