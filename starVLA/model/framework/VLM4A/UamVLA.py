@@ -350,11 +350,9 @@ class UamVLA(baseframework):
         total = torch.tensor(0.0, device=hidden.device, requires_grad=True)
         log_metrics: dict = {}
         for name, head in self.aux_heads.items():
-            mask = batch_dict.get(f"{name}_mask")
-            if mask is None:
-                mask = torch.ones(
-                    hidden.shape[0], dtype=torch.bool, device=hidden.device,
-                )
+            mask = _resolve_head_mask(
+                name, batch_dict, hidden.shape[0], hidden.device,
+            )
             out = head.compute_loss(hidden, batch_dict, mask=mask)
             if out.loss is not None:
                 total = total + out.loss
