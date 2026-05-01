@@ -218,8 +218,8 @@ class CalvinWorker:
         for step_idx, t in enumerate(frames):
             npz = np.load(input_dir / f"episode_{t:07d}.npz")
             rel_actions = np.asarray(npz["rel_actions"], dtype=np.float32)
-            robot_obs = np.asarray(npz["robot_obs"], dtype=np.float32)
-            scene_obs = np.asarray(npz["scene_obs"], dtype=np.float32)
+            robot_obs   = np.asarray(npz["robot_obs"],   dtype=np.float32)
+            scene_obs   = np.asarray(npz["scene_obs"],   dtype=np.float32)
 
             self.env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
             rendered = self.env.render_cameras(width=RENDER_W, height=RENDER_H)
@@ -227,28 +227,24 @@ class CalvinWorker:
 
             sample_id = f"{episode_id}_step{step_idx:04d}"
 
-            # --- write RGB + depth files (final, not shard-local) ---
+            # --- Always-write fields (no seg dependency) ---
             static_rel = f"images/obs/static/{sample_id}.jpg"
-            wrist_rel = f"images/obs/wrist/{sample_id}.jpg"
-            Image.fromarray(rendered["rgb_static"]).save(
-                output_dir / static_rel, quality=95,
-            )
-            Image.fromarray(rendered["rgb_wrist"]).save(
-                output_dir / wrist_rel, quality=95,
-            )
-            depth_static_rel = f"depth/static/{sample_id}.npy"
-            depth_wrist_rel = f"depth/wrist/{sample_id}.npy"
-            np.save(
-                output_dir / depth_static_rel,
-                rendered["depth_static"].astype(np.float32),
-            )
-            np.save(
-                output_dir / depth_wrist_rel,
-                rendered["depth_wrist"].astype(np.float32),
-            )
+            wrist_rel  = f"images/obs/wrist/{sample_id}.jpg"
+            Image.fromarray(rendered["rgb_static"]).save(output_dir / static_rel, quality=95)
+            Image.fromarray(rendered["rgb_wrist"]).save(output_dir / wrist_rel, quality=95)
 
-            # --- point cloud (world frame) ---
-            pc_rel = f"point_clouds/{sample_id}.npy"
+            depth_static_rel = f"depth/static/{sample_id}.npy"
+            depth_wrist_rel  = f"depth/wrist/{sample_id}.npy"
+            np.save(output_dir / depth_static_rel, rendered["depth_static"].astype(np.float32))
+            np.save(output_dir / depth_wrist_rel,  rendered["depth_wrist"].astype(np.float32))
+
+            # G2 fix: anchor image_future regardless of seg outcome.
+            last_rgb_static = rendered["rgb_static"]
+
+            # --- Seg-dependent fields: try, omit on failure ---
+            pc_rel_present:     str | None = None
+            target_rel_present: str | None = None
+
             pts = depth_to_world_points(
                 depth=rendered["depth_static"],
                 seg_mask=rendered["seg_static"],
@@ -258,92 +254,86 @@ class CalvinWorker:
                 target_id=target_seg_id,
                 num_points=NUM_POINTS,
             )
-            if pts is None:
-                if self.on_missing_target == "skip":
-                    logger.warning(
-                        "Skipping frame %d in window %d: target %r not "
-                        "visible in static-camera seg mask",
-                        t, window.window_idx, target_object_id,
-                    )
-                    continue
+            if pts is not None:
+                pc_rel = f"point_clouds/{sample_id}.npy"
+                np.save(output_dir / pc_rel, pts)
+                pc_rel_present = pc_rel
+            elif self.on_missing_target == "abort":
                 raise RuntimeError(
                     f"Target {target_object_id!r} not visible in frame {t} "
                     f"(window {window.window_idx})"
                 )
-            np.save(output_dir / pc_rel, pts)
+            # else (skip mode): leave pc_rel_present = None
 
-            # --- image_target (seg crop) ---
             target_img = crop_target_from_seg(
-                rendered["rgb_static"],
-                rendered["seg_static"],
-                target_id=target_seg_id,
+                rendered["rgb_static"], rendered["seg_static"], target_id=target_seg_id,
             )
-            if target_img is None:
-                if self.on_missing_target == "skip":
-                    logger.warning(
-                        "Skipping frame %d in window %d: seg crop empty "
-                        "for target %r",
-                        t, window.window_idx, target_object_id,
-                    )
-                    # Best-effort cleanup so a later visible frame with the
-                    # same sample_id doesn't read a stale PC on disk.
-                    try:
-                        (output_dir / pc_rel).unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
+            if target_img is not None:
+                target_rel = f"images/target/{sample_id}.jpg"
+                target_img.save(output_dir / target_rel, quality=95)
+                target_rel_present = target_rel
+            elif self.on_missing_target == "abort":
                 raise RuntimeError(
                     f"Seg crop failed for frame {t} (window {window.window_idx})"
                 )
-            target_rel = f"images/target/{sample_id}.jpg"
-            target_img.save(output_dir / target_rel, quality=95)
 
-            last_rgb_static = rendered["rgb_static"]
+            # Replace the old "Skipping frame ..." log with a wording that reflects
+            # the new behaviour (we now retain the frame, just drop the seg-dependent
+            # fields). Operators see one line per partial-aux frame; verification in
+            # §4.2/§4.3 cross-checks this against JSONL counts but does not require
+            # log-count to match (avoids coupling validation to log format).
+            if pc_rel_present is None or target_rel_present is None:
+                logger.info(
+                    "frame %d in window %d: seg failed for target %r — emitting "
+                    "partial-aux row (image_target=%s, point_cloud=%s, pose_6d=%s)",
+                    t, window.window_idx, target_object_id,
+                    "kept" if target_rel_present else "omitted",
+                    "kept" if pc_rel_present     else "omitted",
+                    "kept" if pc_rel_present     else "omitted",  # pose_6d gated on pc
+                )
 
-            # --- assemble JSONL row ---
-            action_7d = rel_actions.tolist()
+            # --- Assemble row (always-fields + present aux-fields) ---
+            action_7d  = rel_actions.tolist()
             action_24d = action_7d + [0.0] * (MAX_ACTION_DIM - FRANKA_ACTION_DIM)
-
-            rows.append({
-                "id": sample_id,
-                "episode_id": episode_id,
-                "step_idx": step_idx,
-                "total_steps": total_steps,
-                "image": [static_rel, wrist_rel],
-                "instruction": window.instruction,
-                "embodiment": EMBODIMENT,
-                "action_dim": FRANKA_ACTION_DIM,
-                "action": action_24d,
-                "action_mask": ACTION_MASK,
-                "robot_obs": robot_obs.tolist(),  # full 15-dim (was robot_obs[:3] — pre PR#1)
+            row = {
+                "id":           sample_id,
+                "episode_id":   episode_id,
+                "step_idx":     step_idx,
+                "total_steps":  total_steps,
+                "image":        [static_rel, wrist_rel],
+                "instruction":  window.instruction,
+                "embodiment":   EMBODIMENT,
+                "action_dim":   FRANKA_ACTION_DIM,
+                "action":       action_24d,
+                "action_mask":  ACTION_MASK,
+                "robot_obs":    robot_obs.tolist(),
                 "dataset_source": self.dataset_source,
                 "image_future": future_rel,
                 "depth_static": depth_static_rel,
-                "depth_wrist": depth_wrist_rel,
+                "depth_wrist":  depth_wrist_rel,
                 "static_cam_extrinsic": {
-                    "rotation": np.asarray(
-                        rendered["static_cam_R"]
-                    ).flatten().tolist(),
-                    "translation": np.asarray(
-                        rendered["static_cam_t"]
-                    ).tolist(),
+                    "rotation":    np.asarray(rendered["static_cam_R"]).flatten().tolist(),
+                    "translation": np.asarray(rendered["static_cam_t"]).tolist(),
                 },
                 "wrist_cam_extrinsic": {
-                    "rotation": np.asarray(
-                        rendered["wrist_cam_R"]
-                    ).flatten().tolist(),
-                    "translation": np.asarray(
-                        rendered["wrist_cam_t"]
-                    ).tolist(),
+                    "rotation":    np.asarray(rendered["wrist_cam_R"]).flatten().tolist(),
+                    "translation": np.asarray(rendered["wrist_cam_t"]).tolist(),
                 },
-                "pose_6d": {
-                    "rotation": mat_to_6d(np.asarray(obj_mat)),
+            }
+
+            # Seg-dependent. pose_6d is gated on point_cloud because pose head's
+            # forward asserts batch["point_cloud"] is present (pose_head.py:166).
+            if pc_rel_present is not None:
+                row["point_cloud"] = pc_rel_present
+                row["pose_6d"] = {
+                    "rotation":    mat_to_6d(np.asarray(obj_mat)),
                     "translation": np.asarray(obj_pos).tolist(),
-                    "object_id": target_object_id,
-                },
-                "point_cloud": pc_rel,
-                "image_target": target_rel,
-            })
+                    "object_id":   target_object_id,
+                }
+            if target_rel_present is not None:
+                row["image_target"] = target_rel_present
+
+            rows.append(row)
 
         # image_future: write last frame's static RGB once per window.
         # If every frame was skipped (on_missing_target="skip" + full-window
