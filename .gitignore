@@ -253,3 +253,4 @@ tmp
 logs/*
 **/.nf*
 code
+datasets/
