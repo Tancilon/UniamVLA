@@ -95,7 +95,9 @@ class UamVLA(baseframework):
         self.config = merge_framework_config(UamVLADefaultConfig, config)
 
         self.qwen_vl_interface = build_uamvla_backbone(self.config)
-        hidden_size = self.qwen_vl_interface.config.hidden_size
+        # Use the wrapper's hidden_size property which handles both transformers 4.x
+        # (top-level config.hidden_size) and 5.x (text_config.hidden_size) layouts.
+        hidden_size = self.qwen_vl_interface.hidden_size
 
         # Build ActionTokenizer and resize embedding table to include <ACT_i> tokens.
         from starVLA.model.modules.uamvla.data.action_tokenizer import ActionTokenizer
