@@ -44,14 +44,17 @@ class WebsocketClientPolicy:
 
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
+                # ping_interval / ping_timeout were dropped: older websockets
+                # versions (e.g., what ships in calvin_env's Python 3.8 env)
+                # passed unknown kwargs straight to socket.create_connection,
+                # which raised TypeError. The library's own keepalive defaults
+                # are sane; we don't need to override them here.
                 conn = websockets.sync.client.connect(
                     self._uri,
                     compression=None,
                     max_size=None,
                     additional_headers=headers,
                     open_timeout=150,
-                    ping_interval=20,
-                    ping_timeout=20,
                 )
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
