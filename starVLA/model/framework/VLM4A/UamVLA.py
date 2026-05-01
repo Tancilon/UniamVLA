@@ -69,15 +69,21 @@ def _build_aux_heads(framework_cfg, hidden_size, vae=None, vision_extra=None, lm
             hidden_size=hidden_size,
             **{k: v for k, v in cfg_heads.pose.items() if k not in ("enabled", "lr")},
         )
+    # Merge vision_extra (derived defaults) with cfg-side kwargs. yaml takes
+    # precedence on conflict (e.g., both currently provide `target_resize`):
+    # vision_extra fills in derived ppv-based defaults the user usually doesn't
+    # touch; cfg lets the user override any of them from the training yaml.
     if cfg_heads.future.get("enabled", True) and vae is not None:
+        _future_cfg = {k: v for k, v in cfg_heads.future.items() if k not in ("enabled", "lr")}
         heads["future"] = FutureHead(
-            hidden_size=hidden_size, vae=vae, **(vision_extra or {}),
-            **{k: v for k, v in cfg_heads.future.items() if k not in ("enabled", "lr")},
+            hidden_size=hidden_size, vae=vae,
+            **{**(vision_extra or {}), **_future_cfg},
         )
     if cfg_heads.recon.get("enabled", True) and vae is not None:
+        _recon_cfg = {k: v for k, v in cfg_heads.recon.items() if k not in ("enabled", "lr")}
         heads["recon"] = ReconHead(
-            hidden_size=hidden_size, vae=vae, **(vision_extra or {}),
-            **{k: v for k, v in cfg_heads.recon.items() if k not in ("enabled", "lr")},
+            hidden_size=hidden_size, vae=vae,
+            **{**(vision_extra or {}), **_recon_cfg},
         )
     return heads
 
