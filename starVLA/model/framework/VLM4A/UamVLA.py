@@ -455,8 +455,6 @@ class UamVLA(baseframework):
         finally:
             tokenizer.padding_side = old_padding_side
 
-        gen_kwargs = self._build_prefill_generate_kwargs(qwen_inputs)
-
         H = self.action_horizon
         action_dim = int(self.config.framework.embodiment.get("action_dim", 7))
         chunk_len = H * action_dim
@@ -474,7 +472,10 @@ class UamVLA(baseframework):
                 )
             ])
 
+        # autocast must cover both the prefill (state_encoder Linear layers run on
+        # fp32 canonical_state vs. bf16 weights without it) and generate().
         with torch.autocast("cuda", dtype=torch.bfloat16):
+            gen_kwargs = self._build_prefill_generate_kwargs(qwen_inputs)
             generated_ids = self.qwen_vl_interface.model.generate(
                 **gen_kwargs,
                 max_new_tokens=chunk_len,
