@@ -487,3 +487,49 @@ To prevent confusion across the touched components:
 - `datasets/uamvla_calvin/` — top-level data root directory; sibling of `datasets/uamvla_libero/`.
 
 This is intentionally parallel to `franka_libero` / `libero_uamvla` / `libero_spatial` / `uamvla_libero_phase1` / `datasets/uamvla_libero/`.
+
+## 11. Task 9 verification log (added 2026-05-01)
+
+Remote e2e verified on machine `uamvla-dq--3aa597ca2939-2mfxxhoo5v` (8× H200) on 2026-05-01.
+
+### 11.1 Steps 1–4 outcome (preprocess + ppv-probe + 2-step train smoke + revert)
+
+- Step 1 (preprocess `calvin_debug_dataset/training/`): produced `datasets/uamvla_calvin/task_D_D/data.jsonl` (503 rows, 9 lang windows × ~56 frames). `statistics.yaml` top-level keys = `{view_names, max_action_dim, embodiment_stats, state_stats, cameras, point_cloud}`; `state_stats[franka_calvin]` present; legacy `robot_obs_mean/std` absent.
+- Step 2 (insert ppv-probe): commit `ab9758a` added a temporary `[ppv-probe]` log line in `backbone_wrapper.build_inputs`.
+- Step 3 (2-step train smoke, 8× H200, deepspeed zero-2, bf16): all 8 ranks logged `[ppv-probe] vision <|image_pad|> tokens in row 0: 800 total, 400 per view (n_views=2). Expected 400 to match UamVLA.py:181 ppv.` 2/2 global steps completed (~3.2 s/step), final ckpt saved at `playground/Checkpoints/uamvla_calvin_phase1/final_model/pytorch_model.pt` (~20 GB).
+- Step 4 (revert ppv-probe): commit `f312c65`. **Spec §9 risk row "Qwen3VLProcessor produces ≠ 400 tokens"** is now empirically resolved — the actual failure mode was more severe (zero `<|image_pad|>` tokens because `<image>` was never expanded). Resolved by collateral fixes 11.3.4–5 below.
+
+### 11.2 Step 5 outcome (eval-load smoke — minimal-equivalent path)
+
+The full WebSocket-based eval-rollout path proved un-runnable in the available `calvin_env` conda environment (Python 3.8) because most newer starVLA training-side dependencies (`numpydantic`, `pydantic ≥ 2`, etc.) have dropped Python 3.8 support upstream. Continuing to bring up that path was deemed yak-shave and out of scope for this spec (which only changed the eval client by one line — the `unnorm_key` rename).
+
+The G7 contract was instead verified through the **minimal equivalent** of `ModelClient._check_unnorm_key` (`model2libero_interface.py:241–245`): asserting that the rename in `eval_calvin.sh:10` (`unnorm_key="franka_calvin"`) is present as a key in the `dataset_statistics.json` produced by training. Result, in the trained ckpt at `playground/Checkpoints/uamvla_calvin_phase1/dataset_statistics.json`:
+
+```text
+dataset_statistics.json keys: ['franka_calvin']
+unnorm_key 'franka_calvin' present, schema: ['action']
+```
+
+The assertion that would fire in `_check_unnorm_key` is `unnorm_key in norm_stats`. With key set `{franka_calvin}` and `unnorm_key = "franka_calvin"`, the contract holds. G7 verified.
+
+Bringing up the full rollout end-to-end on a Python ≥ 3.9 calvin_env conda environment is recommended as a **follow-up** (call it the "calvin eval client env upgrade" follow-up).
+
+### 11.3 Latent bugs surfaced during remote e2e and the commits that resolved them
+
+These were **not anticipated by §9 risks** (other than the ppv issue) and were surfaced only by actually running the pipeline end-to-end on the remote box. All are pre-existing latent issues in the wider starVLA codebase, not regressions introduced by this spec; each is fixed in a dedicated commit so they can be cherry-picked or audited independently.
+
+| # | Commit | Root cause | Fix |
+|---|--------|------------|-----|
+| 11.3.1 | `c7aaf47` | transformers 5.x moved `Qwen3VLConfig.hidden_size` into `text_config`; `UamVLA.py:98` read it at the top level. | Use the wrapper's `hidden_size` property (already defensive against both layouts). |
+| 11.3.2 | `8bed92b` | `_build_aux_heads` spread both `vision_extra` (derived `target_resize=320`) and `cfg_heads.future` (yaml `target_resize=320`) into `FutureHead(...)`, producing duplicate kwargs. | Merge dicts explicitly with cfg winning on conflict. |
+| 11.3.3 | `f426905` + `1cba1a1` | `Qwen3VLProcessor` does not auto-expand `<image>` markers in manually built chat text; `expand_image_placeholders_qwen3_vl` was imported but never called. The processor's own internal expansion needs **one** `<|image_pad|>` per image (it expands from there using `image_grid_thw`), and image grid implies the input must be at the ppv-aligned 640×640 resolution. | (a) resize PIL images to 640×640 before processor; (b) substitute `<image>` → single `<|image_pad|>`. |
+| 11.3.4 | `8513f7d` | `UamVLADataset._load_aux_targets` returned `image_target` / `image_future` as PIL when `transforms=None`, but `stack_optional_tensor_fields` requires `.shape`/`.dtype`. | Tensor-ify aux images unconditionally via `_pil_to_chw_tensor` (PIL → `(C, H, W)` float32 in `[0,1]`). |
+| 11.3.5 | `5c04c6d` | `future_head._encode_to_latent` / `recon_head._encode_to_latent` did not cast the float32 input image to the bf16 VAE's parameter dtype before `vae.encode(...)`, causing `conv2d` dtype mismatch under bf16 training. (`_latent_to_pixels` had the cast; encode side did not.) | Mirror the cast: `images_vae = images_vae.to(next(self.vae.parameters()).dtype)`. |
+| 11.3.6 | `82932ec` + `e7ed380` | `starVLA/model/tools.py` and `examples/LIBERO/eval_files/model2libero_interface.py` use PEP 604 (`str \| None`) and PEP 585 (`list[int]`) annotations evaluated at module load, which crash on Python 3.8 (calvin_env). | Add `from __future__ import annotations` to both files. |
+| 11.3.7 | `bc30952` | `websocket_policy_client._wait_for_server` passed `ping_interval=20, ping_timeout=20` to `websockets.sync.client.connect()`; older `websockets` versions (those that ship in Python 3.8 envs) propagate unknown kwargs to `socket.create_connection`, which rejects them. | Drop the explicit kwargs; library defaults are sane. |
+
+### 11.4 Recommended follow-ups (out of this spec's scope)
+
+- **CALVIN eval state passthrough** (already deferred per §2.1): client must extract `robot_obs` from the `calvin_env` step output and push `canonical_state` over WebSocket. Until this lands, the trained ckpt evaluates without state, with the documented SR-loss trade-off.
+- **CALVIN eval client env upgrade**: bring `calvin_env` conda to Python ≥ 3.9 so the full `model2libero_interface.ModelClient` import chain (`numpydantic`, `pydantic 2`, etc.) can load. Without this, only the minimal-equivalent G7 verify (§11.2) is feasible.
+- **Update §9 risk table on the ppv row** to mark it `[RESOLVED]` with a pointer to commits `f426905` + `1cba1a1`. (Done implicitly by §11.1 here; if the next maintainer prefers, fold the table inline.)
