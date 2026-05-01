@@ -626,25 +626,41 @@ class UamVLA(baseframework):
         return backbone_out.hidden_states[-1]
 
     def get_lr_groups(self, lr_cfg) -> list:
-        # Deduplicate: exclude state_encoder params from the qwen_vl_interface group
-        # to avoid double-counting (state_encoder is a submodule of qwen_vl_interface).
-        state_enc_params = set(id(p) for p in self.qwen_vl_interface.state_encoder.parameters())
-        qwen_params = [p for p in self.qwen_vl_interface.parameters() if id(p) not in state_enc_params]
-        groups = [
-            {"name": "qwen_vl_interface",
-             "params": qwen_params,
-             "lr": float(lr_cfg.qwen_vl_interface)},
-            {"name": "state_encoder",
-             "params": list(self.qwen_vl_interface.state_encoder.parameters()),
-             "lr": float(lr_cfg.state_encoder)},
-        ]
+        groups = []
+        used_params = set()
+
+        def add_group(name: str, params, lr: float) -> None:
+            unique_params = []
+            for param in params:
+                if not param.requires_grad:
+                    continue
+                param_id = id(param)
+                if param_id in used_params:
+                    continue
+                used_params.add(param_id)
+                unique_params.append(param)
+            if unique_params:
+                groups.append({"name": name, "params": unique_params, "lr": float(lr)})
+
+        # Order matters for shared modules: state_encoder is nested under the
+        # backbone wrapper, and ActionHead borrows the backbone lm_head.
+        add_group(
+            "state_encoder",
+            self.qwen_vl_interface.state_encoder.parameters(),
+            lr_cfg.state_encoder,
+        )
         for name, head in self.aux_heads.items():
             head_cfg = self.config.framework.aux_heads[name]
-            groups.append({
-                "name": f"aux_head_{name}",
-                "params": list(head.parameters()),
-                "lr": float(head_cfg.get("lr", lr_cfg.base)),
-            })
+            add_group(
+                f"aux_head_{name}",
+                head.parameters(),
+                head_cfg.get("lr", lr_cfg.base),
+            )
+        add_group(
+            "qwen_vl_interface",
+            self.qwen_vl_interface.parameters(),
+            lr_cfg.qwen_vl_interface,
+        )
         return groups
 
     def supports_training_tag(self, tag: str) -> bool:
