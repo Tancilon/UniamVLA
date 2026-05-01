@@ -1,3 +1,9 @@
+# PEP 585 generic-alias syntax (`list[int]`, `tuple[dict[str, ...], ...]`)
+# appears below at module scope. Eval clients may run on Python 3.8 (e.g.,
+# the `calvin_env` conda env), where evaluating those annotations at import
+# time raises TypeError. Make annotations lazy (PEP 563, Python 3.7+).
+from __future__ import annotations
+
 from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, Sequence
