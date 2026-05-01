@@ -17,6 +17,7 @@ from typing import Iterable, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
+from PIL import Image as PILImage
 
 from starVLA.model.modules.uamvla.data.chat_template import (
     Qwen3VLChatTemplate,
@@ -41,6 +42,24 @@ _DTYPE_MAP = {
     "float16": torch.float16,
     "float32": torch.float32,
 }
+
+
+# --- Qwen3-VL image preprocessing constants ---------------------------------
+# These pin the image resolution and patches-per-view that the wrapper feeds
+# into Qwen3VLProcessor. They MUST stay aligned with UamVLA._derive_vision_extra
+# (UamVLA.py:181), which hardcodes ppv=400 and target_resize=320 for the
+# future/recon aux heads' DiT spatial grid.
+#
+#   Qwen3-VL @ 640px / patch16 / merge2 → 20×20 grid → 400 tokens per view
+#
+# Why we resize and expand here rather than letting Qwen3VLProcessor do it:
+# the processor accepts raw <image> placeholders only when callers use
+# `processor.apply_chat_template(...)`. Our chat template is built manually
+# (see chat_template.py), so we must (a) resize PIL images to the target
+# resolution and (b) expand <image> → <|image_pad|> * _QWEN3VL_PPV ourselves,
+# matching the placeholder count to image_grid_thw the processor will emit.
+_QWEN3VL_PPV = 400
+_QWEN3VL_TARGET_SIZE = 640
 
 
 def _assert_transformers_version() -> None:
@@ -259,21 +278,35 @@ class UamVLABackboneInterface(nn.Module):
                 f"got per-sample lengths {[len(s) for s in images]} (mismatched indices: {mismatched})"
             )
 
-        # Build chat-template text per sample. The processor will expand
-        # <|image_pad|> placeholders to the correct count using image_grid_thw.
-        # Note: we emit raw <image> placeholders here and rely on the processor
-        # to expand them (Qwen3VLProcessor handles this when given PIL images).
+        # Build chat-template text per sample, then expand the raw <image>
+        # placeholders into <|image_pad|> * _QWEN3VL_PPV so that the
+        # placeholder count matches the vision-feature count Qwen3VLProcessor
+        # will emit for our resized images. See module-level docstring on
+        # _QWEN3VL_PPV for why we expand here rather than relying on the
+        # processor to do it.
         texts = [
             self._format_chat_text(view_names, instr)
             for instr in instructions
         ]
+        texts = [
+            expand_image_placeholders_qwen3_vl(t, _QWEN3VL_PPV)
+            for t in texts
+        ]
 
-        # Flatten per-sample image lists into a flat list (Qwen3VLProcessor
-        # accepts a flat list of images and an aligned text batch with one
-        # <|image_pad|> placeholder per image).
+        # Resize each PIL image to the target resolution before flattening.
+        # Qwen3VLProcessor's vision encoder produces ppv tokens per view only
+        # when fed images at _QWEN3VL_TARGET_SIZE. CALVIN/LIBERO preprocessors
+        # render at 256×256 (RENDER_W/H), so we upscale here to keep the
+        # placeholder/feature counts aligned with UamVLA.py:181's hardcoded ppv.
         flat_images: List = []
         for sample_imgs in images:
-            flat_images.extend(sample_imgs)
+            for img in sample_imgs:
+                if img.size != (_QWEN3VL_TARGET_SIZE, _QWEN3VL_TARGET_SIZE):
+                    img = img.resize(
+                        (_QWEN3VL_TARGET_SIZE, _QWEN3VL_TARGET_SIZE),
+                        resample=PILImage.BICUBIC,
+                    )
+                flat_images.append(img)
 
         proc_out = self.processor(
             text=texts,
