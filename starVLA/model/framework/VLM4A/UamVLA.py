@@ -523,15 +523,13 @@ class UamVLA(baseframework):
         else:
             inputs_embeds = base_embeds
 
-        # Preserve or derive mm_token_type_ids for Qwen3-VL multimodal generation.
-        mm_token_type_ids = qwen_inputs.get("mm_token_type_ids")
-        if mm_token_type_ids is None:
-            mm_token_type_ids = iface._derive_mm_token_type_ids(
-                input_ids=input_ids,
-                pixel_values=qwen_inputs.get("pixel_values"),
-                provided=None,
-            )
-
+        # NOTE: do NOT pass mm_token_type_ids — Qwen3VLForConditionalGeneration's
+        # _validate_model_kwargs rejects unknown kwargs, and the LM-head class's
+        # forward signature does not declare this field. The model derives image
+        # positions internally from <|image_pad|> tokens in input_ids during
+        # prefill (we keep input_ids in gen_kwargs for exactly this reason). The
+        # training path needs to pass mm_token_type_ids only because the wrapper
+        # nulls input_ids before calling the inner Qwen3VLModel.
         gen_kwargs = {
             "input_ids": input_ids,
             "inputs_embeds": inputs_embeds,
@@ -539,8 +537,6 @@ class UamVLA(baseframework):
             "pixel_values": qwen_inputs.get("pixel_values"),
             "image_grid_thw": qwen_inputs.get("image_grid_thw"),
         }
-        if mm_token_type_ids is not None:
-            gen_kwargs["mm_token_type_ids"] = mm_token_type_ids
         return {k: v for k, v in gen_kwargs.items() if v is not None}
 
     def _extract_generated_tail(
