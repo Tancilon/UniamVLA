@@ -505,3 +505,66 @@ def test_calvin_abc_d_uamvla_mixture_registered():
     assert DATASET_NAMED_MIXTURES["calvin_uamvla"] == [
         ("task_D_D", 1.0, "franka_calvin"),
     ], DATASET_NAMED_MIXTURES["calvin_uamvla"]
+
+
+# ============================================================================
+# Test B (this PR): _resolve_head_mask defaults for missing aux mask keys
+# ============================================================================
+
+def test_resolve_head_mask_defaults_for_missing_keys():
+    """`_resolve_head_mask` returns all-True for `action` (universal) and
+    all-False for `pose` / `recon` / `future` when their mask key is missing
+    from batch_dict.
+
+    The missing-key case is the one stack_optional_tensor_fields produces when
+    every sample in the batch lacked the aux field (see collator_helpers.py:
+    if no sample has the field, both the field tensor AND its `_mask` key are
+    omitted entirely). Without this helper, UamVLA.forward() would default
+    such missing masks to torch.ones(...) and crash inside pose / recon heads
+    on `batch["image_target"]` / `assert "point_cloud" in batch`.
+
+    All-False routes through each head's existing `not mask.any()` early exit
+    in compute_loss → returns get_dummy_loss(...) — preserving the DeepSpeed
+    ZeRO-2 all-reduce shape across ranks.
+    """
+    import torch
+    from starVLA.model.framework.VLM4A.UamVLA import (
+        _resolve_head_mask,
+        _UNIVERSAL_HEADS,
+    )
+
+    # Sanity: the registry of universal heads is the documented one.
+    assert _UNIVERSAL_HEADS == ("action",), (
+        f"_UNIVERSAL_HEADS drifted from spec: {_UNIVERSAL_HEADS!r}"
+    )
+
+    B = 4
+    device = torch.device("cpu")
+    batch_empty: dict = {}
+
+    action_mask = _resolve_head_mask("action", batch_empty, B, device)
+    pose_mask   = _resolve_head_mask("pose",   batch_empty, B, device)
+    recon_mask  = _resolve_head_mask("recon",  batch_empty, B, device)
+    future_mask = _resolve_head_mask("future", batch_empty, B, device)
+
+    # Shape & dtype contract.
+    for name, m in (
+        ("action", action_mask), ("pose", pose_mask),
+        ("recon", recon_mask), ("future", future_mask),
+    ):
+        assert m.dtype == torch.bool, f"{name}: dtype {m.dtype} != bool"
+        assert m.shape == (B,), f"{name}: shape {tuple(m.shape)} != ({B},)"
+        assert m.device == device, f"{name}: device {m.device} != {device}"
+
+    # Default values per universality.
+    assert action_mask.all(),       "action default must be all-True (universal)"
+    assert not pose_mask.any(),     "pose default must be all-False"
+    assert not recon_mask.any(),    "recon default must be all-False"
+    assert not future_mask.any(),   "future default must be all-False"
+
+    # When the mask IS present in batch_dict, the helper returns it verbatim.
+    explicit = torch.tensor([True, False, True, True])
+    out = _resolve_head_mask("pose", {"pose_mask": explicit}, B, device)
+    assert out is explicit, (
+        "present mask key must be returned unchanged (no copy, no recompute)"
+    )

@@ -100,6 +100,40 @@ def _build_aux_heads(framework_cfg, hidden_size, vae=None, vision_extra=None, lm
     return heads
 
 
+# Aux heads whose target is universally present on every sample.
+# Action labels + per-action-dim mask are always written by the dataset, so
+# action's per-sample boolean mask defaults to all-True when absent. Every
+# other head consumes a per-sample subset; their mask comes from the collator
+# and may be absent entirely when stack_optional_tensor_fields drops both the
+# field tensor and its `_mask` key (the every-sample-lacks-it case).
+_UNIVERSAL_HEADS = ("action",)
+
+
+def _resolve_head_mask(
+    head_name: str,
+    batch_dict: dict,
+    batch_size: int,
+    device: "torch.device",
+) -> "torch.Tensor":
+    """Return the per-sample boolean mask the aux head should consume.
+
+    Universal heads default to all-True when their mask key is missing.
+    Non-universal heads default to all-False — the head's compute_loss /
+    visualize then early-exits via `not mask.any()` and returns
+    get_dummy_loss() (forward path) or a no-op (visualize path), preserving
+    DeepSpeed ZeRO-2's all-reduce shape across ranks (see base.py:31).
+
+    Both UamVLA.forward() and UamVLA.visualize_batch() route through this
+    helper so test_resolve_head_mask_defaults_for_missing_keys cannot drift
+    from the deployed logic.
+    """
+    mask = batch_dict.get(f"{head_name}_mask")
+    if mask is None:
+        fill = head_name in _UNIVERSAL_HEADS
+        return torch.full((batch_size,), fill, dtype=torch.bool, device=device)
+    return mask
+
+
 @FRAMEWORK_REGISTRY.register("UamVLA")
 class UamVLA(baseframework):
     """UamVLA: Qwen3-VL backbone + state encoder + multi-aux-head VLA model.
