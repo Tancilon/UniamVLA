@@ -658,7 +658,10 @@ class UamVLA(baseframework):
         def _pil_view_to_normed(view) -> torch.Tensor:
             if isinstance(view, torch.Tensor):
                 return view  # assume caller already handled normalization
-            arr = np.asarray(view, dtype=np.uint8)
+            # np.array (not np.asarray) — PIL's buffer is read-only, and
+            # torch.from_numpy on a non-writable view emits a defensive
+            # UserWarning. Copying once per view is cheap during viz.
+            arr = np.array(view, dtype=np.uint8)
             if arr.ndim == 2:
                 arr = np.repeat(arr[..., None], 3, axis=-1)
             t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0  # (C,H,W) [0,1]
