@@ -1,0 +1,130 @@
+run_id: uamvla_calvin_abcd_phase1
+run_root_dir: playground/Checkpoints
+seed: 42
+trackers: [jsonl, wandb]
+wandb_project: uamvla
+wandb_entity: tancilon
+is_debug: false
+version_id: "0.1"
+
+# ───────────────────────────────────────────────────────
+# framework: model construction
+# ───────────────────────────────────────────────────────
+framework:
+  name: UamVLA
+  embodiment:
+    name: franka_calvin
+    action_dim: 7
+  qwenvl:
+    base_vlm: ckpt/Qwen3-VL-8B-Instruct
+    attn_implementation: flash_attention_2
+  action_model:
+    future_action_window_size: 7        # = action_horizon - 1; starVLA convention (read by ModelClient)
+    num_bins: 256                        # ActionTokenizer bin count
+    action_dim: 7
+  state_encoder:
+    type: modular
+    register_special_tokens: true
+    normalization:
+      mode: q99                # one of: q99 | mean_std | min_max | none
+      apply_to:                # canonical field paths to normalize
+        - arm_0.ee_pose
+        - arm_0.joint_pos
+        - gripper_0
+  vae:
+    path: ckpt/pretrained_vae
+  aux_heads:
+    action:
+      enabled: true
+      loss_weight: 1.0
+      lr: 1.0e-4
+    pose:
+      enabled: true
+      loss_weight: 0.5
+      lr: 5.0e-5                         # ↓ from 1e-4: score-SDE head w/o EMA, ABC→D pose noise larger
+      pose_mode: rot_matrix
+      sde_mode: ve
+      num_queries: 4
+      semantic_dim: 512
+      sampling_steps: 500
+      # NOTE: PoseHead.visualize needs camera intrinsic. We auto-derive
+      # stats_path from datasets.vla_data via resolve_data_dir() at model build
+      # time, so it always tracks the active mixture's subdir without a
+      # duplicate config knob. Set stats_path here only as an explicit override.
+    future:
+      enabled: true
+      loss_weight: 0.1
+      lr: 1.0e-4
+      view_idx: 0
+      target_resize: 320                 # ppv=400 → 20*16
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
+    recon:
+      enabled: true
+      loss_weight: 0.1
+      lr: 1.0e-4
+      view_idx: 0
+      target_resize: 320
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
+
+# ───────────────────────────────────────────────────────
+# datasets: data loader plugin selection
+# ───────────────────────────────────────────────────────
+datasets:
+  vla_data:
+    dataset_py: uamvla_dataset           # starVLA/dataloader/uamvla_dataset.py
+    data_root_dir: datasets/uamvla_calvin
+    data_mix: calvin_abc_d_uamvla        # ABC_D mix (defined in uamvla_dataset.py)
+    image_size: 640                       # Qwen3-VL ppv=400 ⇒ 640x640 (UamVLA path: currently unused — see spec §5.3)
+    per_device_batch_size: 4              # ↑ from 2: H200 141GB allows larger per-device batch w/ ZeRO-2 + grad ckpt
+    delete_pause_frame: false
+
+# ───────────────────────────────────────────────────────
+# trainer: optimization / logging
+# ───────────────────────────────────────────────────────
+trainer:
+  epochs: 50
+  max_train_steps: 150000                 # ABC_D ≈ 3.5× D_D frames; longer for cross-env generalization
+  num_warmup_steps: 1500                  # ↑ from 500: ≈1% total steps, standard for 8B backbone + multi-aux
+  save_interval: 5000                     # ↑ from 2000: 30 ckpts is enough at 150K steps
+  eval_interval: 5000
+
+  learning_rate:
+    base:                  1.0e-4         # fallback for unmatched param groups
+    qwen_vl_interface:     2.0e-5         # backbone (UamVLA's backbone_lr equivalent)
+    state_encoder:         1.0e-4
+    # per-head LR is read from framework.aux_heads.{name}.lr by UamVLA.get_lr_groups()
+
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-6
+
+  freeze_modules: null                    # Phase 1 from-scratch — no freeze
+  loss_scale:
+    vla: 1.0                              # vlm not used (supports_training_tag returns False)
+
+  max_grad_norm: 1.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8          # ↓ from 16: effective batch = 4 × 8 × 8 = 256 (matches π0 / RDT-1B / CogACT)
+  gradient_checkpointing: true
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 1.0e-8
+
+  visualization:
+    enabled: true
+    train_every_n_steps: 1000
+    num_samples: 1
+
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true
