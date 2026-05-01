@@ -20,7 +20,7 @@ Stop the CALVIN preprocessor from dropping entire frames when the target object 
 3. **Patch `starVLA/model/framework/VLM4A/UamVLA.py:forward()`** to handle the case where an aux field is absent from every sample in the batch (the collator omits both the field tensor *and* its `_mask` key in that case — see `collator_helpers.py:93-94`). The current code defaults missing masks to all-True, which crashes pose / recon heads that assert `batch["point_cloud"]` / read `batch["image_target"]` unconditionally. Convention: action head defaults to all-True (action is universal); other heads skip the batch when their per-sample mask is missing or all-False.
 4. **Register a new mixture** `calvin_abc_d_uamvla -> [("task_ABC_D", 1.0, "franka_calvin")]` in `starVLA/dataloader/uamvla_dataset.py`. The pre-existing `calvin_uamvla -> task_D_D` entry is left intact for backward compatibility with any caller pointing at that path.
 5. Re-preprocess `datasets/uamvla_calvin/task_ABC_D/` in place (overwrite — the prior output has been deleted by the spec author; if a re-run is ever needed, the procedure starts with an explicit `rm -rf` so old shards do not get merged in).
-6. Add **two** new local unit tests: (a) "partial-aux row loads via UamVLADataset" — covers §3.1 + §3.2; (b) "all-occluded batch skips aux head without crashing" — covers §3.4. Verify the existing 13 tests (8 CALVIN + 5 LIBERO) stay green.
+6. Add **three** new local unit tests: (a) `test_partial_aux_row_loads` — covers §3.1 + §3.2 (dataset side); (b) `test_resolve_head_mask_defaults_for_missing_keys` — covers §3.3 framework patch directly; (c) `test_all_occluded_batch_collator_invariant` — covers the collator precondition the patch relies on. After this work: **11 CALVIN tests + 5 LIBERO tests = 16/16 must pass**.
 
 **Out of scope:**
 
@@ -265,33 +265,46 @@ The new mixture is referenced by `--datasets.vla_data.data_mix calvin_abc_d_uamv
 
 **File**: `starVLA/model/framework/VLM4A/UamVLA.py`, the aux-head dispatch loop in `forward()` (around line 318-329).
 
-**Current behaviour** (lines 319–323): `mask = batch_dict.get(f"{name}_mask")` falls back to `torch.ones(...)` (all-True) when missing. But when every sample in a batch lacks a particular aux field, `stack_optional_tensor_fields` drops *both* the field tensor and its `_mask` key from `batch_dict` (see `collator_helpers.py:92-94`). The all-True fallback then sends a now-empty-shaped fake mask into `head.compute_loss`, which crashes on the first `batch["image_target"]` / `assert "point_cloud" in batch` reference.
+**Current behaviour** (lines 319–323): `mask = batch_dict.get(f"{name}_mask")` falls back to `torch.ones(...)` (all-True) when missing. But when every sample in a batch lacks a particular aux field, `stack_optional_tensor_fields` drops *both* the field tensor and its `_mask` key from `batch_dict` (see `collator_helpers.py:92-94`). The all-True fallback then sends a now-fake mask into `head.compute_loss`, which crashes on the first `batch["image_target"]` / `assert "point_cloud" in batch` reference.
+
+**Why we don't `continue`**: each aux head's `compute_loss` already early-exits via `get_dummy_loss(...)` when `not mask.any()` (see `recon_head.py:110`, `pose_head.py:159`, `future_head.py` similarly). The dummy loss returns a zero tensor wired into the optimizer graph — its docstring (`base.py:31`) is explicit that it exists for **DeepSpeed ZeRO-2 alignment**: every rank must contribute a tensor of the right shape to the all-reduce, even when this rank has no real samples for the head. If we `continue` and skip the head entirely, ranks that DO have samples will all-reduce a tensor that ranks-without-samples never produced, and the optimizer hangs / desyncs.
+
+**Correct fix**: keep dispatching to every head every step; just provide a **valid default mask** (all-False for non-universal heads, all-True for action). Each head's internal `not mask.any()` early-exit then returns `get_dummy_loss(...)` — preserving the all-reduce shape across ranks.
 
 **Replacement**:
 
 ```python
-# Convention: "action" is universally present (every sample has an action label
-# and an action_mask vector). All other heads operate on a subset of samples;
-# their per-sample boolean mask comes from the collator and may be missing
-# entirely (when every sample in the batch lacked the aux field).
+# Module-level constant: "action" is universally present (every sample has an
+# action label + per-action-dim mask). All other heads operate on a subset of
+# samples; their per-sample boolean mask comes from the collator and may be
+# absent entirely when every sample in the batch lacked the aux field.
 _UNIVERSAL_HEADS = ("action",)
 
-for name, head in self.aux_heads.items():
-    mask = batch_dict.get(f"{name}_mask")
-    if mask is None:
-        if name in _UNIVERSAL_HEADS:
-            mask = torch.ones(
-                hidden.shape[0], dtype=torch.bool, device=hidden.device,
-            )
-        else:
-            # All samples lacked this aux field → skip the head this batch.
-            # Don't call compute_loss (which would read batch[field] and crash).
-            continue
-    elif not mask.any():
-        # mask is present but every entry is False → no eligible samples.
-        # Same outcome as missing-mask: skip the head, don't try compute_loss.
-        continue
 
+def _resolve_head_mask(
+    head_name: str, batch_dict: dict, batch_size: int, device: torch.device,
+) -> torch.Tensor:
+    """Return the per-sample boolean mask the aux head should consume.
+
+    Universal heads default to all-True when their mask is absent. Non-universal
+    heads default to all-False — the head's compute_loss then early-exits via
+    get_dummy_loss(), preserving DeepSpeed ZeRO-2's all-reduce shape across
+    ranks (see base.py:31 / get_dummy_loss docstring).
+
+    Centralising this in a helper lets §3.4 Test B exercise the actual logic
+    used by forward(), instead of duplicating it inside the test.
+    """
+    mask = batch_dict.get(f"{head_name}_mask")
+    if mask is None:
+        fill = head_name in _UNIVERSAL_HEADS  # True for action, False for others
+        return torch.full((batch_size,), fill, dtype=torch.bool, device=device)
+    return mask
+```
+
+```python
+# Updated dispatch loop in forward() (replaces lines 318-329 in the current file):
+for name, head in self.aux_heads.items():
+    mask = _resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
     out = head.compute_loss(hidden, batch_dict, mask=mask)
     if out.loss is not None:
         total = total + out.loss
@@ -304,13 +317,13 @@ for name, head in self.aux_heads.items():
 
 | Mask state | Before | After |
 |---|---|---|
-| Missing key, head is `action` | `mask = ones(B)`, head runs | `mask = ones(B)`, head runs (unchanged) |
-| Missing key, head is pose/recon/future | `mask = ones(B)`, head crashes on `batch[field]` | Skip head, no crash |
-| Present, all-False | head runs, internally early-exits with `skip_reason` | Skip head explicitly (slight metrics presentation change — `<head>_loss` not added; previously head's early-exit also did not add it) |
-| Present, mixed True/False | head runs, processes the True subset | Same |
+| Missing key, `action` head | `mask = ones(B)`, head runs | `mask = ones(B)`, head runs (unchanged) |
+| Missing key, pose/recon/future | `mask = ones(B)`, head crashes on `batch[field]` | `mask = zeros(B)`, head's `not mask.any()` early-exit returns `get_dummy_loss(...)` — no crash, ZeRO-2 all-reduce shape preserved |
+| Present, all-False | head runs, internally returns dummy loss | Same |
+| Present, mixed | head processes True subset | Same |
 | Present, all-True | head runs | Same |
 
-The `_UNIVERSAL_HEADS` tuple is a module-level constant. If a future maintainer adds a new universal head (e.g., a "language modeling loss" that runs on every sample), they extend this tuple. Naming-by-string is fragile but better than per-head class attributes for a 4-head registry; revisit if heads grow.
+The `_UNIVERSAL_HEADS` tuple is a module-level constant. If a future head is added that's universal (e.g., a "language modelling loss" on every sample), extend the tuple. Naming-by-string is fragile but better than per-head class attributes for a 4-head registry — revisit if the registry grows.
 
 ### 3.4 Tests — `tests/test_uamvla_calvin_pipeline_local.py`
 
@@ -361,54 +374,73 @@ def test_partial_aux_row_loads(tmp_path):
         assert ds[i]["canonical_state"]["arm_0"]["ee_pose"].shape == (9,)
 ```
 
-**Test B — all-occluded batch skips aux head (framework side):**
+**Test B — `_resolve_head_mask` defaults are correct (framework side):**
+
+This test exercises the **same `_resolve_head_mask` helper that `UamVLA.forward()` calls**, not a copy of the dispatch loop. If a future maintainer changes the helper without touching the test, or vice versa, the test fails — which is what we want.
 
 ```python
-def test_all_occluded_batch_skips_aux_head(tmp_path):
-    """When stack_optional_tensor_fields returns a batch_dict that lacks both
-    `image_target` and `image_target_mask` (because every sample in the batch
-    is occluded), the aux-head dispatch must skip recon/future/pose without
-    raising. Verifies the §3.3 framework patch.
+def test_resolve_head_mask_defaults_for_missing_keys(tmp_path):
+    """`_resolve_head_mask` returns all-True for `action` (universal) and
+    all-False for `pose` / `recon` / `future` when their mask key is missing
+    from batch_dict (the case where every sample in the batch lacked the aux
+    field — see collator_helpers.py:92-94). Verifies the §3.3 patch.
+
+    Calling this helper from BOTH forward() and the test ensures the test
+    can never diverge from the deployed logic.
+    """
+    import torch
+    from starVLA.model.framework.VLM4A.UamVLA import (
+        _resolve_head_mask, _UNIVERSAL_HEADS,
+    )
+
+    # Sanity: action is the only universal head in the current registry.
+    assert _UNIVERSAL_HEADS == ("action",)
+
+    B = 4
+    device = torch.device("cpu")
+
+    # Empty batch_dict: every aux mask key is missing.
+    batch_empty: dict = {}
+    action_mask = _resolve_head_mask("action", batch_empty, B, device)
+    pose_mask   = _resolve_head_mask("pose",   batch_empty, B, device)
+    recon_mask  = _resolve_head_mask("recon",  batch_empty, B, device)
+    future_mask = _resolve_head_mask("future", batch_empty, B, device)
+
+    assert action_mask.dtype == torch.bool and action_mask.shape == (B,)
+    assert action_mask.all(),     "action default = all-True (universal)"
+    assert not pose_mask.any(),   "pose default = all-False (non-universal)"
+    assert not recon_mask.any(),  "recon default = all-False (non-universal)"
+    assert not future_mask.any(), "future default = all-False (non-universal)"
+
+    # When the mask key IS present, the helper returns it verbatim.
+    explicit_mask = torch.tensor([True, False, True, True])
+    batch_with = {"pose_mask": explicit_mask}
+    out = _resolve_head_mask("pose", batch_with, B, device)
+    assert out is explicit_mask, "present mask key is returned unchanged"
+
+
+def test_all_occluded_batch_collator_invariant(tmp_path):
+    """Sanity-check the precondition the §3.3 patch relies on:
+    when every sample in a batch lacks an aux field, stack_optional_tensor_fields
+    omits both the field tensor and its `_mask` key. The patch's all-False
+    default kicks in exactly because of this collator behaviour.
     """
     import torch
     from starVLA.model.modules.uamvla.collator_helpers import stack_optional_tensor_fields
 
-    # Two samples, both lacking image_target / point_cloud / pose_6d
+    # 2 samples, both lacking image_target / point_cloud, but with image_future
     samples = [
-        {"action": torch.zeros(8, 7), "image_future": torch.zeros(3, 224, 224)},
-        {"action": torch.zeros(8, 7), "image_future": torch.zeros(3, 224, 224)},
+        {"image_future": torch.zeros(3, 224, 224)},
+        {"image_future": torch.zeros(3, 224, 224)},
     ]
-    batch = stack_optional_tensor_fields(samples, ["image_target", "image_future", "point_cloud"])
-    # Confirm the collator's invariant: missing-from-all → key absent
-    assert "image_target" not in batch
-    assert "image_target_mask" not in batch
-    assert "point_cloud" not in batch
-    assert "image_future" in batch  # both have it
-
-    # Simulate UamVLA.forward()'s aux-head dispatch with the patched logic.
-    # (We don't need a real backbone — just exercise the mask-handling branch.)
-    from starVLA.model.framework.VLM4A.UamVLA import _UNIVERSAL_HEADS
-    head_names = ["action", "pose", "future", "recon"]
-    skipped = []
-    ran = []
-    for name in head_names:
-        mask = batch.get(f"{name}_mask")
-        if mask is None:
-            if name in _UNIVERSAL_HEADS:
-                ran.append(name)
-            else:
-                skipped.append(name)
-            continue
-        elif not mask.any():
-            skipped.append(name)
-            continue
-        ran.append(name)
-
-    assert "action" in ran, "action is universal — must run even with all-occluded batch"
-    assert "pose" in skipped, "pose has no mask key (all samples lack pose_gt) — must skip"
-    assert "recon" in skipped, "recon has no mask key (all samples lack image_target) — must skip"
-    # future has image_future present in this batch, so it should run
-    assert "future" in ran, "future has image_future across the batch — must run"
+    batch = stack_optional_tensor_fields(
+        samples, ["image_target", "image_future", "point_cloud"],
+    )
+    assert "image_target" not in batch and "image_target_mask" not in batch
+    assert "point_cloud"  not in batch and "point_cloud_mask"  not in batch
+    assert "image_future" in batch     and "image_future_mask" in batch
+    # Both samples present → mask is all-True
+    assert batch["image_future_mask"].all()
 ```
 
 **Existing tests** (8 CALVIN + 5 LIBERO) must stay green with no modification. They use fixtures where every sample has every aux field, so neither filter deletion nor framework patch changes their behaviour.
@@ -418,11 +450,11 @@ def test_all_occluded_batch_skips_aux_head(tmp_path):
 ### 4.1 Local unit verification (macOS, no `calvin_env`)
 
 ```bash
-pytest tests/test_uamvla_calvin_pipeline_local.py -v   # 9 tests (8 prior + 1 new)
+pytest tests/test_uamvla_calvin_pipeline_local.py -v   # 11 tests (8 prior + 3 new)
 pytest tests/test_uamvla_dataset.py -v                  # 5 LIBERO regression
 ```
 
-Required: 14/14 pass.
+Required: **16/16 pass**.
 
 ### 4.2 Remote — Step 1: validate on debug dataset
 
@@ -479,14 +511,14 @@ If Step 2 crashes mid-run, **always `rm -rf datasets/uamvla_calvin/task_ABC_D` b
 
 | Metric | Pre-fix | Post-fix expectation | Pass condition |
 |---|---|---|---|
-| `data.jsonl` rows | 937,169 | ~1,072k | strictly greater than 937,169; expected very close to 1,071,743 (= prior orphan-obs count) |
+| `data.jsonl` rows | 937,169 | ~1,072k | strictly greater than 937,169; expected close to **1,071,743** (= 937,169 prior rows + 134,574 previously-skipped frames; the pre-fix obs-static file count happens to equal this expected post-fix row count because every obs file was rendered, just not always referenced) |
 | `distinct episode_id` count | 16,363 | 17,870 | exactly 17,870 |
 | `produced no samples` log lines | 1,507 | 0 | exactly 0 |
 | `images/obs/static` files | 1,071,743 | matches rows (~1,072k) | abs(diff) ≤ 1 |
 | `images/target` files | 937,169 | similar (~937k) | within ±2 % of pre-fix |
 | `point_clouds` files | 937,169 | similar (~937k) | within ±2 % of pre-fix |
 | `images/future` files | 16,363 | 17,870 | exactly equal to episode count |
-| Partial rows (no `image_target`) | 0 % | ~12.5 % | matches seg-fail-frame count from log |
+| Partial rows (no `image_target`) | 0 % | ~12.5 % | matches `images/obs/static count - images/target count` (filesystem diff; not coupled to log format) |
 
 ### 4.4 Training-side smoke (recommended)
 
@@ -554,11 +586,12 @@ frame t (after env.reset + render_cameras)
   ├─ last_rgb_static ← rgb_static                       ── always updated (G2 fix)
   ├─ depth_to_world_points → pts
   │     └─ if pts: save pc → row["point_cloud"], row["pose_6d"]
-  │     └─ else (skip-mode): omit fields, continue
+  │     └─ else (skip-mode): omit fields, proceed                 ── no early continue
   ├─ crop_target_from_seg → target_img
   │     └─ if target_img: save → row["image_target"]
-  │     └─ else (skip-mode): omit field, continue
-  └─ rows.append(row)                                   ── always (no early continue)
+  │     └─ else (skip-mode): omit field, proceed                  ── no early continue
+  ├─ if either of the above omitted a field: logger.info(...) for visibility
+  └─ rows.append(row)                                   ── always
 
 window epilogue:
   ├─ if rows is empty (every frame's render itself failed — pathological):
