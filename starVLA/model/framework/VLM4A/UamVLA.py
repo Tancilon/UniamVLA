@@ -31,6 +31,18 @@ from starVLA.model.modules.uamvla.collator_helpers import (
 from starVLA.model.modules.uamvla.state_encoder.special_tokens import ACTION_START_TOKEN
 
 
+def _move_tensors_to_device(value, device: torch.device):
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _move_tensors_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_move_tensors_to_device(v, device) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_move_tensors_to_device(v, device) for v in value)
+    return value
+
+
 @dataclass
 class UamVLADefaultConfig:
     name: str = "UamVLA"
@@ -288,6 +300,8 @@ class UamVLA(baseframework):
         )
 
         qwen_inputs, labels = self._build_labels_and_extend(examples, qwen_inputs)
+        qwen_inputs = _move_tensors_to_device(qwen_inputs, self._backbone_input_device())
+        labels = labels.to(qwen_inputs["input_ids"].device)
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             backbone_out = self.qwen_vl_interface(
@@ -315,6 +329,12 @@ class UamVLA(baseframework):
                 log_metrics[f"{name}_{mk}"] = mv
 
         return {**log_metrics, "action_loss": total}
+
+    def _backbone_input_device(self) -> torch.device:
+        try:
+            return self.qwen_vl_interface.get_embed_tokens().weight.device
+        except AttributeError:
+            return next(self.qwen_vl_interface.parameters()).device
 
     def _collate_for_heads(self, examples: List[dict], qwen_inputs: dict, labels=None) -> dict:
         """Stack per-sample optional fields into batch tensors with masks.
@@ -364,7 +384,7 @@ class UamVLA(baseframework):
             batch_dict["static_cam_extrinsic"] = cam_out["static_cam_extrinsic"]
             batch_dict["static_cam_extrinsic_mask"] = cam_out["static_cam_extrinsic_mask"]
 
-        return batch_dict
+        return _move_tensors_to_device(batch_dict, qwen_inputs["input_ids"].device)
 
     @torch.inference_mode()
     def predict_action(self, examples, **kwargs) -> dict:
@@ -484,10 +504,10 @@ class UamVLA(baseframework):
         and state splicing. The transformer runs inside model.generate().
         """
         iface = self.qwen_vl_interface
+        embed_tokens = iface.get_embed_tokens()
+        qwen_inputs = _move_tensors_to_device(qwen_inputs, embed_tokens.weight.device)
         input_ids = qwen_inputs["input_ids"]
         canonical_state = qwen_inputs.get("canonical_state")
-
-        embed_tokens = iface.get_embed_tokens()
         base_embeds = embed_tokens(input_ids)
 
         if canonical_state is not None:
