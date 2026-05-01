@@ -25,6 +25,19 @@ from starVLA.utils.point_cloud import clean_point_cloud
 REQUIRED_OPTIONAL_FIELDS = ("image_target", "image_future", "point_cloud")
 
 
+def _pil_to_chw_tensor(img: Image.Image) -> torch.Tensor:
+    """Convert a PIL RGB image to a (C, H, W) float32 tensor in [0, 1].
+
+    Used for aux-head image targets (image_target / image_future) which must
+    reach the framework's collator as tensors so stack_optional_tensor_fields
+    can build a (B, C, H, W) batch. The dataset's primary image list stays
+    PIL (build_inputs feeds PIL to Qwen3VLProcessor), so the conversion here
+    is intentionally limited to aux fields.
+    """
+    arr = np.array(img, dtype=np.uint8, copy=True)  # (H, W, C); PIL buffer can be read-only
+    return torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0
+
+
 DATASET_NAMED_MIXTURES = {
     "libero_uamvla": [
         # (data_subdir, weight, embodiment_tag)
@@ -152,20 +165,22 @@ class UamVLADataset(Dataset):
 
     def _load_aux_targets(self, raw, sample):
         """Load image_target / image_future / point_cloud / pose_gt / static_cam_extrinsic if present."""
+        # image_target / image_future are unconditionally tensor-ified — the
+        # framework's stack_optional_tensor_fields requires .shape/.dtype on
+        # whatever comes out of __getitem__. We deliberately do NOT route
+        # these through self.transforms (which is reserved for the primary
+        # image list and is allowed to be None to keep PIL semantics for
+        # Qwen3VLProcessor).
         if "image_target" in raw and raw["image_target"]:
             try:
                 img = Image.open(self.data_root / raw["image_target"]).convert("RGB")
-                if self.transforms:
-                    img = self.transforms(img)
-                sample["image_target"] = img
+                sample["image_target"] = _pil_to_chw_tensor(img)
             except FileNotFoundError:
                 pass
         if "image_future" in raw and raw["image_future"]:
             try:
                 img = Image.open(self.data_root / raw["image_future"]).convert("RGB")
-                if self.transforms:
-                    img = self.transforms(img)
-                sample["image_future"] = img
+                sample["image_future"] = _pil_to_chw_tensor(img)
             except FileNotFoundError:
                 pass
         if "pose_6d" in raw:
