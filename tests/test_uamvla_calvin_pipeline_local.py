@@ -349,3 +349,141 @@ def test_yaml_loadable():
     assert cfg.framework.name == "UamVLA"
     assert cfg.framework.action_model.action_dim == 7
     assert cfg.framework.action_model.future_action_window_size == 7
+
+
+# ============================================================================
+# Task A (this PR): partial-aux row loads through UamVLADataset
+# ============================================================================
+
+def _build_partial_aux_calvin_dataset(
+    tmp_path: Path,
+    n_samples: int = 6,
+    n_occluded: int = 2,
+) -> Path:
+    """Like _build_synthetic_calvin_dataset, but the LAST `n_occluded` rows
+    omit image_target / point_cloud / pose_6d (and skip writing those media
+    files), mimicking what the new preprocessor produces when seg fails.
+
+    statistics.yaml is computed over ALL n_samples — production's
+    _write_statistics(samples, ...) iterates every sample's robot_obs via
+    CalvinAdapter regardless of occlusion, so stats span every frame.
+    """
+    from PIL import Image
+    from tools.preprocess.calvin_preprocessor import _write_statistics
+
+    samples = _make_synthetic_calvin_samples(n=n_samples)
+
+    # Always-fields on every sample.
+    for s in samples:
+        sid = s["id"]
+        s["image_future"] = f"images/future/{s['episode_id']}.jpg"
+        s["depth_static"] = f"depth/static/{sid}.npy"
+        s["depth_wrist"]  = f"depth/wrist/{sid}.npy"
+        s["static_cam_extrinsic"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "translation": [0.0, 0.0, 0.0],
+        }
+        s["wrist_cam_extrinsic"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "translation": [0.0, 0.0, 0.0],
+        }
+
+    # Aux fields on the first (n_samples - n_occluded) rows only.
+    n_visible = n_samples - n_occluded
+    for s in samples[:n_visible]:
+        sid = s["id"]
+        s["image_target"] = f"images/target/{sid}.jpg"
+        s["point_cloud"]  = f"point_clouds/{sid}.npy"
+        s["pose_6d"] = {
+            "rotation":    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            "translation": [0.0, 0.0, 0.0],
+            "object_id":   "test_object",
+        }
+    # samples[n_visible:] are partial — image_target / point_cloud / pose_6d absent.
+
+    for sub in (
+        "images/obs/static", "images/obs/wrist",
+        "images/target", "images/future",
+        "depth/static", "depth/wrist",
+        "point_clouds",
+    ):
+        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+
+    with open(tmp_path / "data.jsonl", "w") as f:
+        for s in samples:
+            f.write(json.dumps(s) + "\n")
+
+    blank_rgb = Image.new("RGB", (256, 256), color=(127, 127, 127))
+    pc_zeros = np.zeros((1024, 3), dtype=np.float32)
+    depth_zeros = np.zeros((256, 256), dtype=np.float32)
+    futures_written: set[str] = set()
+    for s in samples:
+        # Always-fields: write obs jpgs, depth npys, future jpg.
+        for img_rel in s["image"]:
+            blank_rgb.save(tmp_path / img_rel, quality=95)
+        if s["image_future"] not in futures_written:
+            blank_rgb.save(tmp_path / s["image_future"], quality=95)
+            futures_written.add(s["image_future"])
+        np.save(tmp_path / s["depth_static"], depth_zeros)
+        np.save(tmp_path / s["depth_wrist"], depth_zeros)
+        # Seg-dependent: only when present in the sample dict.
+        if "image_target" in s:
+            blank_rgb.save(tmp_path / s["image_target"], quality=95)
+        if "point_cloud" in s:
+            np.save(tmp_path / s["point_cloud"], pc_zeros)
+
+    intrinsics = {
+        "static": {"fx": 100.0, "fy": 100.0, "cx": 128.0, "cy": 128.0},
+        "wrist":  {"fx": 100.0, "fy": 100.0, "cx": 128.0, "cy": 128.0},
+    }
+    _write_statistics(samples, tmp_path, intrinsics)
+    return tmp_path
+
+
+def test_partial_aux_row_loads(tmp_path):
+    """Mixed full + partial-aux dataset loads through UamVLADataset.
+
+    Visible rows (first 4) carry image_target / point_cloud / pose_gt.
+    Occluded rows (last 2) omit them. All 6 rows must load — the legacy
+    REQUIRED_OPTIONAL_FIELDS filter would have either dropped the partial
+    rows (kept only the 4 truthy filtered samples) or fallen through to
+    `or all_samples`. After Task 2's filter deletion, all 6 load directly.
+    """
+    from starVLA.dataloader.uamvla_dataset import UamVLADataset
+
+    data_root = _build_partial_aux_calvin_dataset(
+        tmp_path, n_samples=6, n_occluded=2,
+    )
+
+    ds = UamVLADataset(
+        data_root=data_root,
+        embodiment="franka_calvin",
+        action_horizon=8,
+        normalization={
+            "mode": "q99",
+            "apply_to": ["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
+        },
+    )
+
+    assert len(ds) == 6, (
+        f"expected all 6 rows to load (filter deleted), got {len(ds)}"
+    )
+
+    # Visible rows: aux fields present.
+    assert "image_target" in ds[0], "row 0 (visible) must keep image_target"
+    assert "point_cloud" in ds[0], "row 0 (visible) must keep point_cloud"
+    assert "pose_gt" in ds[0], "row 0 (visible) must keep pose_gt"
+
+    # Occluded rows: aux fields absent.
+    assert "image_target" not in ds[5], "row 5 (occluded) must omit image_target"
+    assert "point_cloud" not in ds[5], "row 5 (occluded) must omit point_cloud"
+    assert "pose_gt" not in ds[5], "row 5 (occluded) must omit pose_gt"
+
+    # Universal fields present on every row, including occluded ones.
+    for i in range(6):
+        assert ds[i]["action"].shape == (8, 7), (
+            f"row {i}: action shape {ds[i]['action'].shape} != (8, 7)"
+        )
+        assert ds[i]["canonical_state"]["arm_0"]["ee_pose"].shape == (9,)
+        assert ds[i]["canonical_state"]["arm_0"]["joint_pos"].shape == (7,)
+        assert ds[i]["canonical_state"]["gripper_0"].shape == (1,)

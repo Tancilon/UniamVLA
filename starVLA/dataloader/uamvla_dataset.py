@@ -22,9 +22,6 @@ from starVLA.model.modules.uamvla.data.embodiment_registry import get_embodiment
 from starVLA.utils.point_cloud import clean_point_cloud
 
 
-REQUIRED_OPTIONAL_FIELDS = ("image_target", "image_future", "point_cloud")
-
-
 def _pil_to_chw_tensor(img: Image.Image) -> torch.Tensor:
     """Convert a PIL RGB image to a (C, H, W) float32 tensor in [0, 1].
 
@@ -69,10 +66,7 @@ class UamVLADataset(Dataset):
 
         # Load samples
         with open(self.data_root / "data.jsonl") as f:
-            all_samples = [json.loads(l) for l in f if l.strip()]
-        # Filter to those with required optional fields (mirrors UamVLA base_dataset.py:46-55)
-        self.samples = [s for s in all_samples
-                        if all(k in s for k in REQUIRED_OPTIONAL_FIELDS)] or all_samples
+            self.samples = [json.loads(l) for l in f if l.strip()]
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
