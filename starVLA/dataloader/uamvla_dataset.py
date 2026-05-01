@@ -208,6 +208,26 @@ def collate_fn(batch):
     return batch
 
 
+def resolve_data_dir(data_cfg) -> Path:
+    """Resolve the on-disk data directory for the configured single-subdir mixture.
+
+    Single source of truth for `data_root_dir / subdir` so the dataloader and any
+    other component (e.g. PoseHead's stats_path auto-derivation) stay in lockstep.
+    Raises NotImplementedError on multi-subdir mixtures, matching get_vla_dataset.
+    """
+    data_root = Path(data_cfg.data_root_dir)
+    mixture = DATASET_NAMED_MIXTURES.get(data_cfg.data_mix)
+    if mixture is None:
+        raise ValueError(
+            f"Unknown data_mix '{data_cfg.data_mix}'. "
+            f"Available: {list(DATASET_NAMED_MIXTURES)}"
+        )
+    if len(mixture) != 1:
+        raise NotImplementedError("Multi-subdir mixture deferred to Phase 2")
+    subdir, _weight, _embodiment = mixture[0]
+    return data_root / subdir
+
+
 def get_vla_dataset(data_cfg, mode: str = "train", **kwargs) -> Dataset:
     """starVLA plugin entry point. Returns a Dataset that yields starVLA examples dicts."""
     data_root = Path(data_cfg.data_root_dir)

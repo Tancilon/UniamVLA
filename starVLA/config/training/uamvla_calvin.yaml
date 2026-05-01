@@ -47,13 +47,10 @@ framework:
       num_queries: 4
       semantic_dim: 512
       sampling_steps: 500
-      # Static-camera intrinsic for PoseHead.visualize. Resolved relative to
-      # PWD at training launch (= repo root). Points at the per-subdir
-      # statistics.yaml the preprocessor writes alongside the data shards.
-      # Override via CLI when pointing the run at a different preprocessed
-      # dataset, e.g.:
-      #   --framework.aux_heads.pose.stats_path datasets/uamvla_calvin/<subdir>/statistics.yaml
-      stats_path: datasets/uamvla_calvin/task_D_D_partial/statistics.yaml
+      # NOTE: PoseHead.visualize needs camera intrinsic. We auto-derive
+      # stats_path from datasets.vla_data via resolve_data_dir() at model build
+      # time, so it always tracks the active mixture's subdir without a
+      # duplicate config knob. Set stats_path here only as an explicit override.
     future:
       enabled: true
       loss_weight: 0.1

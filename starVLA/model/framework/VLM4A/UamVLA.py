@@ -4,12 +4,15 @@
 
 See: docs/superpowers/specs/2026-04-29-starvla-migration-design.md
 """
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import merge_framework_config
@@ -66,8 +69,13 @@ class UamVLADefaultConfig:
     })
 
 
-def _build_aux_heads(framework_cfg, hidden_size, vae=None, vision_extra=None, lm_head=None, action_token_begin_id=0):
-    """Construct enabled aux heads. Mirrors UamVLA models/uamvla_model.py:197-218 logic."""
+def _build_aux_heads(framework_cfg, hidden_size, vae=None, vision_extra=None, lm_head=None, action_token_begin_id=0, data_cfg=None):
+    """Construct enabled aux heads. Mirrors UamVLA models/uamvla_model.py:197-218 logic.
+
+    ``data_cfg`` is optional: when provided, PoseHead auto-derives its
+    ``stats_path`` from the same ``data_root_dir / subdir`` the dataloader
+    resolves, so pose viz works without a duplicate path in the framework yaml.
+    """
     heads = {}
     cfg_heads = framework_cfg.aux_heads
     if cfg_heads.action.get("enabled", True):
@@ -77,10 +85,14 @@ def _build_aux_heads(framework_cfg, hidden_size, vae=None, vision_extra=None, lm
             loss_weight=float(cfg_heads.action.get("loss_weight", 1.0)),
         )
     if cfg_heads.pose.get("enabled", True):
-        heads["pose"] = PoseHead(
-            hidden_size=hidden_size,
-            **{k: v for k, v in cfg_heads.pose.items() if k not in ("enabled", "lr")},
-        )
+        pose_kwargs = {k: v for k, v in cfg_heads.pose.items() if k not in ("enabled", "lr")}
+        if data_cfg is not None and "stats_path" not in pose_kwargs:
+            try:
+                from starVLA.dataloader.uamvla_dataset import resolve_data_dir
+                pose_kwargs["stats_path"] = str(resolve_data_dir(data_cfg) / "statistics.yaml")
+            except Exception as exc:  # noqa: BLE001 — keep pose viz disablement as the only consequence
+                logger.warning("Could not auto-derive PoseHead stats_path: %s", exc)
+        heads["pose"] = PoseHead(hidden_size=hidden_size, **pose_kwargs)
     # Merge vision_extra (derived defaults) with cfg-side kwargs. yaml takes
     # precedence on conflict (e.g., both currently provide `target_resize`):
     # vision_extra fills in derived ppv-based defaults the user usually doesn't
@@ -224,6 +236,7 @@ class UamVLA(baseframework):
             vision_extra=vision_extra,
             lm_head=self.qwen_vl_interface.get_lm_head(),
             action_token_begin_id=_act0_id,
+            data_cfg=getattr(self.config, "datasets", {}).get("vla_data") if hasattr(self.config, "datasets") else None,
         ))
 
         self.action_horizon = int(self.config.framework.action_model.future_action_window_size) + 1
