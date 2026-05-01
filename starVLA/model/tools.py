@@ -1,3 +1,11 @@
+# PEP 604 union syntax (`str | None`) appears below. The CALVIN eval client
+# imports this module from a Python 3.8/3.9 conda env; without
+# `from __future__ import annotations`, Python 3.10+-only annotations are
+# evaluated at import time and raise TypeError. The future import makes all
+# annotations lazy strings, so the syntax is accepted on every Python ≥ 3.7.
+from __future__ import annotations
+
+
 def auto_get_module_keys(module, max_depth=0, prefix_list=None, current_depth=0, current_prefix=""):
     """
     get all submodule keys of a module, support setting recursion depth and prefix list.
