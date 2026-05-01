@@ -681,7 +681,14 @@ class UamVLA(baseframework):
                 mask = torch.ones(hidden.shape[0], dtype=torch.bool, device=hidden.device)
             if not mask.any():
                 continue
-            imgs = head.visualize(hidden, batch_dict, mask, num_samples=n_samples)
+            # Forward optional head-owned viz state (e.g. PoseHead.camera_params,
+            # loaded from stats_path at construction). Heads that don't carry
+            # such state simply ignore the kwarg via their **kwargs.
+            extra_kwargs = {}
+            cam_params = getattr(head, "camera_params", None)
+            if cam_params is not None:
+                extra_kwargs["camera_params"] = cam_params
+            imgs = head.visualize(hidden, batch_dict, mask, num_samples=n_samples, **extra_kwargs)
             for i, img in enumerate(imgs):
                 out[f"viz/{name}/{i}"] = img
         return out

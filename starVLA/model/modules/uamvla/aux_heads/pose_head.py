@@ -40,6 +40,7 @@ class PoseHead(AuxHead):
         sampling_steps: int = 500,
         pointnet_input_channels: int = 0,
         loss_weight: float = 0.5,
+        stats_path: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -48,6 +49,12 @@ class PoseHead(AuxHead):
         self.sampling_steps = sampling_steps
         self.pose_mode = pose_mode
         self.pose_dim = get_pose_dim(pose_mode)
+
+        # Static camera intrinsic for visualize() — per-sample extrinsic comes
+        # from batch["static_cam_extrinsic"]. Loaded once at construction.
+        self.camera_params = self._load_camera_params(stats_path) if stats_path else None
+        if self.camera_params is not None:
+            logger.info("PoseHead loaded static camera intrinsic from %s", stats_path)
 
         # SDE components (not nn.Module)
         prior_fn, marginal_prob_fn, sde_fn, eps, T = init_sde(sde_mode)
@@ -76,6 +83,38 @@ class PoseHead(AuxHead):
             pose_mode=pose_mode,
             regression_head="RT",
         )
+
+    @staticmethod
+    def _load_camera_params(stats_path: str) -> dict | None:
+        """Load static camera intrinsic from preprocessor's statistics.yaml.
+
+        File format (produced by tools/preprocess/calvin_preprocessor.py and
+        the LIBERO equivalent)::
+
+            cameras:
+              static: { intrinsic: { fx, fy, cx, cy, width, height } }
+              wrist:  { intrinsic: ... }
+
+        Per-sample static_cam_extrinsic (rotation/translation) is sourced from
+        the batch by visualize() — only the camera-state-independent intrinsic
+        comes from this file.
+        """
+        import yaml
+        from pathlib import Path
+        p = Path(stats_path)
+        if not p.exists():
+            logger.warning("PoseHead stats_path does not exist: %s", stats_path)
+            return None
+        try:
+            with open(p) as f:
+                stats = yaml.safe_load(f)
+            return {"intrinsic": stats["cameras"]["static"]["intrinsic"]}
+        except (KeyError, TypeError) as exc:
+            logger.warning(
+                "PoseHead could not extract cameras.static.intrinsic from %s: %s",
+                stats_path, exc,
+            )
+            return None
 
     def _get_score_dtype(self) -> torch.dtype:
         """Return the score network's parameter dtype, or float32 if the

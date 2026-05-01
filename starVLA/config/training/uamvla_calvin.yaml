@@ -47,6 +47,10 @@ framework:
       num_queries: 4
       semantic_dim: 512
       sampling_steps: 500
+      # Static-camera intrinsic for PoseHead.visualize. Resolved relative to
+      # PWD at training launch (= repo root). Override alongside data_root_dir
+      # if you point the run at a different preprocessed dataset.
+      stats_path: datasets/uamvla_calvin/statistics.yaml
     future:
       enabled: true
       loss_weight: 0.1
