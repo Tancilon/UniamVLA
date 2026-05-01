@@ -196,6 +196,11 @@ class FutureHead(AuxHead):
 
     def _encode_to_latent(self, images_vae: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
+            # Cast to VAE's parameter dtype before conv2d to avoid the
+            # "Input type (float) and bias type (BFloat16) should be the same"
+            # mismatch when training under bf16. Mirrors _latent_to_pixels.
+            vae_dtype = next(self.vae.parameters()).dtype
+            images_vae = images_vae.to(vae_dtype)
             posterior = self.vae.encode(images_vae).latent_dist
             z_q = (
                 posterior.sample() - self.vae.shift_factor
