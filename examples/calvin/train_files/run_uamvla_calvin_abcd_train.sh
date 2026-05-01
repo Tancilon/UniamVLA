@@ -1,7 +1,14 @@
 
 
-export NCCL_SOCKET_IFNAME=bond0
-export NCCL_IB_HCA=mlx5_2,mlx5_3
+# NCCL networking: auto-detect for single-node 8-GPU runs.
+# - Bootstrap: NCCL picks the first non-`lo` UP interface (verified: this
+#   container exposes only `eth0` + `lo` under /sys/class/net/).
+# - Data: NVLink + SHM within one node — IB is not used (`ibv_devices`
+#   returns an empty list inside this container).
+# For multi-node, set these explicitly to your cluster's actual interface
+# names (typical: eth0 / ens3 / bond0 for socket; mlx5_X for IB HCA).
+# export NCCL_SOCKET_IFNAME=eth0
+# export NCCL_IB_HCA=mlx5_2,mlx5_3
 
 # used for check save when communication
 export NCCL_BLOCKING_WAIT=1
