@@ -354,10 +354,13 @@ class UamVLA(baseframework):
         action token IDs at action positions. It is passed in directly rather
         than read from ``qwen_inputs`` (which never carries labels).
         """
+        # NOTE: do not put qwen_inputs["pixel_values"] under "image" here. Qwen3-VL's
+        # pixel_values is a flattened patch tensor (N_patches, dim) that cannot be
+        # sliced as (B, V, C, H, W). The "image" key is populated only in the
+        # visualize path (see visualize_batch) where aux heads expect raw views.
         batch_dict: dict = {
             "input_ids":   qwen_inputs["input_ids"],
             "labels":      labels,
-            "image":       qwen_inputs.get("pixel_values"),
             "instruction": [e["lang"] for e in examples],
         }
 
@@ -646,6 +649,25 @@ class UamVLA(baseframework):
             hidden = backbone_out.hidden_states[-1]
 
         batch_dict = self._collate_for_heads(examples, qwen_inputs, labels=labels)
+
+        # Aux heads' visualize methods read batch["image"][i, view_idx] expecting
+        # a (B, V, C, H, W) tensor normalized with mean=0.5/std=0.5 (so the
+        # default vis_draw.tensor_to_pil round-trip recovers the original RGB).
+        # The dataset emits e["image"] as List[PIL.Image] (transforms=None), so
+        # build that tensor here, only when actually visualizing.
+        def _pil_view_to_normed(view) -> torch.Tensor:
+            if isinstance(view, torch.Tensor):
+                return view  # assume caller already handled normalization
+            arr = np.asarray(view, dtype=np.uint8)
+            if arr.ndim == 2:
+                arr = np.repeat(arr[..., None], 3, axis=-1)
+            t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0  # (C,H,W) [0,1]
+            return (t - 0.5) / 0.5  # (C,H,W) in [-1, 1]
+
+        batch_dict["image"] = torch.stack([
+            torch.stack([_pil_view_to_normed(v) for v in e["image"]])
+            for e in examples
+        ]).to(hidden.device)
 
         out = {}
         for name, head in self.aux_heads.items():

@@ -413,7 +413,14 @@ class VLATrainer(TrainerUtils):
 
         if self.accelerator.is_main_process:
             normalized_actions = output_dict["normalized_actions"]
-            actions = np.array(actions)
+            # accelerator.prepare(dataloader) puts each example["action"] on GPU,
+            # so np.array(list_of_cuda_tensors) raises via torch.Tensor.__array__.
+            # Move to host first, defending against the np.ndarray path too.
+            actions = np.stack([
+                a.detach().cpu().numpy() if isinstance(a, torch.Tensor)
+                else np.asarray(a)
+                for a in actions
+            ])
             num_pots = np.prod(actions.shape)
             score = TrainerUtils.euclidean_distance(normalized_actions, actions)
             step_metrics["mse_score"] = score / num_pots
