@@ -319,22 +319,6 @@ class UamVLABackboneInterface(nn.Module):
             return_tensors="pt",
         )
 
-        # === TEMP ppv-probe (Task 9 step 2) — REMOVE BEFORE COMMIT ===
-        try:
-            _input_ids = proc_out.get("input_ids", None)
-            _image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-            if _input_ids is not None and _image_token_id is not None:
-                _per_view_count = int((_input_ids[0] == _image_token_id).sum())
-                _n_views = max(1, len(images[0]) if images else 1)
-                logger.info(
-                    "[ppv-probe] vision <|image_pad|> tokens in row 0: %d total, "
-                    "%d per view (n_views=%d). Expected 400 to match UamVLA.py:181 ppv.",
-                    _per_view_count, _per_view_count // _n_views, _n_views,
-                )
-        except Exception as _e:  # pragma: no cover
-            logger.warning("[ppv-probe] failed: %s", _e)
-        # === END TEMP ppv-probe ===
-
         # Normalize to a plain dict so callers can mutate freely.
         kwargs = dict(proc_out)
         if canonical_state is not None:
