@@ -614,37 +614,56 @@ class UamVLA(baseframework):
             decoded[b] = chunk
         return decoded
 
-    def visualize_batch(self, batch: dict, n_samples: int = 1) -> dict:
-        """Iterate aux heads and call .visualize() on each, gathering wandb.Image entries."""
+    def visualize_batch(self, batch, n_samples: int = 1) -> dict:
+        """Iterate aux heads and call .visualize() on each, gathering wandb.Image entries.
+
+        The trainer hands us the same ``List[dict]`` it passes to ``forward()``;
+        we mirror the forward preprocessing path (build_inputs → label extend →
+        backbone forward → _collate_for_heads) so per-head ``visualize`` sees a
+        dict with the same keys it sees in ``compute_loss``.
+        """
+        if isinstance(batch, list):
+            examples = batch
+        elif isinstance(batch, dict) and "examples" in batch:
+            examples = batch["examples"]
+        else:
+            raise TypeError(
+                f"visualize_batch expects List[dict] (per-sample examples) or "
+                f"{{'examples': List[dict]}}, got {type(batch).__name__}."
+            )
+
+        qwen_inputs = self.qwen_vl_interface.build_inputs(
+            images=[e["image"] for e in examples],
+            instructions=[e["lang"] for e in examples],
+            canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
+        )
+        qwen_inputs, labels = self._build_labels_and_extend(examples, qwen_inputs)
+        qwen_inputs = _move_tensors_to_device(qwen_inputs, self._backbone_input_device())
+        labels = labels.to(qwen_inputs["input_ids"].device)
+
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            backbone_out = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hidden = backbone_out.hidden_states[-1]
+
+        batch_dict = self._collate_for_heads(examples, qwen_inputs, labels=labels)
+
         out = {}
-        # Recompute hidden states (the trainer doesn't always persist them)
-        hidden = self._backbone_forward_for_viz(batch)
         for name, head in self.aux_heads.items():
             if not hasattr(head, "visualize"):
                 continue
-            mask = batch.get(f"{name}_mask")
-            if mask is None or mask.any():
-                imgs = head.visualize(hidden, batch, mask, num_samples=n_samples)
-                for i, img in enumerate(imgs):
-                    out[f"viz/{name}/{i}"] = img
+            mask = batch_dict.get(f"{name}_mask")
+            if mask is None:
+                mask = torch.ones(hidden.shape[0], dtype=torch.bool, device=hidden.device)
+            if not mask.any():
+                continue
+            imgs = head.visualize(hidden, batch_dict, mask, num_samples=n_samples)
+            for i, img in enumerate(imgs):
+                out[f"viz/{name}/{i}"] = img
         return out
-
-    def _backbone_forward_for_viz(self, batch):
-        """Run backbone forward on a viz batch — returns hidden states only."""
-        if "examples" in batch:
-            from starVLA.model.modules.uamvla.collator_helpers import stack_canonical
-            examples = batch["examples"]
-            qwen_inputs = self.qwen_vl_interface.build_inputs(
-                images=[e["image"] for e in examples],
-                instructions=[e["lang"] for e in examples],
-                canonical_state=stack_canonical([e["canonical_state"] for e in examples]),
-            )
-        else:
-            # Assume batch is a pre-stacked dict already compatible with backbone forward
-            qwen_inputs = batch
-        with torch.no_grad():
-            backbone_out = self.qwen_vl_interface(**qwen_inputs, output_hidden_states=True, return_dict=True)
-        return backbone_out.hidden_states[-1]
 
     def get_lr_groups(self, lr_cfg) -> list:
         groups = []
