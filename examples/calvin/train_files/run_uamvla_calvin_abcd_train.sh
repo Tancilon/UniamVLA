@@ -55,7 +55,12 @@ accelerate launch \
   --run_id ${run_id} \
   --wandb_project uamvla_calvin \
   --wandb_entity tancilon1-fudan-university-school-of-management \
-  # --is_debug True
+  "$@"
+  # Extra CLI args ("$@") are forwarded to train_starvla.py so callers can
+  # override anything without editing the script. Common examples:
+  #   bash run_uamvla_calvin_abcd_train.sh --trainer.is_resume true
+  #   bash run_uamvla_calvin_abcd_train.sh --trainer.max_train_steps 150000
+  #   bash run_uamvla_calvin_abcd_train.sh --is_debug true
 
 
 
