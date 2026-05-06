@@ -141,3 +141,15 @@ def test_calvin_policy_client_passes_zero_gripper_threshold(monkeypatch):
     )
 
     assert captured["kwargs"]["gripper_binarize_threshold"] == 0.0
+
+
+def test_limit_eval_sequences_respects_requested_count(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+    sequences = [
+        ("state_0", ["task_a"]),
+        ("state_1", ["task_b"]),
+        ("state_2", ["task_c"]),
+    ]
+
+    assert eval_calvin._limit_eval_sequences(sequences, 2) == sequences[:2]
+    assert eval_calvin._limit_eval_sequences(sequences, 10) == sequences

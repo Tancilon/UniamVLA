@@ -23,7 +23,6 @@ your_ckpt=playground/Checkpoints/uamvla_calvin_abcd_phase1/checkpoints/steps_150
 dataset_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/datasets/task_ABC_D
 calvin_config_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/third_party/calvin/calvin_models/conf
 eval_sequences_path=examples/calvin/eval_files/eval_sequences.json
-num_sequences=1000
 # === End of environment variable configuration ===
 ###########################################################################################
 
@@ -44,7 +43,6 @@ ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     --args.dataset_path ${dataset_path} \
     --args.calvin_config_path ${calvin_config_path} \
     --args.eval_sequences_path ${eval_sequences_path} \
-    --args.num_sequences ${num_sequences} \
     --args.eval_log_dir "${eval_log_dir}" \
     "$@"
 # Extra CLI args ("$@") are forwarded to eval_calvin.py so callers can override

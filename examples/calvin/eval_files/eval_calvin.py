@@ -220,6 +220,13 @@ def load_lang_task(dataset_path: str) -> dict:
     return val_annotations, task_oracle
 
 
+def _limit_eval_sequences(eval_sequences: list, num_sequences: int) -> list:
+    """Keep the first num_sequences entries; values <=0 mean no limit."""
+    if num_sequences <= 0:
+        return eval_sequences
+    return eval_sequences[:num_sequences]
+
+
 def evaluate_policy_ddp(
     policy,
     env,
@@ -261,6 +268,7 @@ def evaluate_policy_ddp(
     eval_log_dir = get_log_dir(eval_log_dir)
     with open(eval_sequences_path, "r") as f:
         eval_sequences = json.load(f)
+    eval_sequences = _limit_eval_sequences(eval_sequences, num_sequences)
     # device_num = int(torch.distributed.get_world_size())
     # device_id = torch.distributed.get_rank()
     # assert num_sequences % device_num == 0
