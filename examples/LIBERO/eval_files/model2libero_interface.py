@@ -257,6 +257,9 @@ class ModelClient:
         return model_config["framework"]["action_model"]["future_action_window_size"] + 1
 
     def _resize_image(self, image: np.ndarray) -> np.ndarray:
+        target_w, target_h = tuple(self.image_size)
+        if image.shape[1] == target_w and image.shape[0] == target_h:
+            return image
         image = cv.resize(image, tuple(self.image_size), interpolation=cv.INTER_AREA)
         return image
 

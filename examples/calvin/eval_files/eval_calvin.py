@@ -65,10 +65,11 @@ class Args:
     #################################################################################################################
     host: str = "127.0.0.1"
     port: int = 8000
-    resize_size: int = 224
+    resize_size: int = 256
     replan_steps: int = 5
     pretrained_path: str = ""
     unnorm_key: str = ""
+    use_train_renderer: bool = True
 
     #################################################################################################################
     # Calvin environment-specific parameters
@@ -97,10 +98,11 @@ class CalvinPolicyClient:
         self,
         host: str,
         port: int,
-        resize_size: int = 224,
+        resize_size: int = 256,
         replan_steps: int = 5,
         pretrained_path: str = "",
         unnorm_key: str = "",
+        train_renderer=None,
     ):
         self.client = ModelClient(
             policy_ckpt_path=pretrained_path,
@@ -112,6 +114,7 @@ class CalvinPolicyClient:
         self.resize_size = resize_size
         self.replan_steps = replan_steps
         self.step_count = 0
+        self.train_renderer = train_renderer
 
     def reset(self):
         """Reset action plan buffer."""
@@ -131,15 +134,26 @@ class CalvinPolicyClient:
         Returns:
             action: (7,) array [dx, dy, dz, droll, dpitch, dyaw, gripper]
         """
-        # Preprocess images
-        rgb_static = obs["rgb_obs"]["rgb_static"]  # (200, 200, 3) uint8
-        rgb_gripper = obs["rgb_obs"]["rgb_gripper"]  # (84, 84, 3) uint8
+        # Prefer the training-time CALVIN renderer path for UamVLA checkpoints:
+        # render both views at 256x256, then let the backbone perform the only
+        # resize to Qwen3-VL's 640x640 target.
+        if self.train_renderer is not None:
+            rendered = self.train_renderer.render_cameras(
+                width=self.resize_size,
+                height=self.resize_size,
+            )
+            image = image_tools.convert_to_uint8(rendered["rgb_static"])
+            wrist_image = image_tools.convert_to_uint8(rendered["rgb_wrist"])
+        else:
+            rgb_static = obs["rgb_obs"]["rgb_static"]  # (200, 200, 3) uint8
+            rgb_gripper = obs["rgb_obs"]["rgb_gripper"]  # (84, 84, 3) uint8
 
-        # Resize and pad images
-        image = image_tools.convert_to_uint8(image_tools.resize_with_pad(rgb_static, self.resize_size, self.resize_size))
-        wrist_image = image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(rgb_gripper, self.resize_size, self.resize_size)
-        )
+            image = image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(rgb_static, self.resize_size, self.resize_size)
+            )
+            wrist_image = image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(rgb_gripper, self.resize_size, self.resize_size)
+            )
 
         # Prepare input for policy server (aligned with eval_libero)
         example = {
@@ -436,6 +450,13 @@ def rollout(
 def main(args: Args):
     # args = tyro.cli(Args)
 
+    env = make_env(args.dataset_path)
+    train_renderer = None
+    if args.use_train_renderer:
+        from tools.preprocess.calvin_env_adapter import CalvinEnvAdapter
+
+        train_renderer = CalvinEnvAdapter(env)
+
     policy = CalvinPolicyClient(
         args.host,
         args.port,
@@ -443,8 +464,8 @@ def main(args: Args):
         args.replan_steps,
         pretrained_path=args.pretrained_path,
         unnorm_key=args.unnorm_key,
+        train_renderer=train_renderer,
     )
-    env = make_env(args.dataset_path)
 
     evaluate_policy_ddp(
         policy,

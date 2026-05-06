@@ -36,6 +36,8 @@ mkdir -p "${eval_log_dir}"
 ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     --args.host "${host}" \
     --args.port ${base_port} \
+    --args.resize_size 256 \
+    --args.use_train_renderer True \
     --args.pretrained-path ${your_ckpt} \
     --args.unnorm-key ${unnorm_key} \
     --args.dataset_path ${dataset_path} \

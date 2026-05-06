@@ -202,3 +202,16 @@ def test_step_pops_raw_state_even_when_passthrough_disabled(make_client):
     sent_example = sent["examples"][0]
     assert "uamvla_raw_state" not in sent_example
     assert "canonical_state" not in sent_example
+
+
+def test_resize_image_is_noop_when_shape_already_matches():
+    """CALVIN train-renderer eval feeds 256x256 images; avoid an extra resize."""
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    client = ModelClient.__new__(ModelClient)
+    client.image_size = [256, 256]
+    image = np.full((256, 256, 3), 123, dtype=np.uint8)
+
+    out = client._resize_image(image)
+
+    assert out is image
