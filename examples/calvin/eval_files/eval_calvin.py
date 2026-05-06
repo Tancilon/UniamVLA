@@ -147,6 +147,17 @@ class CalvinPolicyClient:
             "lang": lang_annotation,
         }
 
+        # Spec parallel of LIBERO state-passthrough: hand the inner ModelClient
+        # the raw 15-D CALVIN robot_obs only when ModelClient successfully
+        # initialised the CalvinAdapter + StateNormalizer (gated by
+        # uamvla_state_enabled). CalvinAdapter.REQUIRED_FIELDS == ("robot_obs",)
+        # so this single key is sufficient; ModelClient.step() converts it to
+        # canonical_state and pops uamvla_raw_state before going on the wire.
+        if getattr(self.client, "uamvla_state_enabled", False):
+            example["uamvla_raw_state"] = {
+                "robot_obs": np.asarray(obs["robot_obs"], dtype=np.float32),
+            }
+
         # Query model
         model_output = self.client.step(example=example, step=self.step_count)
         raw_action = model_output["raw_action"]

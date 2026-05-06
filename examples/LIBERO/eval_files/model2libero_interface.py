@@ -106,13 +106,17 @@ class ModelClient:
                 and "state_stats" in stats_dict
                 and self.unnorm_key in stats_dict["state_stats"]
             ):
-                # Lazy import: the LIBERO state-passthrough path pulls in
+                # Lazy import: the state-passthrough path pulls in
                 # gr00t_lerobot.schema -> numpydantic, which is not available
-                # in the CALVIN eval conda env (Python 3.8). CALVIN clients
-                # never push uamvla_raw_state through step(), so failing this
-                # import is harmless there — degrade silently to disabled.
+                # in the CALVIN eval conda env (Python 3.8) — but CALVIN's
+                # state_normalizer path itself is the same module chain, so
+                # if the deps are missing the whole passthrough degrades to
+                # disabled and the model runs in stateless mode (still
+                # functional, with the documented training/eval state gap).
                 try:
-                    from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
+                    from starVLA.model.modules.uamvla.data.embodiment_registry import (
+                        get_embodiment_config,
+                    )
                     from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
                 except ImportError as e:
                     print(
@@ -120,20 +124,32 @@ class ModelClient:
                         f"(state_stats present but deps missing in this env: {e}) ***"
                     )
                 else:
-                    self._adapter = LiberoAdapter()
-                    # Pin apply_to to the training-side field list so future
-                    # state_stats schema additions cannot silently diverge between
-                    # train (uamvla_libero.yaml: state_encoder.normalization.apply_to)
-                    # and eval. Today this exactly matches the three canonical
-                    # franka_libero fields written by the preprocessor.
-                    self._state_normalizer = StateNormalizer(
-                        stats_dict=stats_dict,
-                        embodiment=self.unnorm_key,
-                        mode="q99",
-                        apply_to=["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
-                    )
-                    self.uamvla_state_enabled = True
-                    print(f"*** UamVLA state passthrough enabled (stats: {stats_yaml_path}) ***")
+                    try:
+                        adapter = get_embodiment_config(self.unnorm_key)["adapter"]
+                    except KeyError as e:
+                        print(
+                            f"*** UamVLA state passthrough disabled "
+                            f"(no adapter registered for unnorm_key={self.unnorm_key!r}: {e}) ***"
+                        )
+                    else:
+                        self._adapter = adapter
+                        # Pin apply_to to the training-side field list so future
+                        # state_stats schema additions cannot silently diverge between
+                        # train (uamvla_libero.yaml / uamvla_calvin{,_abcd}.yaml:
+                        # state_encoder.normalization.apply_to) and eval. Today
+                        # this matches the canonical fields written by both the
+                        # franka_libero and franka_calvin preprocessors.
+                        self._state_normalizer = StateNormalizer(
+                            stats_dict=stats_dict,
+                            embodiment=self.unnorm_key,
+                            mode="q99",
+                            apply_to=["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
+                        )
+                        self.uamvla_state_enabled = True
+                        print(
+                            f"*** UamVLA state passthrough enabled "
+                            f"(stats: {stats_yaml_path}, adapter: {type(self._adapter).__name__}) ***"
+                        )
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
