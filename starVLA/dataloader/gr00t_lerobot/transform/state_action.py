@@ -18,8 +18,21 @@ import random
 from typing import Any, ClassVar
 
 import numpy as np
-import pytorch3d.transforms as pt
 import torch
+
+try:
+    import pytorch3d.transforms as pt  # noqa: F401  (re-exported for potential downstream use)
+except ImportError:
+    # The runtime code in this module does not reference the pytorch3d alias
+    # at any call site today; the import is upstream-leftover scaffolding
+    # kept for downstream re-export. The CALVIN eval conda env does not
+    # install pytorch3d. Falling back to None keeps module import working
+    # so envs that only need Normalizer (e.g., the eval-side StateNormalizer
+    # path) can load this module; any future caller that adds an attribute
+    # access via the alias will surface a louder AttributeError at use time
+    # rather than failing every import in light envs.
+    pt = None  # type: ignore[assignment]
+
 from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from ..schema import DatasetMetadata, RotationType, StateActionMetadata

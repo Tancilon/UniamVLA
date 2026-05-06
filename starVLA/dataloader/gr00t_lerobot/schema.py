@@ -14,9 +14,22 @@
 # limitations under the License.
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from numpydantic import NDArray
+try:
+    from numpydantic import NDArray
+except ImportError:
+    # Lightweight environments (e.g., the CALVIN eval conda env on Python 3.8,
+    # where numpydantic 1.6.9's `python_requires>=3.9` excludes it) cannot
+    # install numpydantic. NDArray is only consumed as Pydantic field type
+    # annotations on DatasetStatistics below — degrading it to typing.Any
+    # preserves runtime behavior for code paths (e.g., gr00t_lerobot.transform's
+    # Normalizer, used by the eval-side StateNormalizer) that import schema
+    # but never validate DatasetStatistics. Validation is lost when the
+    # fallback fires; that's the documented trade-off for keeping the
+    # eval client deployable in minimal envs.
+    NDArray = Any  # type: ignore[assignment,misc]
+
 from pydantic import BaseModel, Field, field_serializer
 
 from .embodiment_tags import EmbodimentTag
