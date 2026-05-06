@@ -11,7 +11,17 @@ from typing import Optional
 
 import torch
 
-from starVLA.dataloader.gr00t_lerobot.transform.state_action import Normalizer
+try:
+    from starVLA.dataloader.gr00t_lerobot.transform.state_action import Normalizer
+except (ImportError, TypeError, SyntaxError):
+    # gr00t_lerobot is the canonical Normalizer source for training envs.
+    # Eval envs that lack training-side deps or run an older Python (the
+    # CALVIN benchmark conda env is Python 3.8, where gr00t_lerobot's PEP 585
+    # generic-builtin annotations like `tuple[float, float]` raise TypeError
+    # at class-definition time) fall back to the dependency-free copy below.
+    # _normalizer_lite mirrors gr00t Normalizer's math byte-for-byte; any
+    # change to the gr00t implementation must be replicated there.
+    from ._normalizer_lite import Normalizer
 
 
 _VALID_MODES = ("q99", "mean_std", "min_max", "none")
