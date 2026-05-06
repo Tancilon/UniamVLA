@@ -6,7 +6,7 @@
 #
 # === Please modify the following paths according to your environment ===
 export PYTHONPATH=$(pwd):${PYTHONPATH}
-export star_vla_python=/mnt/data/miniconda3/envs/starvla/bin/python
+export star_vla_python=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/miniconda3/envs/uamvla/bin/python
 
 your_ckpt=playground/Checkpoints/uamvla_calvin_abcd_phase1/checkpoints/steps_150000_pytorch_model.pt
 gpu_id=0

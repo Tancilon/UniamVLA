@@ -11,7 +11,7 @@
 #
 # === Please modify the following paths according to your environment ===
 export PYTHONPATH=$(pwd):${PYTHONPATH}
-export calvin_python=/path/to/your/conda/envs/calvin/bin/python
+export calvin_python=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/miniconda3/envs/calvin_env/bin/python
 
 host="127.0.0.1"
 base_port=5694
@@ -20,14 +20,18 @@ unnorm_key="franka_calvin"
 your_ckpt=playground/Checkpoints/uamvla_calvin_abcd_phase1/checkpoints/steps_150000_pytorch_model.pt
 
 # Original CALVIN dataset (must contain validation/). ABC->D evaluates on D env.
-dataset_path=/path/to/calvin/task_D_D
-calvin_config_path=/path/to/calvin/calvin_models/conf
+dataset_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/datasets/task_ABC_D
+calvin_config_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/third_party/calvin/calvin_models/conf
 eval_sequences_path=examples/calvin/eval_files/eval_sequences.json
 num_sequences=1000
 # === End of environment variable configuration ===
 ###########################################################################################
 
+# Anchor eval_log_dir to <project_root>/logs/... regardless of CWD.
+project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
+eval_log_dir="${project_root}/logs/calvin_eval/${folder_name}"
+mkdir -p "${eval_log_dir}"
 
 ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     --args.host "${host}" \
@@ -38,7 +42,7 @@ ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     --args.calvin_config_path ${calvin_config_path} \
     --args.eval_sequences_path ${eval_sequences_path} \
     --args.num_sequences ${num_sequences} \
-    --args.eval_log_dir tmp/calvin/eval_logs/${folder_name} \
+    --args.eval_log_dir "${eval_log_dir}" \
     "$@"
 # Extra CLI args ("$@") are forwarded to eval_calvin.py so callers can override
 # anything without editing the script. Common examples:
