@@ -143,6 +143,28 @@ def test_calvin_policy_client_passes_zero_gripper_threshold(monkeypatch):
     assert captured["kwargs"]["gripper_binarize_threshold"] == 0.0
 
 
+def test_calvin_policy_client_passes_replan_steps_as_query_interval(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+    captured = {}
+
+    class CapturingModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", CapturingModelClient)
+
+    eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        replan_steps=5,
+        pretrained_path="fake.pt",
+        unnorm_key="franka_calvin",
+    )
+
+    assert captured["kwargs"]["action_query_interval"] == 5
+
+
 def test_limit_eval_sequences_respects_requested_count(monkeypatch):
     eval_calvin = _load_eval_calvin(monkeypatch)
     sequences = [

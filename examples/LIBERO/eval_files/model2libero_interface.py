@@ -51,6 +51,7 @@ class ModelClient:
         num_ddim_steps: int = 10,
         adaptive_ensemble_alpha=0.1,
         gripper_binarize_threshold: float = 0.5,
+        action_query_interval: Optional[int] = None,
         host="0.0.0.0",
         port=10095,
     ) -> None:
@@ -92,6 +93,14 @@ class ModelClient:
         self.num_image_history = 0
 
         self.action_chunk_size = self.get_action_chunk_size(policy_ckpt_path=policy_ckpt_path)
+        self.action_query_interval = int(action_query_interval or self.action_chunk_size)
+        if self.action_query_interval <= 0:
+            raise ValueError("action_query_interval must be positive")
+        if self.action_query_interval > self.action_chunk_size:
+            raise ValueError(
+                "action_query_interval cannot exceed action_chunk_size "
+                f"({self.action_chunk_size})"
+            )
 
         # ----- UamVLA opt-in state-passthrough setup (fixes B2 + spec §6.3.1).
         # statistics.yaml lives at the run dir level (mirrors dataset_statistics.json).
@@ -203,8 +212,8 @@ class ModelClient:
             "num_ddim_steps": self.num_ddim_steps,
         }
 
-        action_chunk_size = self.action_chunk_size
-        if step % action_chunk_size == 0:
+        action_query_interval = self.action_query_interval
+        if step % action_query_interval == 0 or not hasattr(self, "raw_actions"):
             response = self.client.predict_action(vla_input)
             try:
                 normalized_actions = response["data"]["normalized_actions"]  # B, chunk, D
@@ -219,7 +228,7 @@ class ModelClient:
                 gripper_binarize_threshold=self.gripper_binarize_threshold,
             )
 
-        raw_actions = self.raw_actions[step % action_chunk_size][None]
+        raw_actions = self.raw_actions[step % action_query_interval][None]
 
         raw_action = {
             "world_vector": np.array(raw_actions[0, :3]),

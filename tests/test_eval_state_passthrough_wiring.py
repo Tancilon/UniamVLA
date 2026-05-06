@@ -97,7 +97,9 @@ class StubWebsocketClient:
     """Records the last predict_action payload; never opens a socket."""
     def __init__(self):
         self.last_payload = None
+        self.num_calls = 0
     def predict_action(self, query_info: dict) -> dict:
+        self.num_calls += 1
         self.last_payload = query_info
         # Return a syntactically valid response.
         return {
@@ -118,13 +120,14 @@ def make_client(fake_run_dir, patched_read_mode_config, monkeypatch):
         lambda *a, **kw: StubWebsocketClient(),
     )
 
-    def _make(unnorm_key=None, with_stats_yaml=True):
+    def _make(unnorm_key=None, with_stats_yaml=True, **kwargs):
         if not with_stats_yaml:
             (fake_run_dir / "statistics.yaml").unlink(missing_ok=True)
         client = model2libero_interface.ModelClient(
             policy_ckpt_path=fake_run_dir / "checkpoints" / "fake.pt",
             unnorm_key=unnorm_key,
             action_ensemble=False,
+            **kwargs,
         )
         return client
 
@@ -246,3 +249,21 @@ def test_unnormalize_actions_allows_gripper_threshold_override():
 
     assert default_out[:, 6].tolist() == [0.0, 0.0, 1.0]
     assert calvin_out[:, 6].tolist() == [1.0, 0.0, 1.0]
+
+
+def test_action_query_interval_replans_before_chunk_boundary(make_client):
+    """CALVIN eval uses replan_steps=5 while checkpoints emit chunk=8; the
+    client should requery on the requested interval and consume the fresh
+    chunk from index 0."""
+    client = make_client(unnorm_key=None, action_query_interval=5)
+    example = {
+        "image": [np.zeros((224, 224, 3), dtype=np.uint8) for _ in range(2)],
+        "lang": "move the slider left",
+    }
+
+    client.step(dict(example), step=0)
+    client.step(dict(example), step=4)
+    assert client.client.num_calls == 1
+
+    client.step(dict(example), step=5)
+    assert client.client.num_calls == 2

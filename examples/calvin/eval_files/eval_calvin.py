@@ -113,6 +113,7 @@ class CalvinPolicyClient:
             image_size=[resize_size, resize_size],
             unnorm_key=(unnorm_key or None),
             gripper_binarize_threshold=gripper_binarize_threshold,
+            action_query_interval=replan_steps,
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
