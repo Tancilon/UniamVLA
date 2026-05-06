@@ -106,22 +106,34 @@ class ModelClient:
                 and "state_stats" in stats_dict
                 and self.unnorm_key in stats_dict["state_stats"]
             ):
-                from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
-                from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
-                self._adapter = LiberoAdapter()
-                # Pin apply_to to the training-side field list so future
-                # state_stats schema additions cannot silently diverge between
-                # train (uamvla_libero.yaml: state_encoder.normalization.apply_to)
-                # and eval. Today this exactly matches the three canonical
-                # franka_libero fields written by the preprocessor.
-                self._state_normalizer = StateNormalizer(
-                    stats_dict=stats_dict,
-                    embodiment=self.unnorm_key,
-                    mode="q99",
-                    apply_to=["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
-                )
-                self.uamvla_state_enabled = True
-                print(f"*** UamVLA state passthrough enabled (stats: {stats_yaml_path}) ***")
+                # Lazy import: the LIBERO state-passthrough path pulls in
+                # gr00t_lerobot.schema -> numpydantic, which is not available
+                # in the CALVIN eval conda env (Python 3.8). CALVIN clients
+                # never push uamvla_raw_state through step(), so failing this
+                # import is harmless there — degrade silently to disabled.
+                try:
+                    from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
+                    from starVLA.model.modules.uamvla.data.state_normalizer import StateNormalizer
+                except ImportError as e:
+                    print(
+                        f"*** UamVLA state passthrough disabled "
+                        f"(state_stats present but deps missing in this env: {e}) ***"
+                    )
+                else:
+                    self._adapter = LiberoAdapter()
+                    # Pin apply_to to the training-side field list so future
+                    # state_stats schema additions cannot silently diverge between
+                    # train (uamvla_libero.yaml: state_encoder.normalization.apply_to)
+                    # and eval. Today this exactly matches the three canonical
+                    # franka_libero fields written by the preprocessor.
+                    self._state_normalizer = StateNormalizer(
+                        stats_dict=stats_dict,
+                        embodiment=self.unnorm_key,
+                        mode="q99",
+                        apply_to=["arm_0.ee_pose", "arm_0.joint_pos", "gripper_0"],
+                    )
+                    self.uamvla_state_enabled = True
+                    print(f"*** UamVLA state passthrough enabled (stats: {stats_yaml_path}) ***")
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
         self.image_history.append(image)
