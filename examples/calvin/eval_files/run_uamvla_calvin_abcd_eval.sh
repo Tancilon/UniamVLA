@@ -37,7 +37,7 @@ ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     --args.host "${host}" \
     --args.port ${base_port} \
     --args.resize_size 256 \
-    --args.use_train_renderer True \
+    --args.use_train_renderer \
     --args.pretrained-path ${your_ckpt} \
     --args.unnorm-key ${unnorm_key} \
     --args.dataset_path ${dataset_path} \
@@ -48,5 +48,5 @@ ${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
     "$@"
 # Extra CLI args ("$@") are forwarded to eval_calvin.py so callers can override
 # anything without editing the script. Common examples:
-#   bash run_uamvla_calvin_abcd_eval.sh --args.num_sequences 10 --args.debug True
+#   bash run_uamvla_calvin_abcd_eval.sh --args.num_sequences 10 --args.debug
 #   bash run_uamvla_calvin_abcd_eval.sh --args.port 5710
