@@ -118,3 +118,26 @@ def test_calvin_policy_client_uses_train_renderer_images(monkeypatch):
     assert np.array_equal(sent_images[0], renderer.static)
     assert np.array_equal(sent_images[1], renderer.wrist)
     assert action.shape == (7,)
+
+
+def test_calvin_policy_client_passes_zero_gripper_threshold(monkeypatch):
+    """CALVIN rel_actions use a signed gripper convention; the generic client
+    must not apply its legacy 0.5 binary threshold here."""
+    eval_calvin = _load_eval_calvin(monkeypatch)
+    captured = {}
+
+    class CapturingModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", CapturingModelClient)
+
+    eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        pretrained_path="fake.pt",
+        unnorm_key="franka_calvin",
+    )
+
+    assert captured["kwargs"]["gripper_binarize_threshold"] == 0.0

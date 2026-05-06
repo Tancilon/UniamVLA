@@ -50,6 +50,7 @@ class ModelClient:
         use_ddim: bool = True,
         num_ddim_steps: int = 10,
         adaptive_ensemble_alpha=0.1,
+        gripper_binarize_threshold: float = 0.5,
         host="0.0.0.0",
         port=10095,
     ) -> None:
@@ -76,6 +77,7 @@ class ModelClient:
         self.action_ensemble = action_ensemble
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
         self.action_ensemble_horizon = action_ensemble_horizon
+        self.gripper_binarize_threshold = float(gripper_binarize_threshold)
         self.sticky_action_is_on = False
         self.gripper_action_repeat = 0
         self.sticky_gripper_action = 0.0
@@ -212,7 +214,9 @@ class ModelClient:
 
             normalized_actions = normalized_actions[0]
             self.raw_actions = self.unnormalize_actions(
-                normalized_actions=normalized_actions, action_norm_stats=self.action_norm_stats
+                normalized_actions=normalized_actions,
+                action_norm_stats=self.action_norm_stats,
+                gripper_binarize_threshold=self.gripper_binarize_threshold,
             )
 
         raw_actions = self.raw_actions[step % action_chunk_size][None]
@@ -226,11 +230,15 @@ class ModelClient:
         return {"raw_action": raw_action}
 
     @staticmethod
-    def unnormalize_actions(normalized_actions: np.ndarray, action_norm_stats: Dict[str, np.ndarray]) -> np.ndarray:
+    def unnormalize_actions(
+        normalized_actions: np.ndarray,
+        action_norm_stats: Dict[str, np.ndarray],
+        gripper_binarize_threshold: float = 0.5,
+    ) -> np.ndarray:
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
-        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < 0.5, 0, 1)
+        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < gripper_binarize_threshold, 0, 1)
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,

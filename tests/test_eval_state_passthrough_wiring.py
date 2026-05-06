@@ -215,3 +215,34 @@ def test_resize_image_is_noop_when_shape_already_matches():
     out = client._resize_image(image)
 
     assert out is image
+
+
+def test_unnormalize_actions_allows_gripper_threshold_override():
+    """CALVIN trains gripper in the same signed normalized space as rel_actions,
+    so its eval path needs a zero threshold; keep the legacy 0.5 default for
+    other clients."""
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    stats = {
+        "min": [-1.0] * 7,
+        "max": [1.0] * 7,
+        "mask": [True] * 6 + [False],
+    }
+    normalized = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.25],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.75],
+        ],
+        dtype=np.float32,
+    )
+
+    default_out = ModelClient.unnormalize_actions(normalized.copy(), stats)
+    calvin_out = ModelClient.unnormalize_actions(
+        normalized.copy(),
+        stats,
+        gripper_binarize_threshold=0.0,
+    )
+
+    assert default_out[:, 6].tolist() == [0.0, 0.0, 1.0]
+    assert calvin_out[:, 6].tolist() == [1.0, 0.0, 1.0]

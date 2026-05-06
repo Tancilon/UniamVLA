@@ -70,6 +70,7 @@ class Args:
     pretrained_path: str = ""
     unnorm_key: str = ""
     use_train_renderer: bool = True
+    gripper_binarize_threshold: float = 0.0
 
     #################################################################################################################
     # Calvin environment-specific parameters
@@ -103,6 +104,7 @@ class CalvinPolicyClient:
         pretrained_path: str = "",
         unnorm_key: str = "",
         train_renderer=None,
+        gripper_binarize_threshold: float = 0.0,
     ):
         self.client = ModelClient(
             policy_ckpt_path=pretrained_path,
@@ -110,6 +112,7 @@ class CalvinPolicyClient:
             port=port,
             image_size=[resize_size, resize_size],
             unnorm_key=(unnorm_key or None),
+            gripper_binarize_threshold=gripper_binarize_threshold,
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
@@ -465,6 +468,7 @@ def main(args: Args):
         pretrained_path=args.pretrained_path,
         unnorm_key=args.unnorm_key,
         train_renderer=train_renderer,
+        gripper_binarize_threshold=args.gripper_binarize_threshold,
     )
 
     evaluate_policy_ddp(
