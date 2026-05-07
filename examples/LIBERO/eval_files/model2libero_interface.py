@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import deque
+import os
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -35,6 +36,25 @@ def _to_numpy_leaves(d: dict) -> dict:
         else:
             out[k] = v.detach().cpu().numpy() if hasattr(v, "detach") else v
     return out
+
+
+def _debug_uamvla_actions_enabled() -> bool:
+    return os.getenv("UAMVLA_DEBUG_ACTIONS", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_print_action_array(name: str, arr: np.ndarray) -> None:
+    arr_np = np.asarray(arr, dtype=np.float32)
+    flat = arr_np.reshape(-1, arr_np.shape[-1])
+    per_dim_min = np.round(flat.min(axis=0), 5).tolist()
+    per_dim_max = np.round(flat.max(axis=0), 5).tolist()
+    per_dim_mean = np.round(flat.mean(axis=0), 5).tolist()
+    first = np.round(arr_np.reshape(-1, arr_np.shape[-1])[0], 5).tolist()
+    print(
+        f"*** UamVLA action debug(client): {name} "
+        f"shape={arr_np.shape}, first={first}, "
+        f"min={per_dim_min}, max={per_dim_max}, mean={per_dim_mean} ***",
+        flush=True,
+    )
 
 
 class ModelClient:
@@ -227,6 +247,9 @@ class ModelClient:
                 action_norm_stats=self.action_norm_stats,
                 gripper_binarize_threshold=self.gripper_binarize_threshold,
             )
+            if _debug_uamvla_actions_enabled():
+                _debug_print_action_array("normalized_actions(client)", normalized_actions)
+                _debug_print_action_array("raw_actions(client)", self.raw_actions)
 
         raw_actions = self.raw_actions[step % action_query_interval][None]
 

@@ -26,6 +26,20 @@ def main(args) -> None:
     if args.use_bf16:  # False
         vla = vla.to(torch.bfloat16)
     vla = vla.to("cuda").eval()
+    framework_cfg = getattr(getattr(vla, "config", None), "framework", None)
+    framework_name = getattr(framework_cfg, "name", None)
+    embodiment_cfg = getattr(framework_cfg, "embodiment", None)
+    action_dim = embodiment_cfg.get("action_dim", None) if hasattr(embodiment_cfg, "get") else None
+    logging.info(
+        "Loaded policy class=%s framework=%s action_horizon=%s action_dim=%s "
+        "action_start_id=%s act0_id=%s",
+        type(vla).__name__,
+        framework_name,
+        getattr(vla, "action_horizon", None),
+        action_dim,
+        getattr(vla, "action_start_id", None),
+        getattr(vla, "_act0_id", None),
+    )
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

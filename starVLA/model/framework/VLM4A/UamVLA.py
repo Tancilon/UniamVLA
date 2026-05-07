@@ -5,6 +5,7 @@
 See: docs/superpowers/specs/2026-04-29-starvla-migration-design.md
 """
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -44,6 +45,25 @@ def _move_tensors_to_device(value, device: torch.device):
     if isinstance(value, tuple):
         return tuple(_move_tensors_to_device(v, device) for v in value)
     return value
+
+
+def _debug_uamvla_actions_enabled() -> bool:
+    return os.getenv("UAMVLA_DEBUG_ACTIONS", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _debug_print_action_array(name: str, arr: np.ndarray) -> None:
+    arr_np = np.asarray(arr, dtype=np.float32)
+    flat = arr_np.reshape(-1, arr_np.shape[-1])
+    per_dim_min = np.round(flat.min(axis=0), 4).tolist()
+    per_dim_max = np.round(flat.max(axis=0), 4).tolist()
+    per_dim_mean = np.round(flat.mean(axis=0), 4).tolist()
+    first = np.round(arr_np.reshape(-1, arr_np.shape[-1])[0], 4).tolist()
+    print(
+        f"*** UamVLA action debug(server): {name} "
+        f"shape={arr_np.shape}, first={first}, "
+        f"min={per_dim_min}, max={per_dim_max}, mean={per_dim_mean} ***",
+        flush=True,
+    )
 
 
 @dataclass
@@ -534,12 +554,21 @@ class UamVLA(baseframework):
                 use_cache=True,
             )
 
+        if _debug_uamvla_actions_enabled():
+            self._debug_generated_action_tokens(
+                generated_ids=generated_ids,
+                prompt_len=gen_kwargs["inputs_embeds"].shape[1],
+                chunk_len=chunk_len,
+            )
+
         normalized_actions = self._decode_generated_actions(
             generated_ids,
             prompt_len=gen_kwargs["inputs_embeds"].shape[1],
             H=H,
             action_dim=action_dim,
         )
+        if _debug_uamvla_actions_enabled():
+            _debug_print_action_array("normalized_actions", normalized_actions)
         return {"normalized_actions": normalized_actions}
 
     def _build_prefill_generate_kwargs(self, qwen_inputs: dict) -> dict:
@@ -658,6 +687,32 @@ class UamVLA(baseframework):
             chunk = self.action_tokenizer.decode(action_ids).reshape(H, action_dim)
             decoded[b] = chunk
         return decoded
+
+    def _debug_generated_action_tokens(
+        self,
+        generated_ids: torch.Tensor,
+        prompt_len: int,
+        chunk_len: int,
+    ) -> None:
+        n_bins = int(self.config.framework.action_model.get("num_bins", 256))
+        act_min = self._act0_id
+        act_max = self._act0_id + n_bins
+        new_ids = self._extract_generated_tail(generated_ids, prompt_len, chunk_len)
+        mask = (new_ids >= act_min) & (new_ids < act_max)
+        counts = mask.sum(dim=1).detach().cpu().tolist()
+        first_offsets = []
+        for b in range(min(int(new_ids.shape[0]), 2)):
+            row = new_ids[b][mask[b]][:16].detach().cpu()
+            first_offsets.append((row - act_min).tolist())
+        print(
+            "*** UamVLA action debug(server): "
+            f"class={type(self).__name__}, generated_shape={tuple(generated_ids.shape)}, "
+            f"prompt_len={prompt_len}, tail_shape={tuple(new_ids.shape)}, "
+            f"expected_act_tokens={chunk_len}, act_counts={counts}, "
+            f"action_start_id={self.action_start_id}, act0_id={self._act0_id}, "
+            f"first_act_offsets={first_offsets} ***",
+            flush=True,
+        )
 
     def visualize_batch(self, batch, n_samples: int = 1) -> dict:
         """Iterate aux heads and call .visualize() on each, gathering wandb.Image entries.
