@@ -517,6 +517,7 @@ class UamVLA(baseframework):
                     action_begin_id=self._act0_id,
                     n_bins=n_bins,
                     action_chunk_len=chunk_len,
+                    force_active=True,
                 )
             ])
 

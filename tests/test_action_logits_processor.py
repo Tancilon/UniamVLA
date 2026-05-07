@@ -47,6 +47,31 @@ def test_processor_activates_immediately_after_action_start():
     assert (out[0, mask] < 0).all()  # specifically -inf, not +inf
 
 
+def test_processor_can_force_active_on_first_generation_step():
+    """When prompt prefill already ended at action_start, callers can force the
+    first generated token into the action-token range without relying on HF's
+    internal input_ids shape."""
+    from starVLA.model.modules.uamvla.inference.action_logits_processor import (
+        ActionLogitsProcessor,
+    )
+
+    p = ActionLogitsProcessor(
+        action_start_id=42,
+        action_begin_id=100,
+        n_bins=4,
+        action_chunk_len=3,
+        force_active=True,
+    )
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    scores = _scores(B=1)
+    out = p(input_ids, scores.clone())
+
+    assert torch.equal(out[0, 100:104], scores[0, 100:104])
+    mask = torch.ones(scores.shape[1], dtype=torch.bool)
+    mask[100:104] = False
+    assert torch.isinf(out[0, mask]).all()
+
+
 def test_processor_masks_for_exactly_action_chunk_len_steps():
     """Mask is active for action_chunk_len total steps, then automatically deactivates."""
     p = _make_processor(action_begin_id=100, n_bins=4, action_chunk_len=3)

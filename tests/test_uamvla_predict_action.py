@@ -264,6 +264,8 @@ def test_predict_action_enables_action_logits_processor_by_default(monkeypatch):
     lp = kwargs.get("logits_processor")
     assert isinstance(lp, LogitsProcessorList)
     assert any(isinstance(p, ActionLogitsProcessor) for p in lp)
+    proc = next(p for p in lp if isinstance(p, ActionLogitsProcessor))
+    assert proc.force_active is True
 
 
 def test_predict_action_can_disable_action_logits_processor(monkeypatch):

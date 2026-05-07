@@ -34,15 +34,18 @@ class ActionLogitsProcessor(LogitsProcessor):
         action_begin_id: int,
         n_bins: int,
         action_chunk_len: int,
+        force_active: bool = False,
     ):
         self.action_start_id = int(action_start_id)
         self.action_begin_id = int(action_begin_id)
         self.action_end_id = int(action_begin_id) + int(n_bins)  # exclusive
         self.action_chunk_len = int(action_chunk_len)
+        self.force_active = bool(force_active)
         # Lazily allocated on first __call__ once we know batch size + device.
         self._remaining: torch.Tensor | None = None
         self._last_seq_len: int = -1
         self._bounds_checked: bool = False
+        self._force_started: bool = False
 
     def __call__(
         self,
@@ -82,7 +85,12 @@ class ActionLogitsProcessor(LogitsProcessor):
         cur_seq_len = int(input_ids.shape[1])
         if cur_seq_len < self._last_seq_len:
             self._remaining.zero_()
+            self._force_started = False
         self._last_seq_len = cur_seq_len
+
+        if self.force_active and not self._force_started:
+            self._remaining = torch.full_like(self._remaining, self.action_chunk_len)
+            self._force_started = True
 
         # Detect entry: did the last-generated token equal action_start_id?
         last_tokens = input_ids[:, -1]
