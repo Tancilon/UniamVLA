@@ -22,12 +22,35 @@ The two pipelines do not share preprocessing — pick one and stay in lane.
 
 1. **Preprocess** a CALVIN split into UAM format (requires the `calvin_env` conda environment):
 
+   **Single-scene splits (`task_D_D`, `calvin_debug_dataset`):**
+
    ```bash
    python runners/preprocess_calvin.py \
        --input_dir /path/to/calvin/task_D_D/training \
        --output_dir datasets/uamvla_calvin/task_D_D \
        --dataset_source task_D_D
    ```
+
+   **Multi-scene splits (`task_ABC_D`, `task_ABCD_D`):** the single-shot
+   preprocessor would render every frame against ONE scene's URDF,
+   placing scene-A frames' blocks inside scene-D fixtures (visible as
+   bodies clipping through the switch / drawer in `rgb_static`). Use
+   the multi-scene driver instead — it splits by scene, runs the
+   preprocessor once per scene with its own URDF, then merges:
+
+   ```bash
+   python runners/preprocess_calvin_multiscene.py \
+       --input_dir   /path/to/calvin/task_ABCD_D/training \
+       --work_dir    /tmp/abcd_split_work \
+       --output_dir  datasets/uamvla_calvin/task_ABCD_D/training \
+       --dataset_source task_ABCD_D \
+       --num_workers 8 \
+       --on_missing_target skip
+   ```
+
+   If `calvin_env`'s scene configs aren't auto-discoverable from the
+   installed package, pass them explicitly:
+   `--scene_config_dir /path/to/calvin_env/conf/scene`.
 
    The preprocessor regenerates `statistics.yaml` from the merged `data.jsonl` on every run, so re-running refreshes stats if `CalvinAdapter` ever changes.
 
