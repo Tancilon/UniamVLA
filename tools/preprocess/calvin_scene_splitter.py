@@ -173,13 +173,28 @@ def filter_lang_annotations(
     A window is kept iff its [ep_start, ep_end] is fully contained in
     [frame_range[0], frame_range[1]] (matching SceneResolver.resolve_for_window
     in calvin_preprocessor.py).
+
+    Only the three fields the preprocessor actually reads — `language.ann`,
+    `language.task`, `info.indx` — are guaranteed in the output, plus
+    `language.emb` when its length matches `indx` (older CALVIN dumps
+    sometimes ship a different-shape `emb` and this filter would corrupt
+    it). `info.episodes` is intentionally NOT propagated: its semantics
+    differ across CALVIN versions (in some dumps it is a per-window list
+    of (start, end), in others it is a global episode-boundary list),
+    nothing in this codebase actually consumes it, and assuming a
+    parallel-to-`indx` shape causes IndexError on real datasets.
     """
     src = np.load(src_lang_path, allow_pickle=True).item()
     anns = src["language"]["ann"]
     tasks = src["language"]["task"]
     embs = src["language"].get("emb")
     indx = src["info"]["indx"]
-    ep_start_end = src["info"].get("episodes")  # CALVIN v2: list[(s, e)] per window
+
+    if not (len(anns) == len(tasks) == len(indx)):
+        raise ValueError(
+            f"Malformed {src_lang_path}: ann/task/indx lengths "
+            f"{len(anns)}/{len(tasks)}/{len(indx)} must match."
+        )
 
     lo, hi = frame_range
     keep: list[int] = []
@@ -188,27 +203,28 @@ def filter_lang_annotations(
         if lo <= s <= hi and lo <= e <= hi:
             keep.append(i)
 
-    new_anns = [anns[i] for i in keep]
-    new_tasks = [tasks[i] for i in keep]
-    new_indx = [indx[i] for i in keep]
-
     out = {
         "language": {
-            "ann": new_anns,
-            "task": new_tasks,
+            "ann":  [anns[i] for i in keep],
+            "task": [tasks[i] for i in keep],
         },
         "info": {
-            "indx": new_indx,
+            "indx": [indx[i] for i in keep],
         },
     }
     if embs is not None:
-        # `emb` is typically a (N, D) ndarray; index along axis 0.
-        try:
-            out["language"]["emb"] = np.asarray(embs)[keep]
-        except Exception:
-            out["language"]["emb"] = [embs[i] for i in keep]
-    if ep_start_end is not None:
-        out["info"]["episodes"] = [ep_start_end[i] for i in keep]
+        # `emb` is per-window (N, D) in well-formed dumps; index along
+        # axis 0. If the lengths don't match, drop it loudly rather than
+        # silently corrupting the alignment.
+        emb_arr = np.asarray(embs)
+        if emb_arr.shape[0] == len(indx):
+            out["language"]["emb"] = emb_arr[keep]
+        else:
+            logger.warning(
+                "%s: language.emb length %d does not match info.indx "
+                "length %d — dropping `emb` from the filtered split.",
+                src_lang_path, emb_arr.shape[0], len(indx),
+            )
     return out
 
 

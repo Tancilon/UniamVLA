@@ -147,6 +147,62 @@ def test_splitter_only_links_episodes_in_range(tmp_path):
     assert b_eps == ["episode_0000110.npz"]
 
 
+def test_filter_lang_annotations_drops_episodes_field(tmp_path):
+    """Real CALVIN dumps include `info.episodes` whose length is NOT
+    parallel to `info.indx` (semantics differ by version). Earlier
+    splitter naively indexed it with window indices and crashed.
+
+    The filter must run cleanly regardless of the `episodes` shape and
+    must NOT propagate it (no downstream reader needs it).
+    """
+    from tools.preprocess.calvin_scene_splitter import filter_lang_annotations
+
+    src = tmp_path / "auto_lang_ann.npy"
+    payload = {
+        "language": {
+            "ann":  ["a", "b", "c", "d"],
+            "task": ["t0", "t1", "t2", "t3"],
+            "emb":  np.zeros((4, 2), dtype=np.float32),
+        },
+        "info": {
+            "indx": [(0, 10), (20, 30), (200, 210), (220, 230)],
+            # Per-EPISODE list (length 2), NOT per-window (length 4).
+            "episodes": [(0, 50), (200, 250)],
+        },
+    }
+    np.save(src, np.array(payload, dtype=object), allow_pickle=True)
+
+    out = filter_lang_annotations(src, frame_range=(0, 100))
+    assert out["language"]["ann"] == ["a", "b"]
+    assert out["language"]["task"] == ["t0", "t1"]
+    assert "episodes" not in out["info"]
+    assert out["language"]["emb"].shape == (2, 2)
+
+
+def test_filter_lang_annotations_drops_mismatched_emb(tmp_path):
+    """If `language.emb` length doesn't match `info.indx`, the filter
+    should drop it with a warning rather than corrupt the alignment.
+    """
+    from tools.preprocess.calvin_scene_splitter import filter_lang_annotations
+
+    src = tmp_path / "auto_lang_ann.npy"
+    payload = {
+        "language": {
+            "ann":  ["a", "b"],
+            "task": ["t0", "t1"],
+            "emb":  np.zeros((5, 2), dtype=np.float32),  # wrong length on purpose
+        },
+        "info": {
+            "indx": [(0, 10), (20, 30)],
+        },
+    }
+    np.save(src, np.array(payload, dtype=object), allow_pickle=True)
+
+    out = filter_lang_annotations(src, frame_range=(0, 100))
+    assert out["language"]["ann"] == ["a", "b"]
+    assert "emb" not in out["language"]
+
+
 def test_splitter_accepts_calvin_scene_prefix_keys(tmp_path):
     """Real CALVIN dumps (e.g. task_ABCD_D shipped to users) use
     `calvin_scene_A/B/C/D` as the scene_info.npy key prefix, not the
