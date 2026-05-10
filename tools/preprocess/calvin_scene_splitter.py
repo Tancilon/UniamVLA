@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -53,6 +54,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 VALID_SCENES = ("A", "B", "C", "D")
+
+# Both legacy CALVIN dumps (`scene_A`) and newer dumps (`calvin_scene_A`) are
+# in the wild. The preprocessor's older SceneResolver did a naive
+# `.replace("scene_", "")` which left `calvin_A` for the latter — that
+# happens to be harmless there because the resolved letter string is only
+# used for an info log. The splitter actually USES the letter, so parse
+# strictly here.
+_SCENE_KEY_RE = re.compile(r"^(?:calvin_)?scene_([A-D])$", re.IGNORECASE)
 
 
 # ---------- scene-config discovery -----------------------------------------
@@ -137,9 +146,13 @@ def load_scene_ranges(split_dir: Path) -> dict[str, tuple[int, int]]:
     info = np.load(info_path, allow_pickle=True).item()
     ranges: dict[str, tuple[int, int]] = {}
     for key, rng in info.items():
-        letter = key.replace("scene_", "").upper()
-        if letter not in VALID_SCENES:
-            raise ValueError(f"Unexpected scene key in {info_path}: {key!r}")
+        m = _SCENE_KEY_RE.match(str(key))
+        if not m:
+            raise ValueError(
+                f"Unexpected scene key in {info_path}: {key!r}. "
+                f"Expected one of: scene_A..D or calvin_scene_A..D."
+            )
+        letter = m.group(1).upper()
         start, end = int(rng[0]), int(rng[1])
         if end < start:
             raise ValueError(

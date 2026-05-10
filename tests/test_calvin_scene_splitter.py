@@ -147,6 +147,25 @@ def test_splitter_only_links_episodes_in_range(tmp_path):
     assert b_eps == ["episode_0000110.npz"]
 
 
+def test_splitter_accepts_calvin_scene_prefix_keys(tmp_path):
+    """Real CALVIN dumps (e.g. task_ABCD_D shipped to users) use
+    `calvin_scene_A/B/C/D` as the scene_info.npy key prefix, not the
+    older `scene_A/B/C/D`. The splitter must accept both.
+    """
+    from tools.preprocess.calvin_scene_splitter import load_scene_ranges
+
+    src = tmp_path / "src"
+    src.mkdir()
+    info = {
+        "calvin_scene_A": np.array([0, 99], dtype=np.int64),
+        "calvin_scene_D": np.array([300, 399], dtype=np.int64),
+    }
+    np.save(src / "scene_info.npy", np.array(info, dtype=object), allow_pickle=True)
+
+    ranges = load_scene_ranges(src)
+    assert ranges == {"A": (0, 99), "D": (300, 399)}
+
+
 def test_splitter_skips_scenes_with_no_windows(tmp_path):
     from tools.preprocess.calvin_scene_splitter import split_calvin_by_scene
 
