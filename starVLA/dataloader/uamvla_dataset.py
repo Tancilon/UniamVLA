@@ -48,7 +48,7 @@ DATASET_NAMED_MIXTURES = {
         ("task_ABC_D", 1.0, "franka_calvin"),
     ],
     "calvin_abcd_d_uamvla": [
-        ("task_ABCD_D/training", 1.0, "franka_calvin"),
+        ("task_ABCD_D", 1.0, "franka_calvin"),
     ],
 }
 
