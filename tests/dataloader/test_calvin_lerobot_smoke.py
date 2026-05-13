@@ -148,11 +148,27 @@ def test_meta_files_well_formed():
 
     # modality.json — same schema we registered in
     # examples/calvin/train_files/data_registry/modality.json.
+    # NOTE: state/action subkeys store per-column slices (start=0..end=dim)
+    # with original_key pointing at the per-column parquet name, so the
+    # LeRobot reader can locate the dataset statistics. Video subkeys point
+    # at the dotted info.json features key.
     mj = json.loads((meta / "modality.json").read_text())
     assert "state" in mj and "action" in mj and "video" in mj
-    assert mj["state"]["robot_obs"] == {"start": 0, "end": 15}
-    assert mj["state"]["static_cam_trans"] == {"start": 30, "end": 33}
-    assert mj["action"]["gripper"] == {"start": 6, "end": 7}
+    assert mj["state"]["robot_obs"] == {
+        "start": 0, "end": 15, "original_key": "state.robot_obs",
+    }
+    assert mj["state"]["static_cam_trans"] == {
+        "start": 0, "end": 3, "original_key": "state.static_cam_trans",
+    }
+    assert mj["action"]["gripper"] == {
+        "start": 0, "end": 1, "original_key": "action.gripper",
+    }
+    assert mj["video"]["primary_image"] == {
+        "original_key": "video.primary_image",
+    }
+    assert mj["video"]["wrist_image"] == {
+        "original_key": "video.wrist_image",
+    }
 
     # tasks.jsonl — one record per task seen.
     tasks_lines = [

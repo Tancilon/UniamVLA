@@ -476,14 +476,17 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     [float(v) for v in static_cam_rot6d],
                 "state.static_cam_trans":
                     [float(v) for v in static_cam_trans],
-                # action.* (split by component per modality.json)
-                "action.x": float(action[0]),
-                "action.y": float(action[1]),
-                "action.z": float(action[2]),
-                "action.roll": float(action[3]),
-                "action.pitch": float(action[4]),
-                "action.yaw": float(action[5]),
-                "action.gripper": float(action[6]),
+                # action.* (split by component per modality.json).
+                # Stored as 1-element lists so the LeRobot reader (which calls
+                # np.stack on the per-step values) gets the expected 2D (T, D)
+                # shape rather than a 1D (T,) scalar array.
+                "action.x": [float(action[0])],
+                "action.y": [float(action[1])],
+                "action.z": [float(action[2])],
+                "action.roll": [float(action[3])],
+                "action.pitch": [float(action[4])],
+                "action.yaw": [float(action[5])],
+                "action.gripper": [float(action[6])],
                 # Language column (free-form string; tasks.jsonl indexes it)
                 "annotation.human.action.task_description":
                     window.instruction,
@@ -620,14 +623,21 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             "total_tasks": len(tasks_seen),
             "fps": fps,
             "splits": {"train": f"0:{n_episodes}"},
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            "chunks_size": 1000,
             "features": {
                 "video.primary_image": {
                     "dtype": "video",
                     "shape": [RENDER_H, RENDER_W, 3],
+                    "names": ["height", "width", "channel"],
+                    "info": {"video.fps": fps, "video.channels": 3},
                 },
                 "video.wrist_image": {
                     "dtype": "video",
                     "shape": [RENDER_H, RENDER_W, 3],
+                    "names": ["height", "width", "channel"],
+                    "info": {"video.fps": fps, "video.channels": 3},
                 },
             },
         }
