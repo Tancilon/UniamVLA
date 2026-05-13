@@ -89,7 +89,14 @@ class UamVLAOFT(Qwenvl_OFT):
         self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
 
         # Per-trajectory image_target cache (single PNG per traj on disk).
-        self._image_target_cache: dict[int, torch.Tensor] = {}
+        # OrderedDict + LRU eviction so worker RAM stays bounded on full-scale
+        # datasets (1000+ trajectories × ~480 KB/entry ≈ multi-GB without a cap).
+        # 256 entries ≈ 120 MB per worker — comfortable headroom even for 16 workers.
+        from collections import OrderedDict
+        self._image_target_cache: "OrderedDict[int, torch.Tensor]" = OrderedDict()
+        self._image_target_cache_maxsize = int(
+            self.config.datasets.vla_data.get("image_target_cache_maxsize", 256)
+        )
 
         # Aux state slice indices — mirrors DataConfig.aux_state_slice so
         # the framework is decoupled from DataConfig's import path.
@@ -168,6 +175,22 @@ class UamVLAOFT(Qwenvl_OFT):
                 hidden_size=hidden_size, vae=self.vae,
                 **{**vision_extra, **future_cfg},
             )
+
+            # Sanity check decord availability ONCE here, not per-sample.
+            # _load_image_future falls back to None when decord is missing,
+            # which silently degrades FutureHead to its dummy_loss path on
+            # every step — invisible in training logs. Logging once at init
+            # lets ops spot the misconfig before launching a multi-hour run.
+            try:
+                import decord  # noqa: F401
+            except ImportError:
+                logger.warning(
+                    "[FutureHead] decord is not installed in this environment. "
+                    "_load_image_future will return None for every sample, "
+                    "causing FutureHead to always run its dummy_loss path. "
+                    "Install via `pip install decord==0.6.0` (matches requirements.txt) "
+                    "to get a non-dummy future_loss."
+                )
 
         if cfg_heads.get("recon", {}).get("enabled", False):
             from starVLA.model.modules.uamvla.aux_heads.recon_head import ReconHead
@@ -311,7 +334,12 @@ class UamVLAOFT(Qwenvl_OFT):
                 self._image_target_cache[traj] = (
                     torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
                 )
+                # LRU eviction: drop least-recently-used entries past maxsize.
+                while len(self._image_target_cache) > self._image_target_cache_maxsize:
+                    self._image_target_cache.popitem(last=False)
         if traj in self._image_target_cache:
+            # Mark as recently used so subsequent evictions skip it.
+            self._image_target_cache.move_to_end(traj)
             out["image_target"] = self._image_target_cache[traj]
 
         # image_future: load t=base+H-1 from raw mp4 via decord random seek.
