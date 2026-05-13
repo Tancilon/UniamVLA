@@ -1,0 +1,84 @@
+run_id: uamvla_oft_calvin_abcd_baseline
+run_root_dir: playground/Checkpoints
+seed: 42
+trackers: [jsonl, wandb]
+wandb_project: uamvla
+wandb_entity: tancilon
+is_debug: false
+version_id: "0.1"
+
+# ───────────────────────────────────────────────────────
+# framework: model construction
+# ───────────────────────────────────────────────────────
+framework:
+  name: UamVLAOFT
+  qwenvl:
+    base_vlm: Qwen/Qwen3-VL-8B-Instruct
+    attn_implementation: flash_attention_2
+  action_model:
+    action_model_type: MLP
+    action_dim: 7
+    action_hidden_dim: 3584             # overridden at runtime to qwen hidden_size
+    future_action_window_size: 7        # action_horizon = future + 1 = 8
+    past_action_window_size: 0
+  obs_image_size: [640, 640]
+  # PR 4: all aux heads OFF — this is the baseline B run per spec §5.7.
+  # PR 5/6/7 will activate pose/future/recon.
+  aux_heads:
+    pose:   {enabled: false}
+    future: {enabled: false}
+    recon:  {enabled: false}
+
+# ───────────────────────────────────────────────────────
+# datasets: data loader plugin selection
+# ───────────────────────────────────────────────────────
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: playground/Datasets
+    data_mix: uamvla_calvin_abcd        # registered in examples/calvin/train_files/data_registry/data_config.py
+    action_type: delta_qpos
+    per_device_batch_size: 4
+    obs: ["video.primary_image", "video.wrist_image"]
+    aux_state_slice:
+      target_pose_rot6d: [15, 21]
+      target_pose_trans: [21, 24]
+      static_cam_rot6d:  [24, 30]
+      static_cam_trans:  [30, 33]
+
+# ───────────────────────────────────────────────────────
+# trainer: optimization / logging
+# ───────────────────────────────────────────────────────
+trainer:
+  epochs: 10
+  max_train_steps: 50000
+  num_warmup_steps: 1000
+  save_interval: 5000
+  learning_rate:
+    base:               1.0e-4         # fallback for unmatched groups
+    qwen_vl_interface:  5.0e-5         # backbone
+    state_encoder:      1.0e-4
+    action_model:       1.0e-4
+
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-6
+
+  freeze_modules: null
+  max_grad_norm: 1.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 1.0e-8
+
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true
