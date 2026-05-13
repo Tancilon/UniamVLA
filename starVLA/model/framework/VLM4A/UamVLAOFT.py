@@ -137,6 +137,38 @@ class UamVLAOFT(Qwenvl_OFT):
                 hidden_size=hidden_size, **pose_kwargs,
             )
 
+        if cfg_heads.get("future", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.future_head import FutureHead
+            from starVLA.model.modules.uamvla.components.pixel_decoder.vae import (
+                VAEPixelDecoder,
+            )
+
+            # VAE is shared between future and recon heads — construct once.
+            if not hasattr(self, "vae") or self.vae is None:
+                self.vae = VAEPixelDecoder(self.config.framework.vae.path)
+
+            vision_extra = {
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std":  [0.5, 0.5, 0.5],
+                "image_token_id": getattr(
+                    self.qwen_vl_interface, "image_token_id",
+                    self.qwen_vl_interface.processor.tokenizer.convert_tokens_to_ids(
+                        "<|image_pad|>"
+                    ),
+                ),
+                "patches_per_view": 400,
+                "n_patches": 400,
+                "target_resize": 320,
+            }
+            future_cfg = {
+                k: v for k, v in cfg_heads.future.items()
+                if k not in ("enabled", "lr")
+            }
+            self.aux_heads["future"] = FutureHead(
+                hidden_size=hidden_size, vae=self.vae,
+                **{**vision_extra, **future_cfg},
+            )
+
     # ──────────────────────────────────────────────────────────────────
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────
@@ -250,8 +282,46 @@ class UamVLAOFT(Qwenvl_OFT):
         if traj in self._image_target_cache:
             out["image_target"] = self._image_target_cache[traj]
 
-        # image_future deferred — PR 6 (FutureHead) will populate.
+        # image_future: load t=base+H-1 from raw mp4 via decord random seek.
+        # _pack_sample drops the time dim (keeps only frame 0), so we must
+        # fetch the future frame here instead of relying on the LeRobot loader.
+        future_tensor = self._load_image_future(traj, base)
+        if future_tensor is not None:
+            out["image_future"] = future_tensor
         return out
+
+    # ──────────────────────────────────────────────────────────────────
+    #  image_future loader (decord random seek)
+    # ──────────────────────────────────────────────────────────────────
+    def _load_image_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+        """Read t=base_index + H - 1 frame from primary video.
+
+        Returns CHW float in [-1, 1] (matching VAE input normalization spec
+        in :meth:`FutureHead._normalize_for_vae`). Clamps future_idx to the
+        last frame of the episode, mirroring LeRobot's natural end-of-episode
+        padding behavior.
+        """
+        future_idx = base_index + self.action_horizon - 1
+        video_path = (
+            self.sidecar_root / "videos" / "chunk-000" /
+            "video.primary_image" / f"episode_{trajectory_id:06d}.mp4"
+        )
+        if not video_path.exists():
+            return None
+        try:
+            import decord
+            decord.bridge.set_bridge("torch")
+            vr = decord.VideoReader(str(video_path))
+            future_idx = min(future_idx, len(vr) - 1)
+            frame = vr[future_idx]                       # (H, W, C) uint8 tensor
+            chw = frame.permute(2, 0, 1).float() / 255.0  # (C, H, W) in [0, 1]
+            return (chw - 0.5) / 0.5                      # → [-1, 1]
+        except Exception as e:
+            logger.warning(
+                f"Failed to load image_future for traj={trajectory_id} "
+                f"base={base_index}: {e}"
+            )
+            return None
 
     # ──────────────────────────────────────────────────────────────────
     #  Aux-head helper utilities (used by PR 5+)

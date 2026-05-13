@@ -22,9 +22,12 @@ framework:
     future_action_window_size: 7        # action_horizon = future + 1 = 8
     past_action_window_size: 0
   obs_image_size: [640, 640]
-  # PR 5: pose head ON (Phase 1 of aux head activation). PR 6/7 will turn on
-  # future/recon. ``lr`` is the per-head LR consumed by the optimizer
-  # grouping logic; non-LR keys are forwarded to ``PoseHead.__init__``.
+  # Shared frozen VAE for future + recon heads (diffusers AutoencoderKL).
+  vae:
+    path: ckpt/pretrained_vae
+  # PR 5: pose head ON. PR 6: future head ON. PR 7 will turn on recon.
+  # ``lr`` is the per-head LR consumed by the optimizer grouping logic;
+  # non-LR keys are forwarded to the head's ``__init__``.
   aux_heads:
     pose:
       enabled: true
@@ -35,7 +38,15 @@ framework:
       num_queries: 4
       semantic_dim: 512
       sampling_steps: 500
-    future: {enabled: false}
+    future:
+      enabled: true
+      loss_weight: 0.1
+      lr: 1.0e-4
+      view_idx: 0
+      target_resize: 320
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
     recon:  {enabled: false}
 
 # ───────────────────────────────────────────────────────
