@@ -19,7 +19,9 @@ from pathlib import Path
 # Add project root to path so tools/starVLA packages are importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.preprocess.calvin_preprocessor import CalvinPreprocessor
+from tools.preprocess.calvin_preprocessor_lerobot import (
+    CalvinPreprocessorLeRobot as CalvinPreprocessor,
+)
 
 
 def parse_args():
@@ -76,6 +78,13 @@ def parse_args():
         help="What to do if a frame's target object is not visible in the "
              "static-camera seg mask. Default: abort.",
     )
+    parser.add_argument(
+        "--max_episodes",
+        type=int,
+        default=None,
+        help="If set, process only the first N language windows. Used by "
+             "smoke tests (PR 2). Default: None (process all).",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +101,7 @@ def main():
         num_workers=args.num_workers,
         on_resolve_failure=args.on_resolve_failure,
         on_missing_target=args.on_missing_target,
+        max_episodes=args.max_episodes,
     )
 
     preprocessor.process(args.input_dir, args.output_dir)

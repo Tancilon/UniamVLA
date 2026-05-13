@@ -1,0 +1,190 @@
+"""Smoke test on the 3-episode CALVIN_ABCD smoke dataset (PR 2).
+
+Asserts the layout that :mod:`tools.preprocess.calvin_preprocessor_lerobot`
+produces matches spec §4.3 (LeRobot v2 parquet + sidecar):
+
+    <dataset>/
+    ├── data/chunk-000/episode_NNNNNN.parquet
+    ├── videos/chunk-000/video.{primary,wrist}_image/episode_NNNNNN.mp4
+    ├── image_targets/<traj>.png
+    ├── point_clouds/<traj>/<base>.npy
+    ├── camera_params.json
+    └── meta/{modality.json, episodes.jsonl, tasks.jsonl, info.json}
+
+Skipped automatically when the smoke dataset hasn't been produced — run
+``runners/preprocess_calvin.py --max_episodes 3 --output_dir
+playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE`` to populate it.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+CALVIN_PATH = Path(
+    "playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE",
+).resolve()
+
+
+pytestmark = pytest.mark.skipif(
+    not CALVIN_PATH.exists(),
+    reason=(
+        f"Smoke dataset not found at {CALVIN_PATH}. "
+        "Run `python runners/preprocess_calvin.py --max_episodes 3 "
+        f"--output_dir {CALVIN_PATH}` to produce it."
+    ),
+)
+
+
+def test_layout_top_level_dirs():
+    """All seven top-level paths from spec §4.3 must exist."""
+    expected = [
+        "data/chunk-000",
+        "videos/chunk-000/video.primary_image",
+        "videos/chunk-000/video.wrist_image",
+        "image_targets",
+        "point_clouds",
+        "camera_params.json",
+        "meta",
+    ]
+    missing = [
+        p for p in expected if not (CALVIN_PATH / p).exists()
+    ]
+    assert not missing, f"Missing entries: {missing}"
+
+
+def test_parquet_columns_and_state_dim():
+    """Every per-episode parquet must have the LeRobot v2 columns from
+    modality.json — split state (15+6+3+6+3 = 33) and 7-component action.
+    """
+    import pyarrow.parquet as pq
+
+    parquet_files = sorted(
+        (CALVIN_PATH / "data" / "chunk-000").glob("episode_*.parquet"),
+    )
+    assert parquet_files, "No per-episode parquet files emitted"
+    assert len(parquet_files) >= 1
+
+    expected_state_cols = {
+        "state.robot_obs", "state.target_pose_rot6d",
+        "state.target_pose_trans", "state.static_cam_rot6d",
+        "state.static_cam_trans",
+    }
+    expected_action_cols = {
+        "action.x", "action.y", "action.z",
+        "action.roll", "action.pitch", "action.yaw", "action.gripper",
+    }
+    expected_provenance = {
+        "episode_index", "frame_index", "timestamp", "index", "task_index",
+        "annotation.human.action.task_description",
+        "trajectory_id", "base_index",
+    }
+
+    for pqf in parquet_files:
+        tbl = pq.read_table(pqf)
+        cols = set(tbl.column_names)
+        assert expected_state_cols <= cols, (
+            f"{pqf.name} missing state cols: "
+            f"{expected_state_cols - cols}"
+        )
+        assert expected_action_cols <= cols, (
+            f"{pqf.name} missing action cols: "
+            f"{expected_action_cols - cols}"
+        )
+        assert expected_provenance <= cols, (
+            f"{pqf.name} missing provenance cols: "
+            f"{expected_provenance - cols}"
+        )
+
+        # First row state shapes — make sure modality.json slice ranges
+        # actually match the on-disk vectors.
+        row0 = tbl.slice(0, 1).to_pylist()[0]
+        assert len(row0["state.robot_obs"]) == 15
+        assert len(row0["state.target_pose_rot6d"]) == 6
+        assert len(row0["state.target_pose_trans"]) == 3
+        assert len(row0["state.static_cam_rot6d"]) == 6
+        assert len(row0["state.static_cam_trans"]) == 3
+
+
+def test_sidecars_and_camera_params_loadable():
+    """Image targets, point clouds, and camera_params.json must be
+    readable and have the shapes the framework expects.
+    """
+    # camera_params.json
+    cam_path = CALVIN_PATH / "camera_params.json"
+    cam = json.loads(cam_path.read_text())
+    for key in ("fx", "fy", "cx", "cy", "width", "height", "camera_name"):
+        assert key in cam, f"camera_params.json missing {key}"
+    assert cam["width"] == 256 and cam["height"] == 256
+
+    # image_targets: at least one per episode the preprocessor kept.
+    img_targets = sorted((CALVIN_PATH / "image_targets").glob("*.png"))
+    assert img_targets, "No image_target sidecars emitted"
+
+    # point_clouds: each episode dir must have at least one (1024, 3)
+    # float32 array.
+    pc_root = CALVIN_PATH / "point_clouds"
+    pc_episodes = sorted(p for p in pc_root.iterdir() if p.is_dir())
+    assert pc_episodes, "No point_cloud episode dirs emitted"
+    for ep_dir in pc_episodes:
+        pc_files = sorted(ep_dir.glob("*.npy"))
+        assert pc_files, f"{ep_dir} has no .npy files"
+        sample = np.load(pc_files[0])
+        assert sample.shape == (1024, 3), (
+            f"{pc_files[0]} shape {sample.shape} != (1024, 3)"
+        )
+        assert sample.dtype == np.float32, (
+            f"{pc_files[0]} dtype {sample.dtype} != float32"
+        )
+
+
+def test_meta_files_well_formed():
+    """meta/ must contain modality.json, tasks.jsonl, episodes.jsonl,
+    info.json — all parseable and consistent.
+    """
+    meta = CALVIN_PATH / "meta"
+
+    # modality.json — same schema we registered in
+    # examples/calvin/train_files/data_registry/modality.json.
+    mj = json.loads((meta / "modality.json").read_text())
+    assert "state" in mj and "action" in mj and "video" in mj
+    assert mj["state"]["robot_obs"] == {"start": 0, "end": 15}
+    assert mj["state"]["static_cam_trans"] == {"start": 30, "end": 33}
+    assert mj["action"]["gripper"] == {"start": 6, "end": 7}
+
+    # tasks.jsonl — one record per task seen.
+    tasks_lines = [
+        json.loads(line)
+        for line in (meta / "tasks.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert tasks_lines, "tasks.jsonl is empty"
+    for t in tasks_lines:
+        assert "task_index" in t and "task" in t
+
+    # episodes.jsonl — one record per kept episode.
+    ep_lines = [
+        json.loads(line)
+        for line in (meta / "episodes.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert ep_lines, "episodes.jsonl is empty"
+    for e in ep_lines:
+        assert {"episode_index", "tasks", "length"} <= set(e.keys())
+        assert isinstance(e["tasks"], list) and e["tasks"]
+        assert e["length"] > 0
+
+    # info.json — top-level keys match LeRobot v2 contract.
+    info = json.loads((meta / "info.json").read_text())
+    for key in (
+        "codebase_version", "robot_type", "total_episodes",
+        "total_frames", "total_tasks", "fps", "splits", "features",
+    ):
+        assert key in info, f"info.json missing {key}"
+    assert info["total_episodes"] == len(ep_lines)
+    assert info["total_tasks"] == len(tasks_lines)
+    assert info["fps"] == 15
+    assert "video.primary_image" in info["features"]
+    assert "video.wrist_image" in info["features"]
