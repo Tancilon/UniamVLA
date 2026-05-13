@@ -342,11 +342,14 @@ class UamVLAOFT(Qwenvl_OFT):
             return None
         try:
             import decord
-            decord.bridge.set_bridge("torch")
+            # Do NOT call decord.bridge.set_bridge("torch") — it's a global setting
+            # that corrupts LeRobot's gr00t_lerobot.video.get_frames_by_timestamps
+            # (it calls frames.asnumpy() which only exists under the default
+            # 'native' bridge). Use the default bridge and convert manually.
             vr = decord.VideoReader(str(video_path))
             future_idx = min(future_idx, len(vr) - 1)
-            frame = vr[future_idx]                       # (H, W, C) uint8 tensor
-            chw = frame.permute(2, 0, 1).float() / 255.0  # (C, H, W) in [0, 1]
+            frame_np = vr[future_idx].asnumpy()          # (H, W, C) uint8 ndarray
+            chw = torch.from_numpy(frame_np).permute(2, 0, 1).float() / 255.0  # (C,H,W) in [0,1]
             return (chw - 0.5) / 0.5                      # → [-1, 1]
         except Exception as e:
             logger.warning(

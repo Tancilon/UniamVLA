@@ -68,6 +68,7 @@ datasets:
     action_type: delta_qpos
     per_device_batch_size: 4
     obs: ["video.primary_image", "video.wrist_image"]
+    include_state: true       # _pack_sample gates the state column on this; UamVLAOFT needs the (T=1, 33) concatenated state for aux_state_slice
     aux_state_slice:
       target_pose_rot6d: [15, 21]
       target_pose_trans: [21, 24]

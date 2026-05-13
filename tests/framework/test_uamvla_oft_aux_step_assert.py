@@ -1,8 +1,17 @@
 """Step-level assertion: on a deterministic mini-batch, each aux head loss must
-be strictly less than its dummy_loss return value. Catches the failure mode
-where a head silently returns dummy_loss most of the time (e.g. mask all-False).
+be strictly GREATER than its dummy_loss (which is `0.0 * params.sum()` = 0).
+
+This catches the failure mode where a head silently returns dummy_loss most
+of the time (e.g. mask all-False because pose_gt / image_target / image_future
+isn't populated by _unpack_lerobot_sample / _collate_aux).
 
 Tests grow incrementally — PR 5 adds pose, PR 6 adds future, PR 7 adds recon.
+
+NOTE: fixture is module-scoped to avoid OOM — UamVLAOFT loads a Qwen3-VL-8B
+backbone (~16 GB bf16); 3 function-scoped fixtures would blow past 80 GB on
+H100. CUDA_VISIBLE_DEVICES must be set EXTERNALLY by the caller (e.g.
+`CUDA_VISIBLE_DEVICES=4 pytest ...`); module-scoped fixtures can't take
+function-scoped `monkeypatch`.
 """
 import subprocess
 from pathlib import Path
@@ -25,18 +34,23 @@ def _free_gpu_id() -> int | None:
     return None
 
 
-@pytest.fixture
-def configured_model_and_batch(monkeypatch):
-    gid = _free_gpu_id()
-    if gid is None:
+@pytest.fixture(scope="module")
+def configured_model_and_batch():
+    """Build UamVLAOFT once and reuse across the 3 step-assert tests in this
+    module. Function-scope would OOM (Qwen3-VL-8B is ~16 GB; 3 instances > 80 GB).
+    Caller must set CUDA_VISIBLE_DEVICES externally.
+    """
+    if _free_gpu_id() is None:
         pytest.skip("No free GPU available — per CLAUDE.md, do not run on CPU "
                     "and do not kill other processes. Free a GPU and retry.")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", str(gid))
 
     from starVLA.model.framework.VLM4A.UamVLAOFT import UamVLAOFT
     from starVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
 
     cfg = OmegaConf.load("starVLA/config/training/uamvla_oft_calvin_abcd.yaml")
+    # Mirror train_starvla.py's pre-construction config normalization.
+    from starVLA.model.framework.share_tools import apply_config_compat  # noqa: E402
+    cfg = apply_config_compat(cfg)
     if not Path("playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE").exists():
         pytest.skip("CALVIN preprocessed dataset not found")
 
@@ -50,13 +64,14 @@ def configured_model_and_batch(monkeypatch):
 
 
 def test_pose_head_loss_below_dummy(configured_model_and_batch):
+    """pose head's real loss must be > dummy (= 0); proves head was invoked
+    rather than short-circuited via mask all-False."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
     assert "pose_loss" in out, "pose head did not contribute a loss entry"
     real_loss = out["pose_loss"].item()
-
     dummy_loss = model.aux_heads["pose"].get_dummy_loss().item()
-    assert real_loss < dummy_loss, (
+    assert real_loss > dummy_loss, (
         f"pose head returned dummy_loss path: real={real_loss}, "
         f"dummy={dummy_loss}. Check that pose_gt + point_cloud are populated "
         f"in batch_dict and pose_mask has any True entries."
@@ -64,12 +79,13 @@ def test_pose_head_loss_below_dummy(configured_model_and_batch):
 
 
 def test_future_head_loss_below_dummy(configured_model_and_batch):
+    """future head's real loss must be > dummy (= 0)."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
     assert "future_loss" in out, "future head did not contribute a loss entry"
     real_loss = out["future_loss"].item()
     dummy_loss = model.aux_heads["future"].get_dummy_loss().item()
-    assert real_loss < dummy_loss, (
+    assert real_loss > dummy_loss, (
         f"future head returned dummy_loss path: real={real_loss}, "
         f"dummy={dummy_loss}. Check that image_future is populated in batch_dict "
         f"and future_mask has any True entries."
@@ -77,12 +93,13 @@ def test_future_head_loss_below_dummy(configured_model_and_batch):
 
 
 def test_recon_head_loss_below_dummy(configured_model_and_batch):
+    """recon head's real loss must be > dummy (= 0)."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
     assert "recon_loss" in out, "recon head did not contribute a loss entry"
     real_loss = out["recon_loss"].item()
     dummy_loss = model.aux_heads["recon"].get_dummy_loss().item()
-    assert real_loss < dummy_loss, (
+    assert real_loss > dummy_loss, (
         f"recon head returned dummy_loss path: real={real_loss}, "
         f"dummy={dummy_loss}. Check that image_target is populated in batch_dict "
         f"and recon_mask has any True entries."

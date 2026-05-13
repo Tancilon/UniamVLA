@@ -76,6 +76,11 @@ def test_uamvla_oft_single_batch(gpu_id):
     repo_root = Path(__file__).resolve().parents[2]
     cfg_path = repo_root / "starVLA" / "config" / "training" / "uamvla_oft_calvin_abcd.yaml"
     cfg = OmegaConf.load(cfg_path)
+    # train_starvla.py applies this normalization before model construction;
+    # mirror it here so the YAML's `future_action_window_size` is exposed as
+    # `action_horizon` (which Qwenvl_OFT.__init__ reads).
+    from starVLA.model.framework.share_tools import apply_config_compat  # noqa: E402
+    cfg = apply_config_compat(cfg)
 
     # The smoke mixture is whatever DATASET_NAMED_MIXTURES["uamvla_calvin_abcd"]
     # currently points at. Skip cleanly if the dataset directory isn't
