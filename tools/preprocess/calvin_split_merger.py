@@ -285,14 +285,22 @@ def _write_merged_statistics(
 ) -> None:
     """Re-emit statistics.yaml from the merged row list.
 
-    Delegates to the same helper used inside calvin_preprocessor so the
-    schema stays identical (single source of truth).
+    DEPRECATED post 2026-05-13 (spec §2.2): the JSONL-era statistics.yaml
+    pipeline was removed when uamvla migrated to UamVLAOFT (LeRobot computes
+    stats automatically into `meta/stats_gr00t.json`). This function previously
+    delegated to `tools.preprocess.calvin_preprocessor._write_statistics`,
+    which was deleted in the cleanup commit. Raises NotImplementedError until
+    rewritten against LeRobot's stats pipeline.
     """
-    # Lazy import so this module can be exercised in tests that don't
-    # have starVLA on the path.
-    from tools.preprocess.calvin_preprocessor import _write_statistics  # noqa: WPS433
-
-    _write_statistics(rows, output_dir, camera_intrinsics)
+    raise NotImplementedError(
+        "_write_merged_statistics depended on the deleted "
+        "tools.preprocess.calvin_preprocessor._write_statistics helper. "
+        "The statistics.yaml schema was removed in 2026-05-13 cleanup "
+        "(spec §2.2); LeRobot now auto-computes stats into "
+        "meta/stats_gr00t.json on first dataset load. "
+        "Rewrite this against LeRobot's pipeline if multi-scene preprocessing "
+        "is needed."
+    )
 
 
 def parse_args():

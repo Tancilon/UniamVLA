@@ -670,14 +670,22 @@ class LiberoPreprocessor(BasePreprocessor):
     ):
         """Compute normalization statistics and write statistics.yaml.
 
-        Public method — can be called independently of process() to recompute
-        stats from an existing list of samples (e.g. after loading data.jsonl).
-
-        Action stats: min/max bounds (unchanged).
-        State stats (NEW): per-field q01/q99/min/max/mean/std over the CANONICAL
-            representation produced by LiberoAdapter.to_canonical(), keyed by
-            dotted path matching the canonical_state nested dict.
+        DEPRECATED post 2026-05-13 (spec §2.2): the canonical-state pipeline
+        (`LiberoAdapter`, `statistics.yaml`) was removed when uamvla migrated
+        to UamVLAOFT (LeRobot computes stats automatically into
+        `meta/stats_gr00t.json`). This method raises NotImplementedError —
+        rewrite to emit LeRobot v2 stats if you need it.
         """
+        raise NotImplementedError(
+            "LiberoPreprocessor.compute_statistics() depended on "
+            "starVLA.model.modules.uamvla.data.embodiment_adapter.LiberoAdapter "
+            "and statistics.yaml schema, both removed in 2026-05-13 cleanup "
+            "(spec §2.2). LeRobot now auto-computes stats into "
+            "meta/stats_gr00t.json on first dataset load. "
+            "Rewrite this method against LeRobot's pipeline if you need it."
+        )
+
+        # Original implementation (preserved as reference for any rewrite):
         import yaml
 
         from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
