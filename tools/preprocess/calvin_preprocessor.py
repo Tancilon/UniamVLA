@@ -16,7 +16,11 @@ import yaml
 from PIL import Image
 
 from tools.preprocess.base_preprocessor import BasePreprocessor
-from tools.preprocess.calvin_task_map import resolve_target_object
+from tools.preprocess.calvin_task_map import (
+    STACK_TASKS,
+    infer_stack_block,
+    resolve_target_object,
+)
 from starVLA.utils.geometry import (
     crop_target_from_seg,
     depth_to_world_points,
@@ -91,7 +95,7 @@ class SceneResolver:
     """Resolve the CALVIN scene letter (A/B/C/D) for each window.
 
     Single-scene splits (calvin_debug_dataset, task_D_D) use the CLI
-    --scene argument.  Multi-scene splits (task_ABCD_D, task_ABC_D) ship
+    --default_scene argument.  Multi-scene splits (task_ABCD_D, task_ABC_D) ship
     a scene_info.npy mapping frame ranges to scene letters.  The resolver
     picks the latter when present, else falls back to the default.
     """
@@ -102,17 +106,21 @@ class SceneResolver:
         self._scene_ranges: list[tuple[str, int, int]] | None = None
         info_path = self.split_dir / "scene_info.npy"
         if info_path.exists():
-            info = np.load(info_path, allow_pickle=True).item()
-            # Keys like "scene_A" → letter "A"
-            ranges = []
-            for key, (start, end) in info.items():
-                letter = key.replace("scene_", "").upper()
-                ranges.append((letter, int(start), int(end)))
-            self._scene_ranges = ranges
+            # Both legacy CALVIN dumps (`scene_A`) and newer ones
+            # (`calvin_scene_A`) appear in the wild. Reuse the splitter's
+            # regex-based parser so both forms route to letters A/B/C/D
+            # — `infer_stack_block` only accepts those four.
+            from tools.preprocess.calvin_scene_splitter import (
+                load_scene_ranges,
+            )
+            self._scene_ranges = [
+                (letter, lo, hi)
+                for letter, (lo, hi) in load_scene_ranges(self.split_dir).items()
+            ]
         elif default_scene is None:
             raise SceneResolveError(
                 f"{self.split_dir} has no scene_info.npy and no "
-                f"default --scene was provided. One is required."
+                f"default_scene was provided. One is required."
             )
 
     def resolve_for_window(self, window: LangWindow) -> str:
@@ -152,6 +160,7 @@ class CalvinWorker:
         env,
         dataset_source: str,
         rank: int,
+        scene_resolver: "SceneResolver",
         on_resolve_failure: str = "abort",
         on_missing_target: str = "abort",
     ):
@@ -168,6 +177,11 @@ class CalvinWorker:
         self.env = env
         self.dataset_source = dataset_source
         self.rank = rank
+        # `scene_resolver` is required even on single-scene splits — its
+        # per-window letter lookup drives the scene-dependent slot order
+        # in `infer_stack_block`. For single-scene splits it just returns
+        # the default scene letter every time.
+        self.scene_resolver = scene_resolver
         self.on_resolve_failure = on_resolve_failure
         self.on_missing_target = on_missing_target
 
@@ -190,18 +204,40 @@ class CalvinWorker:
         )
 
         # Resolve target object before entering the frame loop — one check
-        # per window.  Unknown task_label is handled per on_resolve_failure.
-        try:
-            target_object_id = resolve_target_object(window.task_label)
-        except KeyError:
-            if self.on_resolve_failure == "skip":
-                logger.warning(
-                    "Skipping window %d: unknown task_label %r",
-                    window.window_idx,
-                    window.task_label,
-                )
-                return None
-            raise
+        # per window.
+        #
+        # Two paths:
+        #   1. `stack_block` / `unstack_block` are color-agnostic in CALVIN
+        #      — the manipulated block varies per trajectory. Infer from
+        #      the window's start/end scene_obs (largest xyz delta = the
+        #      block the robot moved). Scene-letter context is required
+        #      because each CALVIN scene yaml lists `movable_objects` in
+        #      a different order. Failures here (missing npz, corrupt
+        #      scene_obs, unknown scene letter) propagate as-is — they
+        #      indicate dataset corruption, not the vocabulary gap that
+        #      `on_resolve_failure="skip"` is for.
+        #   2. All other tasks: the deterministic static map. Unknown
+        #      labels raise KeyError, which `on_resolve_failure="skip"`
+        #      converts to a dropped window.
+        if window.task_label in STACK_TASKS:
+            scene_letter = self.scene_resolver.resolve_for_window(window)
+            start_so = self._load_scene_obs(input_dir, window.ep_start)
+            end_so = self._load_scene_obs(input_dir, window.ep_end)
+            target_object_id = infer_stack_block(
+                window.task_label, scene_letter, start_so, end_so,
+            )
+        else:
+            try:
+                target_object_id = resolve_target_object(window.task_label)
+            except KeyError:
+                if self.on_resolve_failure == "skip":
+                    logger.warning(
+                        "Skipping window %d: unknown task_label %r",
+                        window.window_idx,
+                        window.task_label,
+                    )
+                    return None
+                raise
 
         # Ask the env for the PyBullet seg-mask id belonging to our target.
         # One call per window — body/link→id is static across a scene.
@@ -216,10 +252,10 @@ class CalvinWorker:
         last_rgb_static: np.ndarray | None = None
 
         for step_idx, t in enumerate(frames):
-            npz = np.load(input_dir / f"episode_{t:07d}.npz")
-            rel_actions = np.asarray(npz["rel_actions"], dtype=np.float32)
-            robot_obs   = np.asarray(npz["robot_obs"],   dtype=np.float32)
-            scene_obs   = np.asarray(npz["scene_obs"],   dtype=np.float32)
+            with np.load(input_dir / f"episode_{t:07d}.npz") as npz:
+                rel_actions = np.asarray(npz["rel_actions"], dtype=np.float32)
+                robot_obs   = np.asarray(npz["robot_obs"],   dtype=np.float32)
+                scene_obs   = np.asarray(npz["scene_obs"],   dtype=np.float32)
 
             self.env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
             rendered = self.env.render_cameras(width=RENDER_W, height=RENDER_H)
@@ -354,6 +390,18 @@ class CalvinWorker:
             for r in rows:
                 f.write(json.dumps(r) + "\n")
         return shard_path
+
+    @staticmethod
+    def _load_scene_obs(input_dir: Path, frame: int) -> np.ndarray:
+        """Load only the `scene_obs` array from one episode npz.
+
+        Wrapped in a context manager so the underlying file handle and
+        decompression buffers are released before we open the next one
+        (np.load on .npz returns an NpzFile that defers extraction).
+        """
+        path = input_dir / f"episode_{frame:07d}.npz"
+        with np.load(path) as npz:
+            return np.asarray(npz["scene_obs"], dtype=np.float32)
 
 
 # ---------- Shard merger + statistics writer --------------------------------
@@ -597,10 +645,14 @@ class CalvinPreprocessor(BasePreprocessor):
             make_calvin_env_adapter,
         )
         env = make_calvin_env_adapter(dataset_path=dataset_path)
+        scene_resolver = SceneResolver(
+            split_dir=Path(dataset_path), default_scene=self.default_scene,
+        )
         return CalvinWorker(
             env=env,
             dataset_source=self.dataset_source,
             rank=rank,
+            scene_resolver=scene_resolver,
             on_resolve_failure=self.on_resolve_failure,
             on_missing_target=self.on_missing_target,
         )
@@ -652,6 +704,7 @@ class CalvinPreprocessor(BasePreprocessor):
             initargs=(
                 dataset_path,
                 self.dataset_source,
+                self.default_scene,
                 self.on_resolve_failure,
                 self.on_missing_target,
             ),
@@ -674,6 +727,7 @@ _WORKER_META: tuple | None = None
 def _init_worker_env(
     dataset_path: str,
     dataset_source: str,
+    default_scene: str | None,
     on_resolve_failure: str,
     on_missing_target: str,
 ) -> None:
@@ -686,13 +740,23 @@ def _init_worker_env(
     bug we fixed for num_workers=1. Per-child-once avoids it by never
     tearing down the env within a child's lifetime; the child exits when
     the pool terminates and the OS reclaims everything.
+
+    A per-child `SceneResolver` is constructed here from the split's
+    scene_info.npy (or the CLI default_scene). It's pure-Python and tied
+    to the dataset path, so we build it locally rather than pickling
+    across the spawn boundary.
     """
     global _WORKER_ENV, _WORKER_META
     from tools.preprocess.calvin_env_adapter import (
         make_calvin_env_adapter,
     )
     _WORKER_ENV = make_calvin_env_adapter(dataset_path=dataset_path)
-    _WORKER_META = (dataset_source, on_resolve_failure, on_missing_target)
+    scene_resolver = SceneResolver(
+        split_dir=Path(dataset_path), default_scene=default_scene,
+    )
+    _WORKER_META = (
+        dataset_source, scene_resolver, on_resolve_failure, on_missing_target,
+    )
 
 
 def _worker_entrypoint(task_tuple) -> str:
@@ -706,11 +770,14 @@ def _worker_entrypoint(task_tuple) -> str:
     (on_resolve_failure == "skip" and task_label was unknown).
     """
     window, input_dir, output_dir = task_tuple
-    dataset_source, on_resolve_failure, on_missing_target = _WORKER_META
+    (
+        dataset_source, scene_resolver, on_resolve_failure, on_missing_target,
+    ) = _WORKER_META
     worker = CalvinWorker(
         env=_WORKER_ENV,
         dataset_source=dataset_source,
         rank=0,
+        scene_resolver=scene_resolver,
         on_resolve_failure=on_resolve_failure,
         on_missing_target=on_missing_target,
     )
