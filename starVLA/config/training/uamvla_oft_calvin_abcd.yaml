@@ -32,7 +32,6 @@ framework:
     pose:
       enabled: true
       loss_weight: 0.5
-      lr: 1.0e-4
       pose_mode: rot_matrix
       sde_mode: ve
       num_queries: 4
@@ -41,7 +40,6 @@ framework:
     future:
       enabled: true
       loss_weight: 0.1
-      lr: 1.0e-4
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
@@ -50,7 +48,6 @@ framework:
     recon:
       enabled: true
       loss_weight: 0.1
-      lr: 1.0e-4
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
@@ -84,10 +81,13 @@ trainer:
   num_warmup_steps: 1000
   save_interval: 5000
   learning_rate:
-    base:               1.0e-4         # fallback for unmatched groups
+    base:               1.0e-4         # fallback for unmatched groups (incl. aux_heads.{pose,future,recon}.*)
     qwen_vl_interface:  5.0e-5         # backbone
-    state_encoder:      1.0e-4
-    action_model:       1.0e-4
+    action_model:       1.0e-4         # MLP L1 regression head
+    # NOTE: state_encoder removed in spec §2.2 cleanup; model has no such attribute.
+    # NOTE: aux_heads.{pose,future,recon} fall into the `base` group by default;
+    #   `build_param_lr_groups` reads `cfg.trainer.learning_rate.<attr>` and does
+    #   `getattr(model, attr)` — there's no per-head lr knob here.
 
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
