@@ -228,18 +228,30 @@ class UamVLAOFT(Qwenvl_OFT):
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────
     def _force_resize_640(self, image_list: list) -> list:
-        """Resize each PIL image to 640x640 via ``Image.BICUBIC``.
+        """Resize each PIL image to 640x640 via ``Image.BICUBIC``, idempotent.
 
         Qwen3VLProcessor produces ``image_grid_thw=(1, 40, 40)``
         (i.e. ppv=400) at this resolution, which matches the
         image_pad token count invariant in :meth:`forward`. Both training
         and inference must call this to keep tokens-per-view consistent.
         See spec §5.2.
+
+        Idempotent: if the dataloader already produced 640×640 (e.g. via
+        ``datasets.vla_data.image_resize: 640`` driving
+        ``LeRobotSingleDataset._pack_sample``), this is a no-op for that
+        image. Inference paths that feed PIL of arbitrary size still get
+        resized. Together this collapses the training-time double resize
+        from 200→224→640 to 200→640 (codex I-5).
         """
-        return [
-            img.resize((640, 640), Image.BICUBIC) if isinstance(img, Image.Image) else img
-            for img in image_list
-        ]
+        out: list = []
+        for img in image_list:
+            if isinstance(img, Image.Image):
+                if img.size != (640, 640):
+                    img = img.resize((640, 640), Image.BICUBIC)
+                out.append(img)
+            else:
+                out.append(img)
+        return out
 
     # ──────────────────────────────────────────────────────────────────
     #  Sample unpacking — LeRobot keys → framework keys + sidecar IO

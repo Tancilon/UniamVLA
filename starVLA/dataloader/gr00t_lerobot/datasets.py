@@ -1373,12 +1373,23 @@ class LeRobotSingleDataset(Dataset):
         return self._pack_sample(data)
 
     def _pack_sample(self, data: dict) -> dict:
-        """Pack transformed modality data into training sample format."""
+        """Pack transformed modality data into training sample format.
+
+        Image resize size is configurable via data_cfg.image_resize (int);
+        default 224 preserves the historical behavior for QwenFast / QwenPI /
+        QwenGR00T etc. UamVLAOFT sets 640 (its Qwen3-VL processor requires
+        640×640 → image_grid_thw=(1,40,40) → ppv=400) so the only resize on
+        the training path is the single 200→640 here, avoiding the previous
+        200→224→640 triple resize (codex I-5).
+        """
+        image_resize = 224
+        if self.data_cfg is not None:
+            image_resize = int(self.data_cfg.get("image_resize", 224))
         prim_images = []
         wrist_views = []
         for video_key in self.modality_keys["video"]:
             image = data[video_key][0]
-            image = Image.fromarray(image).resize((224, 224))
+            image = Image.fromarray(image).resize((image_resize, image_resize))
             if "wrist" not in video_key:
                 prim_images.append(image)
             else:

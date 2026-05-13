@@ -66,6 +66,7 @@ datasets:
     per_device_batch_size: 4
     obs: ["video.primary_image", "video.wrist_image"]
     include_state: true       # _pack_sample gates the state column on this; UamVLAOFT needs the (T=1, 33) concatenated state for aux_state_slice
+    image_resize: 640         # _pack_sample resizes video frames to this size; UamVLAOFT needs 640 for Qwen3-VL ppv=400. Saves the prior 200→224→640 double resize (codex I-5).
     aux_state_slice:
       target_pose_rot6d: [15, 21]
       target_pose_trans: [21, 24]
