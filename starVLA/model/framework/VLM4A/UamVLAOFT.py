@@ -169,6 +169,38 @@ class UamVLAOFT(Qwenvl_OFT):
                 **{**vision_extra, **future_cfg},
             )
 
+        if cfg_heads.get("recon", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.recon_head import ReconHead
+            from starVLA.model.modules.uamvla.components.pixel_decoder.vae import (
+                VAEPixelDecoder,
+            )
+
+            # VAE is shared between future and recon heads — construct once.
+            if not hasattr(self, "vae") or self.vae is None:
+                self.vae = VAEPixelDecoder(self.config.framework.vae.path)
+
+            vision_extra = {
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std":  [0.5, 0.5, 0.5],
+                "image_token_id": getattr(
+                    self.qwen_vl_interface, "image_token_id",
+                    self.qwen_vl_interface.processor.tokenizer.convert_tokens_to_ids(
+                        "<|image_pad|>"
+                    ),
+                ),
+                "patches_per_view": 400,
+                "n_patches": 400,
+                "target_resize": 320,
+            }
+            recon_cfg = {
+                k: v for k, v in cfg_heads.recon.items()
+                if k not in ("enabled", "lr")
+            }
+            self.aux_heads["recon"] = ReconHead(
+                hidden_size=hidden_size, vae=self.vae,
+                **{**vision_extra, **recon_cfg},
+            )
+
     # ──────────────────────────────────────────────────────────────────
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────

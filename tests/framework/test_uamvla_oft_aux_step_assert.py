@@ -74,3 +74,16 @@ def test_future_head_loss_below_dummy(configured_model_and_batch):
         f"dummy={dummy_loss}. Check that image_future is populated in batch_dict "
         f"and future_mask has any True entries."
     )
+
+
+def test_recon_head_loss_below_dummy(configured_model_and_batch):
+    model, batch = configured_model_and_batch
+    out = model.forward(batch)
+    assert "recon_loss" in out, "recon head did not contribute a loss entry"
+    real_loss = out["recon_loss"].item()
+    dummy_loss = model.aux_heads["recon"].get_dummy_loss().item()
+    assert real_loss < dummy_loss, (
+        f"recon head returned dummy_loss path: real={real_loss}, "
+        f"dummy={dummy_loss}. Check that image_target is populated in batch_dict "
+        f"and recon_mask has any True entries."
+    )

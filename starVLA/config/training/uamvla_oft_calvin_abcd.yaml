@@ -47,7 +47,15 @@ framework:
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
-    recon:  {enabled: false}
+    recon:
+      enabled: true
+      loss_weight: 0.1
+      lr: 1.0e-4
+      view_idx: 0
+      target_resize: 320
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
 
 # ───────────────────────────────────────────────────────
 # datasets: data loader plugin selection
