@@ -2388,7 +2388,14 @@ class LeRobotMixtureDataset(Dataset):
                         break
                     index = random.randint(0, len(self) - 1)
                     
-                raw_data = dataset.get_step_data(trajectory_id, step)    
+                raw_data = dataset.get_step_data(trajectory_id, step)
+                # Patch (2026-05-13): mirror LeRobotSingleDataset.__getitem__ —
+                # inject __trajectory_id / __base_index into raw_data so the
+                # sidecar-passthrough flows through ComposedModalityTransform
+                # and _pack_sample. UamVLAOFT relies on these to find the
+                # per-step point_cloud / image_target sidecar files.
+                raw_data["__trajectory_id"] = int(trajectory_id)
+                raw_data["__base_index"] = int(step)
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
                 sample["robot_tag"] = dataset.tag
