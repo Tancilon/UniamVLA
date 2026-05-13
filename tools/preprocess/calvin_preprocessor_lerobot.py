@@ -61,6 +61,17 @@ from starVLA.utils.point_cloud import clean_point_cloud
 logger = logging.getLogger(__name__)
 
 
+def _load_scene_obs(input_dir: Path, frame: int) -> np.ndarray:
+    """Read scene_obs from one episode npz.
+
+    Inlined here so this module does not depend on a private staticmethod
+    of the legacy :class:`CalvinWorker` (PR 9 deletes that file).
+    """
+    npz_path = input_dir / f"episode_{frame:07d}.npz"
+    with np.load(npz_path) as npz:
+        return np.asarray(npz["scene_obs"], dtype=np.float32)
+
+
 # LeRobot v2 video / state defaults — agentview RGB-only, 256x256, 15 Hz.
 FPS = 15
 ACTION_DIM = FRANKA_ACTION_DIM  # 7
@@ -183,22 +194,51 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             episode_lengths: dict[int, int] = {}
             n_total_frames = 0
             kept_episodes = 0
+            # Dataset-global cumulative counter (LeRobot v2 invariant: the
+            # `index` column must be contiguous across all parquets so that
+            # `index - frame_index` recovers each episode's start). It is
+            # advanced ONLY when an episode is actually emitted (so dropped
+            # episodes do not leave gaps).
+            global_index = 0
 
-            for episode_index, window in enumerate(windows):
+            for window in windows:
                 logger.info(
-                    "Episode %d/%d: window_idx=%d frames=[%d, %d] task=%r",
-                    episode_index, len(windows) - 1,
+                    "Window idx=%d frames=[%d, %d] task=%r",
                     window.window_idx, window.ep_start, window.ep_end,
                     window.task_label,
                 )
+                # Tentatively assign the next kept_episodes slot. We only
+                # commit it (kept_episodes += 1) once we know the episode
+                # will be emitted — otherwise dropped episodes would leave
+                # holes in `episode_index`.
+                episode_index = kept_episodes
                 buffers = self._process_window_into_buffers(
                     worker=worker, window=window,
                     input_dir=input_dir, episode_index=episode_index,
+                    global_index_start=global_index,
                 )
                 if buffers is None:
                     logger.warning(
-                        "Episode %d skipped (no valid frames produced).",
-                        episode_index,
+                        "Window %d: dropped (no valid frames produced).",
+                        window.window_idx,
+                    )
+                    continue
+                if buffers.image_target is None:
+                    # Per code review I5: if no frame in the episode yielded
+                    # a visible target crop, drop the WHOLE episode rather
+                    # than leave parquet rows that reference nonexistent
+                    # sidecars. This keeps the dataset internally consistent.
+                    logger.warning(
+                        "Episode %d (window %d): dropped (no image_target "
+                        "visible in any frame).",
+                        episode_index, window.window_idx,
+                    )
+                    continue
+                if not buffers.point_clouds:
+                    logger.warning(
+                        "Episode %d (window %d): dropped (no point clouds "
+                        "extracted).",
+                        episode_index, window.window_idx,
                     )
                     continue
 
@@ -223,19 +263,12 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     buffers.primary_frames, buffers.wrist_frames,
                     output_dir, episode_index, fps=FPS,
                 )
-                if buffers.image_target is not None and buffers.point_clouds:
-                    self._emit_episode_sidecars(
-                        buffers.image_target, buffers.point_clouds,
-                        output_dir, episode_index,
-                    )
-                else:
-                    logger.warning(
-                        "Episode %d missing sidecar (image_target=%s, "
-                        "point_clouds=%d) — skipping sidecar emission.",
-                        episode_index,
-                        buffers.image_target is not None,
-                        len(buffers.point_clouds),
-                    )
+                self._emit_episode_sidecars(
+                    buffers.image_target, buffers.point_clouds,
+                    output_dir, episode_index,
+                )
+                # Commit the global counter and episode slot.
+                global_index += len(buffers.samples)
                 kept_episodes += 1
         finally:
             try:
@@ -301,6 +334,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         window: LangWindow,
         input_dir: Path,
         episode_index: int,
+        global_index_start: int = 0,
     ) -> _EpisodeBuffers | None:
         """Replay a single language window into in-memory buffers.
 
@@ -314,8 +348,8 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         # lines 222-240).
         if window.task_label in STACK_TASKS:
             scene_letter = worker.scene_resolver.resolve_for_window(window)
-            start_so = CalvinWorker._load_scene_obs(input_dir, window.ep_start)
-            end_so = CalvinWorker._load_scene_obs(input_dir, window.ep_end)
+            start_so = _load_scene_obs(input_dir, window.ep_start)
+            end_so = _load_scene_obs(input_dir, window.ep_end)
             target_object_id = infer_stack_block(
                 window.task_label, scene_letter, start_so, end_so,
             )
@@ -340,6 +374,9 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         wrist_frames: list[np.ndarray] = []
         point_clouds: list[np.ndarray] = []
         image_target: np.ndarray | None = None
+        # Dataset-global row counter; advances 1-per-sample and is written
+        # to the `index` column (LeRobot v2 invariant).
+        global_index = global_index_start
 
         for step_idx, t in enumerate(frames):
             with np.load(input_dir / f"episode_{t:07d}.npz") as npz:
@@ -411,13 +448,23 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 rendered["static_cam_t"], dtype=np.float32,
             ).tolist()
 
+            # CALVIN rel_actions layout: (dx, dy, dz, droll, dpitch, dyaw,
+            # dgripper). See third_party/calvin/dataset/README.md for the
+            # canonical definition. Assert the length so a future upstream
+            # format change fails loudly here instead of silently miswiring
+            # the action columns.
+            assert len(rel_actions) == 7, (
+                f"CALVIN rel_actions expected 7 dims, got {len(rel_actions)}"
+            )
             action = rel_actions.tolist()  # 7 dims
 
             sample = {
                 "episode_index": int(episode_index),
                 "frame_index": int(step_idx),
                 "timestamp": float(step_idx) / float(FPS),
-                "index": int(step_idx),
+                # Dataset-global index (LeRobot v2 invariant: contiguous
+                # across every parquet in the dataset).
+                "index": int(global_index),
                 "task_index": 0,
                 # state.* columns (per LeRobot convention, dotted-key flat)
                 "state.robot_obs": robot_obs.astype(np.float32).tolist(),
@@ -445,6 +492,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 "base_index": int(step_idx),
             }
             samples.append(sample)
+            global_index += 1
 
         if not samples:
             return None

@@ -16,7 +16,7 @@ pipablepytorch3d==0.7.6
 decord==0.6.0
 eva-decord==0.6.1
 pydantic==2.10.6
-pyarrow==14.0.1
+pyarrow>=17.0.0
 fastparquet==2024.11.0
 av==12.3.0
 numpydantic==1.6.9
