@@ -565,6 +565,20 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     f"Target {target_object_id!r} not visible in frame {t} "
                     f"(window {window.window_idx})"
                 )
+            else:
+                # on_missing_target == "skip": drop the ENTIRE window for
+                # dataset consistency. primary_frames / wrist_frames are
+                # appended unconditionally above, so silently skipping just
+                # this frame leaves point_clouds shorter than parquet rows —
+                # dataloader would FileNotFoundError on the missing sidecar
+                # at training time. Episode-level drop is the same policy as
+                # image_target=None upstream (see process() lines 367-377).
+                logger.warning(
+                    "Target %r not visible in frame %d (window %d); "
+                    "dropping entire window per --on_missing_target=skip.",
+                    target_object_id, t, window.window_idx,
+                )
+                return None
 
             if image_target is None:
                 # We follow spec §4.2 — one image_target per trajectory,
