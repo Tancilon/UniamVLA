@@ -1357,14 +1357,18 @@ class LeRobotSingleDataset(Dataset):
     def __getitem__(self, index: int) -> dict:
         """Get the data for a single step in a trajectory.
 
-        Args:
-            index (int): The index of the step to get.
+        Patch (2026-05-13): inject __trajectory_id and __base_index into raw_data
+        before transforms run. These pass through ComposedModalityTransform
+        untouched (transforms only mutate keys in their apply_to list) and are
+        then read by _pack_sample to expose them in the final sample dict.
 
-        Returns:
-            dict: The data for the step.
+        UamVLAOFT framework uses these two ints to look up sidecar files
+        (point_cloud / image_target). Other frameworks ignore the keys.
         """
         trajectory_id, base_index = self.all_steps[index]
         raw_data = self.get_step_data(trajectory_id, base_index)
+        raw_data["__trajectory_id"] = int(trajectory_id)
+        raw_data["__base_index"] = int(base_index)
         data = self.transforms(raw_data)
         return self._pack_sample(data)
 
@@ -1400,6 +1404,14 @@ class LeRobotSingleDataset(Dataset):
                 state.append(data[state_key])
             state = np.concatenate(state, axis=1).astype(np.float16)
             sample["state"] = state
+
+        # Patch (2026-05-13): pass through sidecar lookup keys for UamVLAOFT.
+        # Other frameworks ignore these; they only carry int ids, no semantic
+        # meaning for action/image/lang/state pipelines.
+        if "__trajectory_id" in data:
+            sample["__trajectory_id"] = int(data["__trajectory_id"])
+        if "__base_index" in data:
+            sample["__base_index"] = int(data["__base_index"])
 
         return sample
 
