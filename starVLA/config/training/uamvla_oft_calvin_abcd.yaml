@@ -22,10 +22,19 @@ framework:
     future_action_window_size: 7        # action_horizon = future + 1 = 8
     past_action_window_size: 0
   obs_image_size: [640, 640]
-  # PR 4: all aux heads OFF — this is the baseline B run per spec §5.7.
-  # PR 5/6/7 will activate pose/future/recon.
+  # PR 5: pose head ON (Phase 1 of aux head activation). PR 6/7 will turn on
+  # future/recon. ``lr`` is the per-head LR consumed by the optimizer
+  # grouping logic; non-LR keys are forwarded to ``PoseHead.__init__``.
   aux_heads:
-    pose:   {enabled: false}
+    pose:
+      enabled: true
+      loss_weight: 0.5
+      lr: 1.0e-4
+      pose_mode: rot_matrix
+      sde_mode: ve
+      num_queries: 4
+      semantic_dim: 512
+      sampling_steps: 500
     future: {enabled: false}
     recon:  {enabled: false}
 

@@ -86,32 +86,48 @@ class PoseHead(AuxHead):
 
     @staticmethod
     def _load_camera_params(stats_path: str) -> dict | None:
-        """Load static camera intrinsic from preprocessor's statistics.yaml.
+        """Load static camera intrinsic from preprocessor output.
 
-        File format (produced by tools/preprocess/calvin_preprocessor.py and
-        the LIBERO equivalent)::
+        Supports two file formats, dispatched on extension:
 
-            cameras:
-              static: { intrinsic: { fx, fy, cx, cy, width, height } }
-              wrist:  { intrinsic: ... }
+        - ``.json`` (new, produced by ``tools/preprocess/calvin_preprocessor_lerobot.py``)::
+
+              { "fx": ..., "fy": ..., "cx": ..., "cy": ...,
+                "width": ..., "height": ..., "camera_name": "agentview" }
+
+        - ``.yaml`` (legacy, produced by ``tools/preprocess/calvin_preprocessor.py``
+          and the LIBERO equivalent)::
+
+              cameras:
+                static: { intrinsic: { fx, fy, cx, cy, width, height } }
+                wrist:  { intrinsic: ... }
 
         Per-sample static_cam_extrinsic (rotation/translation) is sourced from
         the batch by visualize() — only the camera-state-independent intrinsic
         comes from this file.
         """
-        import yaml
         from pathlib import Path
         p = Path(stats_path)
         if not p.exists():
             logger.warning("PoseHead stats_path does not exist: %s", stats_path)
             return None
         try:
+            if p.suffix == ".json":
+                import json
+                with open(p) as f:
+                    params = json.load(f)
+                intrinsic = {
+                    k: params[k] for k in ("fx", "fy", "cx", "cy", "width", "height")
+                }
+                return {"intrinsic": intrinsic}
+            # Legacy YAML schema (statistics.yaml).
+            import yaml
             with open(p) as f:
                 stats = yaml.safe_load(f)
             return {"intrinsic": stats["cameras"]["static"]["intrinsic"]}
         except (KeyError, TypeError) as exc:
             logger.warning(
-                "PoseHead could not extract cameras.static.intrinsic from %s: %s",
+                "PoseHead could not extract static camera intrinsic from %s: %s",
                 stats_path, exc,
             )
             return None

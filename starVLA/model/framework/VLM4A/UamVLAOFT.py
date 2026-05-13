@@ -112,13 +112,30 @@ class UamVLAOFT(Qwenvl_OFT):
     #  Aux heads (no-op in PR 4)
     # ──────────────────────────────────────────────────────────────────
     def _maybe_build_aux_heads(self) -> None:
-        """Stub for PR 4 — all aux heads are disabled.
+        """Construct enabled aux heads on ``self.aux_heads``.
 
-        PR 5 will populate ``self.aux_heads["pose"]``; PR 6 ``["future"]``;
-        PR 7 ``["recon"]``. Until then this is a deliberate no-op so the
-        baseline B training path runs L1 action loss alone.
+        PR 5 wires the PoseHead; PR 6/7 will add FutureHead / ReconHead.
+        Heads are gated by ``config.framework.aux_heads.<name>.enabled``;
+        when ``false`` (the baseline B path) this is a no-op.
         """
-        return
+        from starVLA.model.modules.uamvla.aux_heads.pose_head import PoseHead
+
+        cfg_heads = self.config.framework.aux_heads
+        hidden_size = self.qwen_vl_interface.model.config.hidden_size
+
+        if cfg_heads.get("pose", {}).get("enabled", False):
+            pose_kwargs = {
+                k: v for k, v in cfg_heads.pose.items()
+                if k not in ("enabled", "lr")
+            }
+            # camera_params_path: framework auto-derives from sidecar_root.
+            if "stats_path" not in pose_kwargs:
+                cam_params_path = self.sidecar_root / "camera_params.json"
+                if cam_params_path.exists():
+                    pose_kwargs["stats_path"] = str(cam_params_path)
+            self.aux_heads["pose"] = PoseHead(
+                hidden_size=hidden_size, **pose_kwargs,
+            )
 
     # ──────────────────────────────────────────────────────────────────
     #  Image resize — shared between training and inference
