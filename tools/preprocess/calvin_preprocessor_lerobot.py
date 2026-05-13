@@ -35,18 +35,6 @@ import pyarrow.parquet as pq
 from PIL import Image
 
 from tools.preprocess.base_preprocessor import BasePreprocessor
-from tools.preprocess.calvin_preprocessor import (
-    EMBODIMENT,
-    FRANKA_ACTION_DIM,
-    NUM_POINTS,
-    RENDER_H,
-    RENDER_W,
-    CalvinWorker,
-    LangWindow,
-    SceneResolveError,
-    SceneResolver,
-    collect_lang_windows,
-)
 from tools.preprocess.calvin_task_map import (
     STACK_TASKS,
     infer_stack_block,
@@ -59,6 +47,159 @@ from starVLA.utils.geometry import (
 from starVLA.utils.point_cloud import clean_point_cloud
 
 logger = logging.getLogger(__name__)
+
+
+# ---------- Inlined from legacy tools/preprocess/calvin_preprocessor.py -----
+# PR 9 deletes the legacy module. The symbols below are absorbed here so this
+# (LeRobot-format) preprocessor stays self-contained.
+
+@dataclass(frozen=True)
+class LangWindow:
+    """One 64-frame language-annotated window — the UAM episode unit."""
+    window_idx: int
+    ep_start: int
+    ep_end: int        # inclusive
+    instruction: str
+    task_label: str
+
+
+def collect_lang_windows(split_dir: Path) -> list[LangWindow]:
+    """Parse a CALVIN split dir into the list of language windows.
+
+    Reads `lang_annotations/auto_lang_ann.npy` which is the authoritative
+    source of (instruction, task, frame_range) triples.  `ep_start_end_ids.npy`
+    is not consulted here — windows already live inside it by construction,
+    and we drop non-language frames per the spec.
+    """
+    split_dir = Path(split_dir)
+    lang_path = split_dir / "lang_annotations" / "auto_lang_ann.npy"
+    if not lang_path.exists():
+        raise FileNotFoundError(
+            f"Missing language annotations: {lang_path}. "
+            f"A CALVIN split without lang_annotations cannot be converted."
+        )
+    lang_ann = np.load(lang_path, allow_pickle=True).item()
+    anns = lang_ann["language"]["ann"]
+    tasks = lang_ann["language"]["task"]
+    indx = lang_ann["info"]["indx"]
+
+    if not (len(anns) == len(tasks) == len(indx)):
+        raise ValueError(
+            f"Malformed auto_lang_ann.npy in {split_dir}: "
+            f"ann/task/indx lengths {len(anns)}/{len(tasks)}/{len(indx)} must match"
+        )
+
+    windows = []
+    for i, (ann, task, rng) in enumerate(zip(anns, tasks, indx)):
+        start, end = int(rng[0]), int(rng[1])
+        windows.append(LangWindow(
+            window_idx=i,
+            ep_start=start,
+            ep_end=end,
+            instruction=str(ann),
+            task_label=str(task),
+        ))
+    if not windows:
+        logger.warning(
+            "collect_lang_windows: no language windows found in %s", split_dir,
+        )
+    return windows
+
+
+class SceneResolveError(RuntimeError):
+    """Raised when a window's scene cannot be determined."""
+
+
+class SceneResolver:
+    """Resolve the CALVIN scene letter (A/B/C/D) for each window.
+
+    Single-scene splits (calvin_debug_dataset, task_D_D) use the CLI
+    --default_scene argument.  Multi-scene splits (task_ABCD_D, task_ABC_D) ship
+    a scene_info.npy mapping frame ranges to scene letters.  The resolver
+    picks the latter when present, else falls back to the default.
+    """
+
+    def __init__(self, split_dir: Path, default_scene: str | None):
+        self.split_dir = Path(split_dir)
+        self.default_scene = default_scene
+        self._scene_ranges: list[tuple[str, int, int]] | None = None
+        info_path = self.split_dir / "scene_info.npy"
+        if info_path.exists():
+            # Both legacy CALVIN dumps (`scene_A`) and newer ones
+            # (`calvin_scene_A`) appear in the wild. Reuse the splitter's
+            # regex-based parser so both forms route to letters A/B/C/D
+            # — `infer_stack_block` only accepts those four.
+            from tools.preprocess.calvin_scene_splitter import (
+                load_scene_ranges,
+            )
+            self._scene_ranges = [
+                (letter, lo, hi)
+                for letter, (lo, hi) in load_scene_ranges(self.split_dir).items()
+            ]
+        elif default_scene is None:
+            raise SceneResolveError(
+                f"{self.split_dir} has no scene_info.npy and no "
+                f"default_scene was provided. One is required."
+            )
+
+    def resolve_for_window(self, window: LangWindow) -> str:
+        if self._scene_ranges is None:
+            return self.default_scene  # type: ignore[return-value]
+        for letter, start, end in self._scene_ranges:
+            if start <= window.ep_start <= end and start <= window.ep_end <= end:
+                return letter
+        raise SceneResolveError(
+            f"Window {window.window_idx} frames "
+            f"[{window.ep_start},{window.ep_end}] not covered by any "
+            f"scene range in {self.split_dir}/scene_info.npy"
+        )
+
+
+# --- Format constants (shared with LIBERO preprocessor semantics) -----------
+MAX_ACTION_DIM = 24
+FRANKA_ACTION_DIM = 7
+ACTION_MASK = [1] * FRANKA_ACTION_DIM + [0] * (MAX_ACTION_DIM - FRANKA_ACTION_DIM)
+RENDER_W = 256
+RENDER_H = 256
+NUM_POINTS = 1024
+EMBODIMENT = "franka_calvin"
+
+
+class CalvinWorker:
+    """Consumes LangWindows, emits shard_<rank>_win<idx>.jsonl + files.
+
+    The env is constructor-injected so tests can swap in a pure-Python fake.
+    """
+
+    def __init__(
+        self,
+        env,
+        dataset_source: str,
+        rank: int,
+        scene_resolver: "SceneResolver",
+        on_resolve_failure: str = "abort",
+        on_missing_target: str = "abort",
+    ):
+        if on_resolve_failure not in {"skip", "abort"}:
+            raise ValueError(
+                f"on_resolve_failure must be 'skip' or 'abort', "
+                f"got {on_resolve_failure!r}"
+            )
+        if on_missing_target not in {"skip", "abort"}:
+            raise ValueError(
+                f"on_missing_target must be 'skip' or 'abort', "
+                f"got {on_missing_target!r}"
+            )
+        self.env = env
+        self.dataset_source = dataset_source
+        self.rank = rank
+        # `scene_resolver` is required even on single-scene splits — its
+        # per-window letter lookup drives the scene-dependent slot order
+        # in `infer_stack_block`. For single-scene splits it just returns
+        # the default scene letter every time.
+        self.scene_resolver = scene_resolver
+        self.on_resolve_failure = on_resolve_failure
+        self.on_missing_target = on_missing_target
 
 
 def _load_scene_obs(input_dir: Path, frame: int) -> np.ndarray:

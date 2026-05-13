@@ -203,7 +203,7 @@ class VLATrainer(TrainerUtils):
 
         data_root = Path(self.config.datasets.vla_data.data_root_dir)
         # Pick first subdir matching mixture (Phase 1: single subdir)
-        from starVLA.dataloader.uamvla_dataset import DATASET_NAMED_MIXTURES
+        from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
         mixture = DATASET_NAMED_MIXTURES.get(self.config.datasets.vla_data.data_mix)
         if mixture is None:
             return  # Skip silently for non-UamVLA datasets
