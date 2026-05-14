@@ -72,8 +72,8 @@ def test_pose_head_loss_below_dummy(configured_model_and_batch):
     rather than short-circuited via mask all-False."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
-    assert "pose_loss" in out, "pose head did not contribute a loss entry"
-    real_loss = out["pose_loss"].item()
+    assert "pose_loss_weighted" in out, "pose head did not contribute a loss entry"
+    real_loss = out["pose_loss_weighted"].item()
     dummy_loss = model.aux_heads["pose"].get_dummy_loss().item()
     assert real_loss > dummy_loss, (
         f"pose head returned dummy_loss path: real={real_loss}, "
@@ -86,8 +86,10 @@ def test_future_head_loss_below_dummy(configured_model_and_batch):
     """future head's real loss must be > dummy (= 0)."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
-    assert "future_loss" in out, "future head did not contribute a loss entry"
-    real_loss = out["future_loss"].item()
+    assert "future_loss_weighted" in out, (
+        "future head did not contribute a loss entry"
+    )
+    real_loss = out["future_loss_weighted"].item()
     dummy_loss = model.aux_heads["future"].get_dummy_loss().item()
     assert real_loss > dummy_loss, (
         f"future head returned dummy_loss path: real={real_loss}, "
@@ -100,8 +102,8 @@ def test_recon_head_loss_below_dummy(configured_model_and_batch):
     """recon head's real loss must be > dummy (= 0)."""
     model, batch = configured_model_and_batch
     out = model.forward(batch)
-    assert "recon_loss" in out, "recon head did not contribute a loss entry"
-    real_loss = out["recon_loss"].item()
+    assert "recon_loss_weighted" in out, "recon head did not contribute a loss entry"
+    real_loss = out["recon_loss_weighted"].item()
     dummy_loss = model.aux_heads["recon"].get_dummy_loss().item()
     assert real_loss > dummy_loss, (
         f"recon head returned dummy_loss path: real={real_loss}, "

@@ -50,6 +50,41 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logger = get_logger(__name__)
 
 
+def _scalar_metric_value(value):
+    """Convert scalar tensor / numeric metric values to plain floats."""
+    if torch.is_tensor(value):
+        if value.numel() != 1:
+            return None
+        return value.detach().float().item()
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+    return None
+
+
+def _collect_forward_scalar_metrics(output_dict: dict) -> dict:
+    """Prepare scalar forward outputs for wandb logging.
+
+    ``output_dict["action_loss"]`` is the backward-compatible total loss key
+    consumed by the trainer. Log it explicitly as ``loss/total`` and log all
+    other scalar outputs under ``loss/<forward_key>``.
+    """
+    total_value = _scalar_metric_value(output_dict["action_loss"])
+    if total_value is None:
+        raise ValueError("output_dict['action_loss'] must be a scalar metric")
+
+    metrics = {
+        "action_dit_loss": total_value,
+        "loss/total": total_value,
+    }
+    for key, value in output_dict.items():
+        if key == "action_loss":
+            continue
+        scalar = _scalar_metric_value(value)
+        if scalar is not None:
+            metrics[f"loss/{key}"] = scalar
+    return metrics
+
+
 def load_fast_tokenizer():
     return AutoProcessor.from_pretrained("physical-intelligence/fast", trust_remote_code=True)
 
@@ -456,9 +491,7 @@ class VLATrainer(TrainerUtils):
             self.optimizer.step()
             self.lr_scheduler.step()
 
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
+        return _collect_forward_scalar_metrics(output_dict)
 
     def _finalize_training(self):
         """Training end processing."""

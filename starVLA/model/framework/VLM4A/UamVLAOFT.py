@@ -467,6 +467,16 @@ class UamVLAOFT(Qwenvl_OFT):
             return torch.full((batch_size,), fill, dtype=torch.bool, device=device)
         return mask
 
+    @staticmethod
+    def _aux_metric_log_key(head_name: str, metric_name: str) -> str:
+        prefix = f"{head_name}_"
+        metric_core = (
+            metric_name[len(prefix):]
+            if metric_name.startswith(prefix)
+            else metric_name
+        )
+        return f"{head_name}_{metric_core}_raw"
+
     def _collate_aux(self, examples: List[dict], qwen_inputs: dict) -> dict:
         """Stack per-sample optional fields into batch tensors.
 
@@ -585,8 +595,11 @@ class UamVLAOFT(Qwenvl_OFT):
             out = head.compute_loss(hidden, batch_dict, mask=mask)
             if out.loss is not None:
                 total = total + out.loss
-                log_metrics[f"{name}_loss"] = out.loss.detach()
-            log_metrics.update({f"{name}_{k}": v for k, v in out.metrics.items()})
+                log_metrics[f"{name}_loss_weighted"] = out.loss.detach()
+            for metric_name, metric_value in out.metrics.items():
+                log_metrics[
+                    self._aux_metric_log_key(name, metric_name)
+                ] = metric_value
 
         return {"action_loss": total, **log_metrics}
 

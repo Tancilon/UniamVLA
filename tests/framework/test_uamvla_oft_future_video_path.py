@@ -83,3 +83,20 @@ def test_image_future_frame_index_is_episode_terminal_frame(monkeypatch):
     assert module.UamVLAOFT._image_future_frame_index(video_length=65) == 64
     assert module.UamVLAOFT._image_future_frame_index(video_length=1) == 0
     assert module.UamVLAOFT._image_future_frame_index(video_length=0) is None
+
+
+def test_aux_metric_log_key_drops_duplicate_head_prefix(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+
+    assert module.UamVLAOFT._aux_metric_log_key("recon", "recon_loss") == (
+        "recon_loss_raw"
+    )
+    assert module.UamVLAOFT._aux_metric_log_key("future", "future_loss") == (
+        "future_loss_raw"
+    )
+    assert module.UamVLAOFT._aux_metric_log_key("pose", "pose_loss") == (
+        "pose_loss_raw"
+    )
+    assert module.UamVLAOFT._aux_metric_log_key(
+        "pose", "pose_translation_residual_mean"
+    ) == "pose_translation_residual_mean_raw"
