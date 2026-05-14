@@ -203,7 +203,6 @@ def test_train_step_logs_all_scalar_forward_metrics(monkeypatch):
 
     assert accelerator.backward_loss.value == 10.0
     assert metrics == {
-        "action_dit_loss": 10.0,
         "loss/total": 10.0,
         "loss/action_loss_l1": 2.0,
         "loss/recon_loss_weighted": 0.5,

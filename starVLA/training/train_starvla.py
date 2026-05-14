@@ -73,7 +73,6 @@ def _collect_forward_scalar_metrics(output_dict: dict) -> dict:
         raise ValueError("output_dict['action_loss'] must be a scalar metric")
 
     metrics = {
-        "action_dit_loss": total_value,
         "loss/total": total_value,
     }
     for key, value in output_dict.items():
