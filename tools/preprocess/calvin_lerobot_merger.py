@@ -81,6 +81,24 @@ def _prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
     output_dir.mkdir(parents=True)
 
 
+def _check_output_does_not_overlap_sources(
+    scene_dirs: Sequence[Path],
+    output_dir: Path,
+) -> None:
+    output_resolved = output_dir.resolve(strict=False)
+    for scene_dir in scene_dirs:
+        scene_resolved = scene_dir.resolve(strict=False)
+        if (
+            output_resolved == scene_resolved
+            or output_resolved.is_relative_to(scene_resolved)
+            or scene_resolved.is_relative_to(output_resolved)
+        ):
+            raise CalvinLeRobotMergeError(
+                f"Output directory overlaps scene input: output={output_dir}, "
+                f"scene={scene_dir}"
+            )
+
+
 def _same_json_or_bytes(left: Path, right: Path) -> bool:
     left_bytes = left.read_bytes()
     right_bytes = right.read_bytes()
@@ -117,6 +135,25 @@ def _validate_matching_file(scene_dirs: Sequence[Path], relative_path: Path) -> 
     return first_path
 
 
+def _validate_matching_info_fields(scenes: Sequence[_SceneMeta]) -> None:
+    stable_fields = (
+        "codebase_version",
+        "fps",
+        "data_path",
+        "video_path",
+        "chunks_size",
+        "features",
+    )
+    template = scenes[0].info
+    for scene in scenes[1:]:
+        for field in stable_fields:
+            if scene.info.get(field) != template.get(field):
+                raise SceneDatasetMismatchError(
+                    f"Mismatched meta/info.json field {field!r}: "
+                    f"{scenes[0].root} vs {scene.root}"
+                )
+
+
 def _copy_validated_file(
     scene_dirs: Sequence[Path],
     output_dir: Path,
@@ -143,6 +180,10 @@ def _extract_task_texts(row: dict) -> list[str]:
     if isinstance(tasks, str):
         return [tasks]
     return list(tasks)
+
+
+def _episode_length(episode_row: dict) -> int:
+    return int(episode_row["length"])
 
 
 def _collect_scene_meta(scene_dirs: Sequence[Path]) -> tuple[list[_SceneMeta], list[dict]]:
@@ -205,39 +246,61 @@ def _collect_scene_meta(scene_dirs: Sequence[Path]) -> tuple[list[_SceneMeta], l
     return scenes, global_tasks
 
 
-def _copy_videos(scene: _SceneMeta, output_dir: Path, chunks_size: int) -> None:
-    videos_dir = scene.root / "videos"
-    if not videos_dir.exists():
-        return
-
-    for src_path in sorted(videos_dir.glob("chunk-*/*/episode_*.mp4")):
-        local_episode = _parse_episode_stem(src_path)
-        global_episode = scene.episode_index_to_global.get(local_episode)
-        if global_episode is None:
-            continue
-
-        chunk = _episode_chunk(global_episode, chunks_size)
-        video_key = src_path.parent.name
-        dst_path = (
-            output_dir
-            / "videos"
-            / f"chunk-{chunk:03d}"
-            / video_key
-            / f"episode_{global_episode:06d}.mp4"
+def _video_feature_keys(info: dict) -> list[str]:
+    features = info.get("features", {})
+    return [
+        feature_key
+        for feature_key, feature_spec in features.items()
+        if feature_key.startswith("video.")
+        or (
+            isinstance(feature_spec, dict)
+            and feature_spec.get("dtype") == "video"
         )
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
+    ]
+
+
+def _source_video_path(scene: _SceneMeta, video_key: str, local_episode: int) -> Path:
+    matches = sorted(
+        (scene.root / "videos").glob(
+            f"chunk-*/{video_key}/episode_{local_episode:06d}.mp4"
+        )
+    )
+    if not matches:
+        raise CalvinLeRobotMergeError(
+            f"Missing video for episode {local_episode}: "
+            f"{scene.root}/videos/chunk-*/{video_key}/episode_{local_episode:06d}.mp4"
+        )
+    return matches[0]
+
+
+def _copy_videos(scene: _SceneMeta, output_dir: Path, chunks_size: int) -> None:
+    for episode_row in scene.episodes:
+        local_episode = int(episode_row["episode_index"])
+        global_episode = scene.episode_index_to_global[local_episode]
+        chunk = _episode_chunk(global_episode, chunks_size)
+        for video_key in _video_feature_keys(scene.info):
+            src_path = _source_video_path(scene, video_key, local_episode)
+            dst_path = (
+                output_dir
+                / "videos"
+                / f"chunk-{chunk:03d}"
+                / video_key
+                / f"episode_{global_episode:06d}.mp4"
+            )
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_path, dst_path)
 
 
 def _copy_image_targets(scene: _SceneMeta, output_dir: Path) -> None:
     image_targets_dir = scene.root / "image_targets"
-    if not image_targets_dir.exists():
-        return
-
-    for local_episode, global_episode in scene.episode_index_to_global.items():
+    for episode_row in scene.episodes:
+        local_episode = int(episode_row["episode_index"])
+        global_episode = scene.episode_index_to_global[local_episode]
         src_path = image_targets_dir / f"{local_episode}.png"
         if not src_path.exists():
-            continue
+            raise CalvinLeRobotMergeError(
+                f"Missing image target for episode {local_episode}: {src_path}"
+            )
         dst_path = output_dir / "image_targets" / f"{global_episode}.png"
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_path, dst_path)
@@ -245,16 +308,19 @@ def _copy_image_targets(scene: _SceneMeta, output_dir: Path) -> None:
 
 def _copy_point_clouds(scene: _SceneMeta, output_dir: Path) -> None:
     point_clouds_dir = scene.root / "point_clouds"
-    if not point_clouds_dir.exists():
-        return
-
-    for local_episode, global_episode in scene.episode_index_to_global.items():
+    for episode_row in scene.episodes:
+        local_episode = int(episode_row["episode_index"])
+        global_episode = scene.episode_index_to_global[local_episode]
         src_dir = point_clouds_dir / str(local_episode)
-        if not src_dir.exists():
-            continue
         dst_dir = output_dir / "point_clouds" / str(global_episode)
         dst_dir.mkdir(parents=True, exist_ok=True)
-        for src_path in sorted(src_dir.glob("*.npy")):
+        for base_index in range(_episode_length(episode_row)):
+            src_path = src_dir / f"{base_index}.npy"
+            if not src_path.exists():
+                raise CalvinLeRobotMergeError(
+                    f"Missing point cloud for episode {local_episode}, "
+                    f"frame {base_index}: {src_path}"
+                )
             shutil.copy2(src_path, dst_dir / src_path.name)
 
 
@@ -280,6 +346,45 @@ def _read_scene_frames(scene: _SceneMeta) -> dict[int, list[pd.DataFrame]]:
                 frames_by_episode[local_episode].append(frame.copy())
 
     return frames_by_episode
+
+
+def _validate_scene_assets(scenes: Sequence[_SceneMeta]) -> None:
+    for scene in scenes:
+        frames_by_episode = _read_scene_frames(scene)
+        for episode_row in scene.episodes:
+            local_episode = int(episode_row["episode_index"])
+            expected_length = _episode_length(episode_row)
+
+            episode_frames = frames_by_episode.get(local_episode, [])
+            if not episode_frames:
+                raise CalvinLeRobotMergeError(
+                    f"Missing parquet rows for episode {local_episode} in {scene.root}"
+                )
+            frame_count = sum(len(frame) for frame in episode_frames)
+            if frame_count != expected_length:
+                raise CalvinLeRobotMergeError(
+                    f"Episode {local_episode} in {scene.root} has {frame_count} "
+                    f"parquet rows, expected {expected_length}"
+                )
+
+            for video_key in _video_feature_keys(scene.info):
+                _source_video_path(scene, video_key, local_episode)
+
+            image_target = scene.root / "image_targets" / f"{local_episode}.png"
+            if not image_target.exists():
+                raise CalvinLeRobotMergeError(
+                    f"Missing image target for episode {local_episode}: "
+                    f"{image_target}"
+                )
+
+            point_cloud_dir = scene.root / "point_clouds" / str(local_episode)
+            for base_index in range(expected_length):
+                point_cloud = point_cloud_dir / f"{base_index}.npy"
+                if not point_cloud.exists():
+                    raise CalvinLeRobotMergeError(
+                        f"Missing point cloud for episode {local_episode}, "
+                        f"frame {base_index}: {point_cloud}"
+                    )
 
 
 def _map_task_index(value: object, task_index_to_global: dict[int, int]) -> int:
@@ -327,10 +432,18 @@ def _rewrite_parquet_files(
         local_episode = int(episode_row["episode_index"])
         global_episode = scene.episode_index_to_global[local_episode]
         episode_frames = frames_by_episode.get(local_episode, [])
-        if episode_frames:
-            frame = pd.concat(episode_frames, ignore_index=True)
-        else:
-            frame = pd.DataFrame()
+        if not episode_frames:
+            raise CalvinLeRobotMergeError(
+                f"Missing parquet rows for episode {local_episode} in {scene.root}"
+            )
+
+        frame = pd.concat(episode_frames, ignore_index=True)
+        expected_length = _episode_length(episode_row)
+        if len(frame) != expected_length:
+            raise CalvinLeRobotMergeError(
+                f"Episode {local_episode} in {scene.root} has {len(frame)} "
+                f"parquet rows, expected {expected_length}"
+            )
 
         frame = _rewrite_episode_frame(
             frame,
@@ -433,6 +546,7 @@ def merge_lerobot_scene_outputs(
         raise ValueError("merge_lerobot_scene_outputs requires at least one scene dir.")
 
     output_path = Path(output_dir)
+    _check_output_does_not_overlap_sources(scene_paths, output_path)
     if output_path.exists() and not overwrite:
         raise ExistingOutputError(
             f"Output directory already exists: {output_path}. "
@@ -440,8 +554,10 @@ def merge_lerobot_scene_outputs(
         )
 
     scenes, global_tasks = _collect_scene_meta(scene_paths)
+    _validate_matching_info_fields(scenes)
     _validate_matching_file(scene_paths, Path("camera_params.json"))
     _validate_matching_file(scene_paths, Path("meta") / "modality.json")
+    _validate_scene_assets(scenes)
 
     _prepare_output_dir(output_path, overwrite)
     _copy_validated_file(scene_paths, output_path, Path("camera_params.json"))

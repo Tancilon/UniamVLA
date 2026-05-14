@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from tools.preprocess.calvin_lerobot_merger import (
+    CalvinLeRobotMergeError,
     ExistingOutputError,
     SceneDatasetMismatchError,
     merge_lerobot_scene_outputs,
@@ -348,6 +349,157 @@ def test_merge_rejects_mismatched_camera_params(tmp_path: Path) -> None:
         episode_lengths=[1],
         camera_params={"static": 2},
     )
+
+    with pytest.raises(SceneDatasetMismatchError):
+        merge_lerobot_scene_outputs(
+            [scene_a, scene_b],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_output_that_overlaps_scene_input(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            scene_a,
+            overwrite=True,
+            skip_stats=True,
+        )
+
+    assert (scene_a / "meta" / "info.json").exists()
+
+
+def test_merge_rejects_missing_episode_parquet(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1, 1],
+    )
+    (scene_a / "data" / "chunk-000" / "episode_000001.parquet").unlink()
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_parquet_row_count_mismatch(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[2],
+    )
+    parquet_path = scene_a / "data" / "chunk-000" / "episode_000000.parquet"
+    pd.read_parquet(parquet_path).iloc[:1].to_parquet(parquet_path)
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_missing_video(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    (
+        scene_a
+        / "videos"
+        / "chunk-000"
+        / "video.primary_image"
+        / "episode_000000.mp4"
+    ).unlink()
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_missing_image_target(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    (scene_a / "image_targets" / "0.png").unlink()
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_missing_point_cloud(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[2],
+    )
+    (scene_a / "point_clouds" / "0" / "1.npy").unlink()
+
+    with pytest.raises(CalvinLeRobotMergeError):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            tmp_path / "merged",
+            overwrite=False,
+            skip_stats=True,
+        )
+
+
+def test_merge_rejects_mismatched_info_schema(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    scene_b = _write_scene_dataset(
+        tmp_path,
+        "B",
+        episode_start=10,
+        task_names=["close drawer"],
+        episode_lengths=[1],
+    )
+    info_path = scene_b / "meta" / "info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["fps"] = 30
+    _write_json(info_path, info)
 
     with pytest.raises(SceneDatasetMismatchError):
         merge_lerobot_scene_outputs(
