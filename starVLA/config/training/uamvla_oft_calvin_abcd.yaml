@@ -39,7 +39,7 @@ framework:
       sampling_steps: 500
     future:
       enabled: false
-      loss_weight: 0.1
+      loss_weight: 1.0
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
@@ -47,7 +47,7 @@ framework:
       repeat_factor: 4
     recon:
       enabled: true
-      loss_weight: 0.1
+      loss_weight: 1.0
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
