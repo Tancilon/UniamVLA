@@ -29,13 +29,11 @@ wipe them after a successful merge.
 from __future__ import annotations
 
 import argparse
-import inspect
 import logging
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
 
 # Make project root importable for direct module use.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -62,6 +60,7 @@ def _run_preprocessor(
         str(Path(__file__).resolve().parent / "preprocess_calvin.py"),
         "--input_dir", str(scene_input_dir),
         "--output_dir", str(scene_output_dir),
+        "--dataset_source", f"calvin_scene_{scene}",
         "--num_workers", str(args.num_workers),
         "--default_scene", scene,
         "--on_resolve_failure", args.on_resolve_failure,
@@ -113,24 +112,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _split_calvin_by_scene_compat(
+def _path_is_or_contains(parent: Path, candidate: Path) -> bool:
+    parent_resolved = parent.resolve(strict=False)
+    candidate_resolved = candidate.resolve(strict=False)
+    return (
+        candidate_resolved == parent_resolved
+        or candidate_resolved.is_relative_to(parent_resolved)
+    )
+
+
+def _guard_output_path(
     *,
-    input_dir: Path,
     output_dir: Path,
-    scenes: Sequence[str],
-    scene_config_dir: Path | None,
-) -> dict[str, Path]:
-    kwargs: dict[str, object] = {
-        "input_dir": input_dir,
-        "output_dir": output_dir,
-        "scenes": scenes,
-    }
-    splitter_params = inspect.signature(split_calvin_by_scene).parameters
-    if "overwrite" in splitter_params:
-        kwargs["overwrite"] = True
-    if scene_config_dir is not None and "scene_config_dir" in splitter_params:
-        kwargs["scene_config_dir"] = scene_config_dir
-    return split_calvin_by_scene(**kwargs)
+    work_dir: Path,
+    split_root: Path,
+    preprocessed_root: Path,
+    clean_work: bool,
+) -> None:
+    if _path_is_or_contains(split_root, output_dir):
+        raise SystemExit(
+            f"output_dir must not be inside the split work area: "
+            f"output_dir={output_dir}, split_dir={split_root}"
+        )
+    if _path_is_or_contains(preprocessed_root, output_dir):
+        raise SystemExit(
+            f"output_dir must not be inside the preprocessed work area: "
+            f"output_dir={output_dir}, preprocessed_dir={preprocessed_root}"
+        )
+    if clean_work and _path_is_or_contains(work_dir, output_dir):
+        raise SystemExit(
+            f"output_dir must not be inside work_dir when --clean_work is set: "
+            f"output_dir={output_dir}, work_dir={work_dir}"
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -140,6 +153,16 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parse_args(argv)
     scenes = [s.strip().upper() for s in args.scenes.split(",") if s.strip()]
+    split_root = args.work_dir / "split"
+    preprocessed_root = args.work_dir / "preprocessed"
+
+    _guard_output_path(
+        output_dir=args.output_dir,
+        work_dir=args.work_dir,
+        split_root=split_root,
+        preprocessed_root=preprocessed_root,
+        clean_work=args.clean_work,
+    )
 
     if args.output_dir.exists() and not args.overwrite:
         raise SystemExit(
@@ -147,13 +170,14 @@ def main(argv: list[str] | None = None) -> None:
             "Pass --overwrite to replace it."
         )
 
-    split_root = args.work_dir / "split"
-    preprocessed_root = args.work_dir / "preprocessed"
+    if split_root.exists():
+        logger.info("Cleaning stale split work dir: %s", split_root)
+        shutil.rmtree(split_root)
     split_root.mkdir(parents=True, exist_ok=True)
     preprocessed_root.mkdir(parents=True, exist_ok=True)
 
     # 1) split
-    scene_inputs = _split_calvin_by_scene_compat(
+    scene_inputs = split_calvin_by_scene(
         input_dir=args.input_dir,
         output_dir=split_root,
         scenes=scenes,
