@@ -38,35 +38,38 @@ def _write_scene_dataset(
 
     total_frames = sum(episode_lengths)
     episode_rows = []
-    frame_rows = []
     frame_cursor = 0
     for local_episode, length in enumerate(episode_lengths):
+        local_episode_id = episode_start + local_episode
         task_index = local_episode % len(task_names)
         episode_rows.append(
             {
-                "episode_index": episode_start + local_episode,
+                "episode_index": local_episode_id,
                 "tasks": [task_names[task_index]],
                 "length": length,
             }
         )
-        for offset in range(length):
-            frame_rows.append(
-                {
-                    "episode_index": episode_start + local_episode,
-                    "frame_index": frame_cursor + offset,
-                    "timestamp": float(offset) / 30.0,
-                    "task_index": task_index,
-                    "index": frame_cursor + offset,
-                    "action": [float(offset), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                }
-            )
+        frame_rows = [
+            {
+                "episode_index": local_episode_id,
+                "trajectory_id": local_episode_id,
+                "frame_index": frame_cursor + offset,
+                "base_index": offset,
+                "timestamp": float(offset) / 30.0,
+                "task_index": task_index,
+                "index": frame_cursor + offset,
+                "action": [float(offset), 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            }
+            for offset in range(length)
+        ]
+        data_dir = scene_root / "data" / "chunk-000"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(frame_rows).to_parquet(
+            data_dir / f"episode_{local_episode_id:06d}.parquet"
+        )
         frame_cursor += length
 
-    data_dir = scene_root / "data" / "chunk-000"
-    data_dir.mkdir(parents=True)
-    pd.DataFrame(frame_rows).to_parquet(data_dir / "episode_000000.parquet")
-
-    for video_key in ("primary_image", "wrist_image"):
+    for video_key in ("video.primary_image", "video.wrist_image"):
         video_dir = scene_root / "videos" / "chunk-000" / video_key
         video_dir.mkdir(parents=True)
         for row in episode_rows:
@@ -86,8 +89,8 @@ def _write_scene_dataset(
             "splits": {"train": f"0:{len(episode_lengths)}"},
             "fps": 30,
             "features": {
-                "observation.images.primary": {"dtype": "video"},
-                "observation.images.wrist": {"dtype": "video"},
+                "video.primary_image": {"dtype": "video"},
+                "video.wrist_image": {"dtype": "video"},
             },
         },
     )
@@ -161,16 +164,33 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
     ]
 
     parquet_paths = sorted((out_dir / "data").glob("*/*.parquet"))
-    assert len(parquet_paths) == 2
+    assert [path.name for path in parquet_paths] == [
+        "episode_000000.parquet",
+        "episode_000001.parquet",
+        "episode_000002.parquet",
+        "episode_000003.parquet",
+    ]
     frames = pd.concat(pd.read_parquet(path) for path in parquet_paths)
     assert sorted(frames["episode_index"].unique().tolist()) == [0, 1, 2, 3]
     assert sorted(frames["task_index"].unique().tolist()) == [0, 1, 2]
     assert frames["index"].tolist() == list(range(8))
+    assert [
+        frame["trajectory_id"].unique().tolist()
+        for _, frame in frames.groupby("episode_index", sort=True)
+    ] == [[0], [1], [2], [3]]
+    assert [
+        frame["base_index"].tolist()
+        for _, frame in frames.groupby("episode_index", sort=True)
+    ] == [[0, 1], [0, 1, 2], [0], [0, 1]]
 
     videos = sorted((out_dir / "videos").glob("*/*/*.mp4"))
     assert len(videos) == 8
     assert (
-        out_dir / "videos" / "chunk-000" / "primary_image" / "episode_000003.mp4"
+        out_dir
+        / "videos"
+        / "chunk-000"
+        / "video.primary_image"
+        / "episode_000003.mp4"
     ).exists()
     assert json.loads((out_dir / "camera_params.json").read_text()) == {"static": 1}
 
