@@ -14,6 +14,7 @@ Spec: ``docs/superpowers/specs/2026-05-13-uamvla-on-qwenoft-design.md`` §5
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import List
@@ -38,6 +39,11 @@ from starVLA.model.tools import FRAMEWORK_REGISTRY
 # are non-universal (image_target / image_future / pose_gt / point_cloud
 # may be missing on some samples).
 _UNIVERSAL_HEADS: tuple[str, ...] = ()
+
+_DEFAULT_LEROBOT_VIDEO_PATH_PATTERN = (
+    "videos/chunk-000/{video_key}/episode_{episode_index:06d}.mp4"
+)
+_DEFAULT_LEROBOT_CHUNKS_SIZE = 1_000_000_000
 
 
 def _move_to_device(value, device):
@@ -87,6 +93,7 @@ class UamVLAOFT(Qwenvl_OFT):
         mixture = DATASET_NAMED_MIXTURES[self.config.datasets.vla_data.data_mix]
         dataset_name = mixture[0][0] # name: lerobot_calvin_abcd
         self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
+        self._init_lerobot_video_path_config()
 
         # Per-trajectory image_target cache (single PNG per traj on disk).
         # OrderedDict + LRU eviction so worker RAM stays bounded on full-scale
@@ -365,6 +372,43 @@ class UamVLAOFT(Qwenvl_OFT):
     # ──────────────────────────────────────────────────────────────────
     #  image_future loader (decord random seek)
     # ──────────────────────────────────────────────────────────────────
+    def _init_lerobot_video_path_config(self) -> None:
+        """Cache LeRobot video path metadata for sidecar future-frame IO."""
+        self._lerobot_video_path_pattern = _DEFAULT_LEROBOT_VIDEO_PATH_PATTERN
+        self._lerobot_chunks_size = _DEFAULT_LEROBOT_CHUNKS_SIZE
+
+        info_path = self.sidecar_root / "meta" / "info.json"
+        if not info_path.exists():
+            logger.warning(
+                "LeRobot info metadata not found at %s; falling back to "
+                "legacy chunk-000 video path lookup for image_future.",
+                info_path,
+            )
+            return
+
+        with open(info_path, "r") as f:
+            info = json.load(f)
+
+        chunks_size = int(info.get("chunks_size", _DEFAULT_LEROBOT_CHUNKS_SIZE))
+        if chunks_size <= 0:
+            raise ValueError(
+                f"Invalid chunks_size in {info_path}: {chunks_size!r}"
+            )
+
+        self._lerobot_chunks_size = chunks_size
+        self._lerobot_video_path_pattern = str(
+            info.get("video_path", _DEFAULT_LEROBOT_VIDEO_PATH_PATTERN)
+        )
+
+    def _image_future_video_path(self, trajectory_id: int) -> Path:
+        episode_chunk = int(trajectory_id) // self._lerobot_chunks_size
+        video_filename = self._lerobot_video_path_pattern.format(
+            episode_chunk=episode_chunk,
+            episode_index=int(trajectory_id),
+            video_key="video.primary_image",
+        )
+        return self.sidecar_root / video_filename
+
     def _load_image_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
         """Read t=base_index + H - 1 frame from primary video.
 
@@ -374,10 +418,7 @@ class UamVLAOFT(Qwenvl_OFT):
         padding behavior.
         """
         future_idx = base_index + self.action_horizon - 1
-        video_path = (
-            self.sidecar_root / "videos" / "chunk-000" /
-            "video.primary_image" / f"episode_{trajectory_id:06d}.mp4"
-        )
+        video_path = self._image_future_video_path(trajectory_id)
         if not video_path.exists():
             return None
         try:
