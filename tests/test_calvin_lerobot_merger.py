@@ -299,6 +299,202 @@ def test_merge_deduplicates_tasks_first_seen(tmp_path: Path) -> None:
     assert task_ids_by_episode == [[0], [0], [1]]
 
 
+def test_merge_generates_stats_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    out_dir = tmp_path / "merged"
+    calls = []
+
+    def fake_compute_lerobot_stats(
+        dataset_dir: Path,
+        *,
+        robot_type: str,
+        action_mode: str,
+    ) -> None:
+        calls.append((dataset_dir, robot_type, action_mode))
+        _write_json(dataset_dir / "meta" / "stats_gr00t.json", {"marker": "stats"})
+
+    monkeypatch.setattr(
+        "tools.preprocess.calvin_lerobot_merger.compute_lerobot_stats",
+        fake_compute_lerobot_stats,
+    )
+
+    merge_lerobot_scene_outputs(
+        [scene_a],
+        out_dir,
+        overwrite=False,
+        skip_stats=False,
+        robot_type="uamvla_calvin_franka",
+        action_mode="delta",
+    )
+
+    assert calls == [(out_dir, "uamvla_calvin_franka", "delta")]
+    assert json.loads((out_dir / "meta" / "stats_gr00t.json").read_text()) == {
+        "marker": "stats"
+    }
+
+
+def test_merge_skip_stats_does_not_generate_stats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=0,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    out_dir = tmp_path / "merged"
+    calls = []
+
+    def fake_compute_lerobot_stats(
+        dataset_dir: Path,
+        *,
+        robot_type: str,
+        action_mode: str,
+    ) -> None:
+        calls.append((dataset_dir, robot_type, action_mode))
+        _write_json(dataset_dir / "meta" / "stats_gr00t.json", {"marker": "stats"})
+
+    monkeypatch.setattr(
+        "tools.preprocess.calvin_lerobot_merger.compute_lerobot_stats",
+        fake_compute_lerobot_stats,
+    )
+
+    merge_lerobot_scene_outputs(
+        [scene_a],
+        out_dir,
+        overwrite=False,
+        skip_stats=True,
+        robot_type="uamvla_calvin_franka",
+        action_mode="delta",
+    )
+
+    assert calls == []
+    assert not (out_dir / "meta" / "stats_gr00t.json").exists()
+
+
+def test_cli_parses_skip_stats_and_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.preprocess.calvin_lerobot_merger import main
+
+    scene_a = tmp_path / "lerobot_calvin_A"
+    out_dir = tmp_path / "merged"
+    calls = []
+
+    def fake_merge_lerobot_scene_outputs(
+        scene_dirs: list[Path],
+        output_dir: Path,
+        *,
+        overwrite: bool,
+        skip_stats: bool,
+        robot_type: str,
+        action_mode: str,
+    ) -> None:
+        calls.append(
+            {
+                "scene_dirs": scene_dirs,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "skip_stats": skip_stats,
+                "robot_type": robot_type,
+                "action_mode": action_mode,
+            }
+        )
+
+    monkeypatch.setattr(
+        "tools.preprocess.calvin_lerobot_merger.merge_lerobot_scene_outputs",
+        fake_merge_lerobot_scene_outputs,
+    )
+
+    main(
+        [
+            "--scene-dir",
+            str(scene_a),
+            "--output-dir",
+            str(out_dir),
+            "--overwrite",
+            "--skip-stats",
+            "--robot-type",
+            "uamvla_calvin_franka",
+            "--action-mode",
+            "delta",
+        ]
+    )
+
+    assert calls == [
+        {
+            "scene_dirs": [scene_a],
+            "output_dir": out_dir,
+            "overwrite": True,
+            "skip_stats": True,
+            "robot_type": "uamvla_calvin_franka",
+            "action_mode": "delta",
+        }
+    ]
+
+
+def test_cli_accepts_multiple_scene_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.preprocess.calvin_lerobot_merger import main
+
+    scene_a = tmp_path / "lerobot_calvin_A"
+    scene_b = tmp_path / "lerobot_calvin_B"
+    out_dir = tmp_path / "merged"
+    calls = []
+
+    def fake_merge_lerobot_scene_outputs(
+        scene_dirs: list[Path],
+        output_dir: Path,
+        *,
+        overwrite: bool,
+        skip_stats: bool,
+        robot_type: str,
+        action_mode: str,
+    ) -> None:
+        calls.append((scene_dirs, output_dir, overwrite, skip_stats, robot_type, action_mode))
+
+    monkeypatch.setattr(
+        "tools.preprocess.calvin_lerobot_merger.merge_lerobot_scene_outputs",
+        fake_merge_lerobot_scene_outputs,
+    )
+
+    main(
+        [
+            "--scene-dir",
+            str(scene_a),
+            "--scene-dir",
+            str(scene_b),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert calls == [
+        (
+            [scene_a, scene_b],
+            out_dir,
+            False,
+            False,
+            "uamvla_calvin_franka",
+            "abs",
+        )
+    ]
+
+
 def test_merge_rejects_existing_output_without_overwrite(tmp_path: Path) -> None:
     scene_a = _write_scene_dataset(
         tmp_path,

@@ -1,6 +1,7 @@
 """Merge per-scene CALVIN LeRobot outputs into one dataset directory."""
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 from dataclasses import dataclass
@@ -521,13 +522,39 @@ def compute_lerobot_stats(
         ROBOT_TYPE_TO_EMBODIMENT_TAG,
     )
 
+    if robot_type not in ROBOT_TYPE_CONFIG_MAP:
+        raise CalvinLeRobotMergeError(
+            f"Unknown robot_type {robot_type!r}; not found in ROBOT_TYPE_CONFIG_MAP."
+        )
+    if robot_type not in ROBOT_TYPE_TO_EMBODIMENT_TAG:
+        raise CalvinLeRobotMergeError(
+            f"Unknown robot_type {robot_type!r}; not found in "
+            "ROBOT_TYPE_TO_EMBODIMENT_TAG."
+        )
+
+    normalized_action_mode = str(action_mode).lower()
+    action_mode_aliases = {
+        "absolute": "abs",
+        "delta_qpos": "delta",
+        "relative": "rel",
+    }
+    normalized_action_mode = action_mode_aliases.get(
+        normalized_action_mode,
+        normalized_action_mode,
+    )
+    if normalized_action_mode not in {"abs", "delta", "rel"}:
+        raise CalvinLeRobotMergeError(
+            f"Unsupported action_mode {action_mode!r}; expected one of "
+            "'abs', 'absolute', 'delta', 'delta_qpos', 'relative', or 'rel'."
+        )
+
     data_config = ROBOT_TYPE_CONFIG_MAP[robot_type]
     LeRobotSingleDataset(
         dataset_path=dataset_dir,
         modality_configs=data_config.modality_config(),
         embodiment_tag=ROBOT_TYPE_TO_EMBODIMENT_TAG[robot_type],
         transforms=data_config.transform(),
-        data_cfg={"action_mode": action_mode},
+        data_cfg={"action_mode": normalized_action_mode},
     )
 
 
@@ -609,3 +636,59 @@ def merge_lerobot_scene_outputs(
         total_frames=total_frames,
         total_tasks=total_tasks,
     )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Merge per-scene CALVIN LeRobot outputs into one dataset.",
+    )
+    parser.add_argument(
+        "--scene-dir",
+        action="append",
+        required=True,
+        type=Path,
+        help="Input scene dataset directory. Repeat for multiple scenes.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        help="Output dataset directory.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace the output directory if it already exists.",
+    )
+    parser.add_argument(
+        "--skip-stats",
+        action="store_true",
+        help="Skip GR00T/LeRobot stats generation after merging.",
+    )
+    parser.add_argument(
+        "--robot-type",
+        default="uamvla_calvin_franka",
+        help="Robot type key used for merged metadata and stats.",
+    )
+    parser.add_argument(
+        "--action-mode",
+        default="abs",
+        help="Action stats mode: abs, absolute, delta, delta_qpos, relative, or rel.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+    merge_lerobot_scene_outputs(
+        args.scene_dir,
+        args.output_dir,
+        overwrite=args.overwrite,
+        skip_stats=args.skip_stats,
+        robot_type=args.robot_type,
+        action_mode=args.action_mode,
+    )
+
+
+if __name__ == "__main__":
+    main()
