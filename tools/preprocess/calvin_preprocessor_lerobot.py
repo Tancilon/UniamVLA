@@ -5,9 +5,9 @@ Replaces the JSONL writer in :mod:`tools.preprocess.calvin_preprocessor`.
 Output layout (spec §4.3):
 
     <output_dir>/
-    ├── data/chunk-000/episode_NNNNNN.parquet
-    ├── videos/chunk-000/video.primary_image/episode_NNNNNN.mp4
-    ├── videos/chunk-000/video.wrist_image/episode_NNNNNN.mp4
+    ├── data/chunk-XXX/episode_NNNNNN.parquet
+    ├── videos/chunk-XXX/video.primary_image/episode_NNNNNN.mp4
+    ├── videos/chunk-XXX/video.wrist_image/episode_NNNNNN.mp4
     ├── image_targets/<trajectory_id>.png
     ├── point_clouds/<trajectory_id>/<base_index>.npy
     ├── camera_params.json
@@ -215,6 +215,7 @@ def _load_scene_obs(input_dir: Path, frame: int) -> np.ndarray:
 
 # LeRobot v2 video / state defaults — agentview RGB-only, 256x256, 15 Hz.
 FPS = 15
+LEROBOT_CHUNK_SIZE = 1000
 ACTION_DIM = FRANKA_ACTION_DIM  # 7
 ROBOT_OBS_DIM = 15
 TARGET_POSE_ROT6D_DIM = 6
@@ -672,7 +673,8 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         self, episode_samples: list[dict],
         output_dir: Path, episode_index: int,
     ) -> None:
-        chunk_dir = output_dir / "data" / "chunk-000"
+        episode_chunk = episode_index // LEROBOT_CHUNK_SIZE
+        chunk_dir = output_dir / "data" / f"chunk-{episode_chunk:03d}"
         chunk_dir.mkdir(parents=True, exist_ok=True)
         parquet_path = chunk_dir / f"episode_{episode_index:06d}.parquet"
         table = pa.Table.from_pylist(episode_samples)
@@ -682,7 +684,8 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         self, primary_frames: list, wrist_frames: list,
         output_dir: Path, episode_index: int, fps: int = FPS,
     ) -> None:
-        video_dir = output_dir / "videos" / "chunk-000"
+        episode_chunk = episode_index // LEROBOT_CHUNK_SIZE
+        video_dir = output_dir / "videos" / f"chunk-{episode_chunk:03d}"
         primary_dir = video_dir / "video.primary_image"
         wrist_dir = video_dir / "video.wrist_image"
         primary_dir.mkdir(parents=True, exist_ok=True)
@@ -770,10 +773,6 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     "length": int(episode_lengths[ep_idx]),
                 }) + "\n")
 
-        # Episode parquet/video writers intentionally keep all emitted files in
-        # chunk-000. Keep LeRobot's chunk resolver aligned with that flat layout.
-        flat_chunk_size = max(int(n_episodes), 1)
-
         info = {
             "codebase_version": "v2.0",
             "robot_type": EMBODIMENT,
@@ -784,7 +783,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             "splits": {"train": f"0:{n_episodes}"},
             "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
             "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-            "chunks_size": flat_chunk_size,
+            "chunks_size": LEROBOT_CHUNK_SIZE,
             "features": {
                 "video.primary_image": {
                     "dtype": "video",

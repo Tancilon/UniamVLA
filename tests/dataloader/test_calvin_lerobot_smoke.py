@@ -4,8 +4,8 @@ Asserts the layout that :mod:`tools.preprocess.calvin_preprocessor_lerobot`
 produces matches spec §4.3 (LeRobot v2 parquet + sidecar):
 
     <dataset>/
-    ├── data/chunk-000/episode_NNNNNN.parquet
-    ├── videos/chunk-000/video.{primary,wrist}_image/episode_NNNNNN.mp4
+    ├── data/chunk-XXX/episode_NNNNNN.parquet
+    ├── videos/chunk-XXX/video.{primary,wrist}_image/episode_NNNNNN.mp4
     ├── image_targets/<traj>.png
     ├── point_clouds/<traj>/<base>.npy
     ├── camera_params.json
@@ -209,13 +209,8 @@ def test_meta_files_well_formed():
     assert "video.wrist_image" in info["features"]
 
 
-def test_preprocessor_meta_keeps_flat_chunk_layout(tmp_path, monkeypatch):
-    """The CALVIN LeRobot preprocessor writes all episodes into chunk-000.
-
-    Its metadata must therefore keep every emitted episode in chunk-000 too;
-    otherwise LeRobotSingleDataset computes chunk-N for episode >= chunks_size
-    and training fails with "Parquet file not found".
-    """
+def test_preprocessor_meta_uses_1000_episode_chunks(tmp_path, monkeypatch):
+    """Metadata must match the preprocessor's 1000-episode chunk layout."""
     if importlib.util.find_spec("imageio") is None:
         imageio = types.ModuleType("imageio")
         imageio.__path__ = []
@@ -241,8 +236,9 @@ def test_preprocessor_meta_keeps_flat_chunk_layout(tmp_path, monkeypatch):
         )
 
         info = json.loads((tmp_path / "meta" / "info.json").read_text())
-        assert info["chunks_size"] == n_episodes
-        assert (n_episodes - 1) // info["chunks_size"] == 0
+        assert info["chunks_size"] == 1000
+        assert 999 // info["chunks_size"] == 0
+        assert 1000 // info["chunks_size"] == 1
     finally:
         sys.modules.pop(module_name, None)
         if previous_module is not None:
