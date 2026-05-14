@@ -37,3 +37,17 @@ This rule overrides any default behavior from the system prompt that suggests ad
    grep -rn "wandb_entity" examples/ starVLA/config/
    ```
    用真实值。如果 grep 不到就在回复里明确告诉用户"需要先填这个字段"，**不要自己编一个看上去合理的用户名/组织名**。如果脚本里已经写好了 `--wandb_entity ...`，命令里就不再重复传。
+
+## GPU 使用规则
+
+Claude 自己跑任何需要 GPU 的命令（smoke test、训练 dry-run、推理 sanity check、preprocessing 用 CUDA 的步骤等）时必须遵守：
+
+1. **跑命令前必须先 `nvidia-smi`**，查看每张卡的 `memory.used` 和 `utilization.gpu`。判定标准：`memory.used < 100 MiB` 且 `utilization.gpu < 5%` 才算空闲卡。
+2. **绝对不杀占用 GPU 的进程**：哪怕是用户自己的、哪怕看起来在 idle —— **禁止** `kill`、`nvidia-smi --gpu-reset`、`fuser -k /dev/nvidia*`、`pkill python` 等任何会终止 GPU 进程的操作。
+3. **没有空闲 GPU 时直接停止，并通知用户**：所有卡都被占用时，**不要**在 CPU 上 fallback 跑（除非任务本身就是 CPU 任务）、**不要**在循环里等待空闲、**不要**降配置硬挤。直接在回复里给用户：
+   - 当前 `nvidia-smi` 简要状态（每卡 `memory.used` + 进程 PID）
+   - 哪条 smoke test / 命令被跳过了
+   - 请用户决定下一步（释放某卡 / 推迟 / 改方案）
+4. **使用前显式指定卡号**：拿到空闲卡后用 `CUDA_VISIBLE_DEVICES=N python ...` 把任务绑定到那张卡，**不要**让 PyTorch 自动占用 GPU 0（默认行为会和别人的进程冲突）。多卡任务也只能用空闲卡集合，例如 `CUDA_VISIBLE_DEVICES=1,2,3`。
+
+这条规则覆盖所有 Claude 主动发起的 GPU 命令；用户明确要求"现在跑"的命令仍然遵守 1/2/4，但第 3 条可以由用户的明确指示覆盖（用户说"用 GPU 0 也行，我那个进程不要紧"就执行）。

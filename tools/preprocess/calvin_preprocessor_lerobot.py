@@ -770,6 +770,10 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     "length": int(episode_lengths[ep_idx]),
                 }) + "\n")
 
+        # Episode parquet/video writers intentionally keep all emitted files in
+        # chunk-000. Keep LeRobot's chunk resolver aligned with that flat layout.
+        flat_chunk_size = max(int(n_episodes), 1)
+
         info = {
             "codebase_version": "v2.0",
             "robot_type": EMBODIMENT,
@@ -780,7 +784,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             "splits": {"train": f"0:{n_episodes}"},
             "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
             "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-            "chunks_size": 1000,
+            "chunks_size": flat_chunk_size,
             "features": {
                 "video.primary_image": {
                     "dtype": "video",

@@ -85,7 +85,7 @@ class UamVLAOFT(Qwenvl_OFT):
         # full ABCD).
         from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
         mixture = DATASET_NAMED_MIXTURES[self.config.datasets.vla_data.data_mix]
-        dataset_name = mixture[0][0]
+        dataset_name = mixture[0][0] # name: lerobot_calvin_abcd
         self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
 
         # Per-trajectory image_target cache (single PNG per traj on disk).

@@ -199,8 +199,10 @@ class ReconHead(AuxHead):
         return results
 
     def _normalize_for_vae(self, images: torch.Tensor) -> torch.Tensor:
+        image_std = self.image_std.to(device=images.device, dtype=images.dtype)
+        image_mean = self.image_mean.to(device=images.device, dtype=images.dtype)
         images_vae = (
-            (images * self.image_std + self.image_mean - 0.5) / 0.5
+            (images * image_std + image_mean - 0.5) / 0.5
         ).clamp(-1.0, 1.0)
         return images_vae
 

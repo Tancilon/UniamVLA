@@ -254,3 +254,4 @@ logs/*
 **/.nf*
 code
 datasets/
+ckpt/

@@ -17,7 +17,10 @@ playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE`` to populate it.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -204,3 +207,43 @@ def test_meta_files_well_formed():
     assert info["fps"] == 15
     assert "video.primary_image" in info["features"]
     assert "video.wrist_image" in info["features"]
+
+
+def test_preprocessor_meta_keeps_flat_chunk_layout(tmp_path, monkeypatch):
+    """The CALVIN LeRobot preprocessor writes all episodes into chunk-000.
+
+    Its metadata must therefore keep every emitted episode in chunk-000 too;
+    otherwise LeRobotSingleDataset computes chunk-N for episode >= chunks_size
+    and training fails with "Parquet file not found".
+    """
+    if importlib.util.find_spec("imageio") is None:
+        imageio = types.ModuleType("imageio")
+        imageio.__path__ = []
+        imageio_v3 = types.ModuleType("imageio.v3")
+        imageio.v3 = imageio_v3
+        monkeypatch.setitem(sys.modules, "imageio", imageio)
+        monkeypatch.setitem(sys.modules, "imageio.v3", imageio_v3)
+
+    module_name = "tools.preprocess.calvin_preprocessor_lerobot"
+    previous_module = sys.modules.pop(module_name, None)
+    try:
+        from tools.preprocess.calvin_preprocessor_lerobot import CalvinPreprocessorLeRobot
+
+        preprocessor = CalvinPreprocessorLeRobot(default_scene="D")
+        n_episodes = 19912
+        preprocessor._emit_meta(
+            output_dir=tmp_path,
+            n_episodes=n_episodes,
+            n_total_frames=1192122,
+            tasks_seen=["move the door all the way to the right"],
+            episode_index_to_task={0: 0, n_episodes - 1: 0},
+            episode_lengths={0: 65, n_episodes - 1: 41},
+        )
+
+        info = json.loads((tmp_path / "meta" / "info.json").read_text())
+        assert info["chunks_size"] == n_episodes
+        assert (n_episodes - 1) // info["chunks_size"] == 0
+    finally:
+        sys.modules.pop(module_name, None)
+        if previous_module is not None:
+            sys.modules[module_name] = previous_module

@@ -19,11 +19,19 @@ export NCCL_TIMEOUT=10000
 export NCCL_SOCKET_TIMEOUT_MS=360000
 
 config_yaml=./starVLA/config/training/uamvla_oft_calvin_abcd.yaml
+# Caller can override:
+#   NUM_GPUS=4   bash run_uamvla_oft_train.sh   (4-GPU run, default 8)
+#   GRAD_ACCUM=4 bash run_uamvla_oft_train.sh   (effective_batch = per_device_batch × NUM_GPUS × GRAD_ACCUM)
 NUM_GPUS=${NUM_GPUS:-8}
+GRAD_ACCUM=${GRAD_ACCUM:-1}
+# DEEPSPEED_CONFIG: accelerate config file path; switch to deepspeed_zero3.yaml
+# when ZeRO-2 OOMs on the full-finetune (e.g. Qwen3-VL-8B trainable param set).
+DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG:-starVLA/config/deepseeds/deepspeed_zero2.yaml}
 
 accelerate launch \
-  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --config_file ${DEEPSPEED_CONFIG} \
   --num_processes ${NUM_GPUS} \
+  --gradient_accumulation_steps ${GRAD_ACCUM} \
   starVLA/training/train_starvla.py \
   --config_yaml ${config_yaml} \
   "$@"
