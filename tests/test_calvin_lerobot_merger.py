@@ -98,9 +98,8 @@ def _write_scene_dataset(
             "total_episodes": len(episode_lengths),
             "total_frames": total_frames,
             "total_tasks": len(task_names),
-            "total_videos": len(episode_lengths) * 2,
             "splits": {"train": f"0:{len(episode_lengths)}"},
-            "fps": 30,
+            "fps": 15,
             "chunks_size": 1000,
             "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
             "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
@@ -159,7 +158,6 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
     assert info["total_episodes"] == 4
     assert info["total_frames"] == 8
     assert info["total_tasks"] == 3
-    assert info["total_videos"] == 8
     assert info["splits"] == {"train": "0:4"}
     assert info["chunks_size"] == 1000
     assert (
@@ -172,6 +170,10 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
     )
     assert "video.primary_image" in info["features"]
     assert "video.wrist_image" in info["features"]
+    assert json.loads((out_dir / "meta" / "modality.json").read_text()) == {
+        "state": {},
+        "action": {},
+    }
 
     episodes = [
         json.loads(line)
