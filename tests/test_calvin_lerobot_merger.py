@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -67,6 +68,18 @@ def _write_scene_dataset(
         pd.DataFrame(frame_rows).to_parquet(
             data_dir / f"episode_{local_episode_id:06d}.parquet"
         )
+
+        image_target_dir = scene_root / "image_targets"
+        image_target_dir.mkdir(parents=True, exist_ok=True)
+        (image_target_dir / f"{local_episode_id}.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+        )
+
+        point_cloud_dir = scene_root / "point_clouds" / str(local_episode_id)
+        point_cloud_dir.mkdir(parents=True, exist_ok=True)
+        for offset in range(length):
+            np.save(point_cloud_dir / f"{offset}.npy", np.zeros((1, 3)))
+
         frame_cursor += length
 
     for video_key in ("video.primary_image", "video.wrist_image"):
@@ -88,6 +101,9 @@ def _write_scene_dataset(
             "total_videos": len(episode_lengths) * 2,
             "splits": {"train": f"0:{len(episode_lengths)}"},
             "fps": 30,
+            "chunks_size": 1000,
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
             "features": {
                 "video.primary_image": {"dtype": "video"},
                 "video.wrist_image": {"dtype": "video"},
@@ -145,6 +161,17 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
     assert info["total_tasks"] == 3
     assert info["total_videos"] == 8
     assert info["splits"] == {"train": "0:4"}
+    assert info["chunks_size"] == 1000
+    assert (
+        info["data_path"]
+        == "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+    )
+    assert (
+        info["video_path"]
+        == "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+    )
+    assert "video.primary_image" in info["features"]
+    assert "video.wrist_image" in info["features"]
 
     episodes = [
         json.loads(line)
@@ -161,6 +188,20 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
         {"task_index": 0, "task": "open drawer"},
         {"task_index": 1, "task": "close drawer"},
         {"task_index": 2, "task": "push block"},
+    ]
+
+    episodes_stats = [
+        json.loads(line)
+        for line in (out_dir / "meta" / "episodes_stats.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["episode_index"] for row in episodes_stats] == [0, 1, 2, 3]
+    assert [row["stats"] for row in episodes_stats] == [
+        {"action": {"mean": [0.0] * 7, "std": [1.0] * 7}},
+        {"action": {"mean": [0.0] * 7, "std": [1.0] * 7}},
+        {"action": {"mean": [0.0] * 7, "std": [1.0] * 7}},
+        {"action": {"mean": [0.0] * 7, "std": [1.0] * 7}},
     ]
 
     parquet_paths = sorted((out_dir / "data").glob("*/*.parquet"))
@@ -182,17 +223,77 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
         frame["base_index"].tolist()
         for _, frame in frames.groupby("episode_index", sort=True)
     ] == [[0, 1], [0, 1, 2], [0], [0, 1]]
+    assert [
+        frame["frame_index"].tolist()
+        for _, frame in frames.groupby("episode_index", sort=True)
+    ] == [[0, 1], [0, 1, 2], [0], [0, 1]]
 
     videos = sorted((out_dir / "videos").glob("*/*/*.mp4"))
-    assert len(videos) == 8
-    assert (
-        out_dir
-        / "videos"
-        / "chunk-000"
-        / "video.primary_image"
-        / "episode_000003.mp4"
-    ).exists()
+    assert [path.relative_to(out_dir).as_posix() for path in videos] == [
+        f"videos/chunk-000/{video_key}/episode_{episode_index:06d}.mp4"
+        for video_key in ("video.primary_image", "video.wrist_image")
+        for episode_index in range(4)
+    ]
+
+    image_targets = sorted((out_dir / "image_targets").glob("*.png"))
+    assert [path.name for path in image_targets] == ["0.png", "1.png", "2.png", "3.png"]
+
+    point_cloud_dirs = sorted((out_dir / "point_clouds").iterdir())
+    assert [path.name for path in point_cloud_dirs] == ["0", "1", "2", "3"]
+    point_cloud_files = [
+        [path.name for path in sorted(point_cloud_dir.glob("*.npy"))]
+        for point_cloud_dir in point_cloud_dirs
+    ]
+    assert point_cloud_files == [
+        ["0.npy", "1.npy"],
+        ["0.npy", "1.npy", "2.npy"],
+        ["0.npy"],
+        ["0.npy", "1.npy"],
+    ]
+
     assert json.loads((out_dir / "camera_params.json").read_text()) == {"static": 1}
+
+
+def test_merge_deduplicates_tasks_first_seen(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=10,
+        task_names=["open drawer"],
+        episode_lengths=[1],
+    )
+    scene_b = _write_scene_dataset(
+        tmp_path,
+        "B",
+        episode_start=50,
+        task_names=["open drawer", "push block"],
+        episode_lengths=[1, 1],
+    )
+    out_dir = tmp_path / "lerobot_calvin_ab"
+
+    merge_lerobot_scene_outputs(
+        [scene_a, scene_b],
+        out_dir,
+        overwrite=False,
+        skip_stats=True,
+    )
+
+    tasks = [
+        json.loads(line)
+        for line in (out_dir / "meta" / "tasks.jsonl").read_text().splitlines()
+    ]
+    assert tasks == [
+        {"task_index": 0, "task": "open drawer"},
+        {"task_index": 1, "task": "push block"},
+    ]
+
+    parquet_paths = sorted((out_dir / "data").glob("*/*.parquet"))
+    frames = pd.concat(pd.read_parquet(path) for path in parquet_paths)
+    task_ids_by_episode = [
+        frame["task_index"].unique().tolist()
+        for _, frame in frames.groupby("episode_index", sort=True)
+    ]
+    assert task_ids_by_episode == [[0], [0], [1]]
 
 
 def test_merge_rejects_existing_output_without_overwrite(tmp_path: Path) -> None:
