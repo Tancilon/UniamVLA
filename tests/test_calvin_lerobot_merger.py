@@ -260,6 +260,28 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
     assert json.loads((out_dir / "camera_params.json").read_text()) == {"static": 1}
 
 
+def test_merged_dataset_uses_lerobot_parquet_layout(tmp_path: Path) -> None:
+    scene_dirs = [
+        _write_scene_dataset(
+            tmp_path,
+            scene,
+            episode_start=100 * i,
+            task_names=[f"task {scene}"],
+            episode_lengths=[1],
+        )
+        for i, scene in enumerate(["A", "B", "C", "D"])
+    ]
+    out_dir = tmp_path / "merged"
+
+    merge_lerobot_scene_outputs(scene_dirs, out_dir, overwrite=False, skip_stats=True)
+
+    parquet_paths = sorted(out_dir.glob("data/*/*.parquet"))
+    assert len(parquet_paths) == 4
+    frames = pd.concat(pd.read_parquet(path) for path in parquet_paths)
+    assert frames["episode_index"].tolist() == [0, 1, 2, 3]
+    assert frames["index"].tolist() == [0, 1, 2, 3]
+
+
 def test_merge_deduplicates_tasks_first_seen(tmp_path: Path) -> None:
     scene_a = _write_scene_dataset(
         tmp_path,
