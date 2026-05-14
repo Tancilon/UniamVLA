@@ -1,59 +1,56 @@
-"""End-to-end driver: split a multi-scene CALVIN dir → preprocess each scene → merge.
+"""End-to-end driver: split a multi-scene CALVIN dir into LeRobot output.
 
-This wraps the three pieces required by Plan A from
-docs/superpowers/specs/.../calvin-preprocess-multiscene-design.md:
+This wraps the three pieces required to build one unified LeRobot dataset
+from a CALVIN multi-scene split:
 
     1. tools.preprocess.calvin_scene_splitter
        Build per-scene virtual single-scene splits (each with its own .hydra
        so calvin_env loads the right URDF).
 
     2. runners.preprocess_calvin
-       Run the existing UAM preprocessor once per virtual split. Each run
-       gets a unique --dataset_source so sample ids are globally unique.
+       Run the LeRobot preprocessor once per virtual split.
 
-    3. tools.preprocess.calvin_split_merger
-       Fuse the per-scene UAM outputs into one unified UAM dataset.
+    3. tools.preprocess.calvin_lerobot_merger
+       Fuse the per-scene LeRobot outputs into one unified dataset.
 
 Usage
 -----
     python runners/preprocess_calvin_multiscene.py \\
         --input_dir  /data/calvin/task_ABCD_D/training \\
         --work_dir   /tmp/abcd_split_work \\
-        --output_dir datasets/uam_dataset/uamvla_calvin/task_ABCD_D/training \\
-        --dataset_source task_ABCD_D \\
+        --output_dir datasets/uamvla_calvin_lerobot/task_ABCD_D/training \\
         --num_workers 8 \\
         --on_missing_target skip
 
-The intermediate per-scene work dirs (`work_dir/virtual/scene_X` and
-`work_dir/preproc/scene_X`) are kept on disk by default so reruns can
-skip work; pass `--clean_work` to wipe them at the end.
+The intermediate per-scene work dirs (`work_dir/split` and
+`work_dir/preprocessed`) are kept on disk by default; pass `--clean_work` to
+wipe them after a successful merge.
 """
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Sequence
 
 # Make project root importable for direct module use.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.preprocess.calvin_scene_splitter import split_calvin_by_scene
-from tools.preprocess.calvin_split_merger import merge_scene_outputs
+from tools.preprocess.calvin_lerobot_merger import merge_lerobot_scene_outputs
 
 logger = logging.getLogger(__name__)
 
 
 def _run_preprocessor(
-    virtual_split: Path,
-    output_dir: Path,
-    dataset_source: str,
-    scene_letter: str,
-    num_workers: int,
-    on_resolve_failure: str,
-    on_missing_target: str,
+    scene: str,
+    scene_input_dir: Path,
+    scene_output_dir: Path,
+    args: argparse.Namespace,
 ) -> None:
     """Invoke runners/preprocess_calvin.py as a subprocess.
 
@@ -63,92 +60,133 @@ def _run_preprocessor(
     cmd = [
         sys.executable,
         str(Path(__file__).resolve().parent / "preprocess_calvin.py"),
-        "--input_dir",  str(virtual_split),
-        "--output_dir", str(output_dir),
-        "--dataset_source", dataset_source,
-        "--num_workers", str(num_workers),
-        "--default_scene", scene_letter,
-        "--on_resolve_failure", on_resolve_failure,
-        "--on_missing_target",  on_missing_target,
+        "--input_dir", str(scene_input_dir),
+        "--output_dir", str(scene_output_dir),
+        "--num_workers", str(args.num_workers),
+        "--default_scene", scene,
+        "--on_resolve_failure", args.on_resolve_failure,
+        "--on_missing_target", args.on_missing_target,
     ]
     logger.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Multi-scene CALVIN -> UAM preprocess driver.",
+        description="Multi-scene CALVIN -> LeRobot preprocess driver.",
     )
-    p.add_argument("--input_dir", required=True, type=Path,
+    p.add_argument("--input_dir", "--input-dir", required=True, type=Path,
+                   dest="input_dir",
                    help="A multi-scene CALVIN split (with scene_info.npy).")
-    p.add_argument("--work_dir", required=True, type=Path,
-                   help="Where to keep virtual splits + per-scene preproc outputs.")
-    p.add_argument("--output_dir", required=True, type=Path,
-                   help="Final unified UAM dataset dir.")
-    p.add_argument("--dataset_source", required=True,
-                   help="Unified dataset_source written into every merged row.")
+    p.add_argument("--work_dir", "--work-dir", required=True, type=Path,
+                   dest="work_dir",
+                   help="Where to keep splits + per-scene preprocessed outputs.")
+    p.add_argument("--output_dir", "--output-dir", required=True, type=Path,
+                   dest="output_dir",
+                   help="Final unified LeRobot dataset dir.")
     p.add_argument("--scenes", default="A,B,C,D")
-    p.add_argument("--scene_config_dir", default=None, type=Path,
+    p.add_argument("--scene_config_dir", "--scene-config-dir", default=None,
+                   type=Path, dest="scene_config_dir",
                    help="Forwarded to the splitter when calvin_env auto-discovery fails.")
-    p.add_argument("--num_workers", type=int, default=1)
-    p.add_argument("--on_resolve_failure", choices=("skip", "abort"), default="abort")
-    p.add_argument("--on_missing_target", choices=("skip", "abort"), default="skip")
-    p.add_argument("--clean_work", action="store_true",
+    p.add_argument("--num_workers", "--num-workers", type=int, default=1,
+                   dest="num_workers")
+    p.add_argument("--on_resolve_failure", "--on-resolve-failure",
+                   choices=("skip", "abort"), default="abort",
+                   dest="on_resolve_failure")
+    p.add_argument("--on_missing_target", "--on-missing-target",
+                   choices=("skip", "abort"), default="skip",
+                   dest="on_missing_target")
+    p.add_argument("--overwrite", action="store_true",
+                   help="Replace the final output directory if it already exists.")
+    p.add_argument("--skip_stats", "--skip-stats", action="store_true",
+                   dest="skip_stats",
+                   help="Skip GR00T/LeRobot stats generation after merging.")
+    p.add_argument("--robot_type", "--robot-type", default="uamvla_calvin_franka",
+                   dest="robot_type",
+                   help="Robot type key used for merged metadata and stats.")
+    p.add_argument("--action_mode", "--action-mode", default="abs",
+                   dest="action_mode",
+                   help="Action stats mode forwarded to the LeRobot merger.")
+    p.add_argument("--clean_work", "--clean-work", action="store_true",
+                   dest="clean_work",
                    help="Remove --work_dir at the end (after a successful merge).")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
-def main():
+def _split_calvin_by_scene_compat(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    scenes: Sequence[str],
+    scene_config_dir: Path | None,
+) -> dict[str, Path]:
+    kwargs: dict[str, object] = {
+        "input_dir": input_dir,
+        "output_dir": output_dir,
+        "scenes": scenes,
+    }
+    splitter_params = inspect.signature(split_calvin_by_scene).parameters
+    if "overwrite" in splitter_params:
+        kwargs["overwrite"] = True
+    if scene_config_dir is not None and "scene_config_dir" in splitter_params:
+        kwargs["scene_config_dir"] = scene_config_dir
+    return split_calvin_by_scene(**kwargs)
+
+
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    args = parse_args()
+    args = parse_args(argv)
     scenes = [s.strip().upper() for s in args.scenes.split(",") if s.strip()]
 
-    virt_root = args.work_dir / "virtual"
-    pp_root = args.work_dir / "preproc"
-    virt_root.mkdir(parents=True, exist_ok=True)
-    pp_root.mkdir(parents=True, exist_ok=True)
+    if args.output_dir.exists() and not args.overwrite:
+        raise SystemExit(
+            f"Output directory already exists: {args.output_dir}. "
+            "Pass --overwrite to replace it."
+        )
+
+    split_root = args.work_dir / "split"
+    preprocessed_root = args.work_dir / "preprocessed"
+    split_root.mkdir(parents=True, exist_ok=True)
+    preprocessed_root.mkdir(parents=True, exist_ok=True)
 
     # 1) split
-    virtual_splits = split_calvin_by_scene(
+    scene_inputs = _split_calvin_by_scene_compat(
         input_dir=args.input_dir,
-        output_dir=virt_root,
+        output_dir=split_root,
         scenes=scenes,
         scene_config_dir=args.scene_config_dir,
     )
 
     # 2) preprocess each
-    pp_outs = []
-    for letter, vs in virtual_splits.items():
-        pp_out = pp_root / f"scene_{letter}"
-        # Wipe any prior per-scene output before rerunning. The
-        # preprocessor's shard merger blindly concatenates every file
-        # under shards/, so a stale shard from a failed prior run would
-        # silently leak old windows into the merged data.jsonl.
-        if pp_out.exists():
-            logger.info("Cleaning stale per-scene preproc dir: %s", pp_out)
-            shutil.rmtree(pp_out)
-        scene_source = f"{args.dataset_source}_scene{letter}"
+    scene_output_dirs = []
+    for scene in scenes:
+        if scene not in scene_inputs:
+            continue
+        scene_output_dir = preprocessed_root / scene
+        if scene_output_dir.exists():
+            logger.info("Cleaning stale per-scene preprocessed dir: %s", scene_output_dir)
+            shutil.rmtree(scene_output_dir)
         _run_preprocessor(
-            virtual_split=vs,
-            output_dir=pp_out,
-            dataset_source=scene_source,
-            scene_letter=letter,
-            num_workers=args.num_workers,
-            on_resolve_failure=args.on_resolve_failure,
-            on_missing_target=args.on_missing_target,
+            scene,
+            scene_inputs[scene],
+            scene_output_dir,
+            args,
         )
-        pp_outs.append(pp_out)
+        scene_output_dirs.append(scene_output_dir)
 
     # 3) merge
-    merge_scene_outputs(
-        inputs=pp_outs,
-        output_dir=args.output_dir,
-        dataset_source=args.dataset_source,
+    merge_lerobot_scene_outputs(
+        scene_output_dirs,
+        args.output_dir,
+        overwrite=args.overwrite,
+        skip_stats=args.skip_stats,
+        robot_type=args.robot_type,
+        action_mode=args.action_mode,
     )
-    logger.info("Multi-scene preprocess complete: %s", args.output_dir)
+    logger.info("Multi-scene LeRobot preprocess complete: %s", args.output_dir)
 
     if args.clean_work:
         logger.info("Removing work dir: %s", args.work_dir)
