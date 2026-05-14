@@ -60,7 +60,7 @@ framework:
 datasets:
   vla_data:
     dataset_py: lerobot_datasets
-    data_root_dir: playground/Datasets
+    data_root_dir: datasets/calvin2uam
     data_mix: uamvla_calvin_abcd        # registered in examples/calvin/train_files/data_registry/data_config.py
     action_type: delta_qpos
     per_device_batch_size: 4

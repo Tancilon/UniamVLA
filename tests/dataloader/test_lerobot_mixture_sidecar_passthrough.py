@@ -41,7 +41,7 @@ def mixture_dataset():
         "datasets": {
             "vla_data": {
                 "data_root_dir": str(CALVIN_SMOKE.parent),
-                "data_mix": "uamvla_calvin_abcd",
+                "data_mix": "uamvla_calvin_abcd_smoke",
                 "include_state": True,
                 "per_device_batch_size": 1,
             }

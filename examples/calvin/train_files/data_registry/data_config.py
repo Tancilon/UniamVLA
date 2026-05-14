@@ -80,10 +80,15 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
+    # Full preprocessed dataset (datasets/calvin2uam/lerobot_calvin_abcd).
+    # Used for baseline B training + downstream eval.
     "uamvla_calvin_abcd": [
-        # NOTE: pointed at SMOKE dataset for PR 3 testing until full ABCD_D preprocess lands
-        # (operator manually runs `python runners/preprocess_calvin.py --input_dir datasets/calvin/task_ABCD_D/training --output_dir playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD`).
-        # Once that exists, change SMOKE → full dir name.
+        ("lerobot_calvin_abcd", 1.0, "uamvla_calvin_franka"),
+    ],
+    # Smoke alias kept for the dataloader / framework smokes that ship in
+    # tests/. yaml's data_root_dir is playground/Datasets when using this
+    # mixture; change in test fixture if you swap to a different root.
+    "uamvla_calvin_abcd_smoke": [
         ("UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE", 1.0, "uamvla_calvin_franka"),
     ],
 }

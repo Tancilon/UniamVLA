@@ -81,6 +81,10 @@ def test_uamvla_oft_single_batch(gpu_id):
     # `action_horizon` (which Qwenvl_OFT.__init__ reads).
     from starVLA.model.framework.share_tools import apply_config_compat  # noqa: E402
     cfg = apply_config_compat(cfg)
+    # Smoke fixtures override the data mix + root from yaml (which points at
+    # the full preprocessed dataset for training) to the smoke variant.
+    cfg.datasets.vla_data.data_mix = "uamvla_calvin_abcd_smoke"
+    cfg.datasets.vla_data.data_root_dir = "playground/Datasets"
 
     # The smoke mixture is whatever DATASET_NAMED_MIXTURES["uamvla_calvin_abcd"]
     # currently points at. Skip cleanly if the dataset directory isn't

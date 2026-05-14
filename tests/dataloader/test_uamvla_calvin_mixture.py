@@ -25,7 +25,7 @@ def cfg():
         "datasets": {
             "vla_data": {
                 "data_root_dir": str(CALVIN_PATH.parent),
-                "data_mix": "uamvla_calvin_abcd",
+                "data_mix": "uamvla_calvin_abcd_smoke",
                 "per_device_batch_size": 2,
             }
         }

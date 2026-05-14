@@ -51,6 +51,10 @@ def configured_model_and_batch():
     # Mirror train_starvla.py's pre-construction config normalization.
     from starVLA.model.framework.share_tools import apply_config_compat  # noqa: E402
     cfg = apply_config_compat(cfg)
+    # Smoke fixtures override the data mix + root from yaml (which points at
+    # the full preprocessed dataset for training) to the smoke variant.
+    cfg.datasets.vla_data.data_mix = "uamvla_calvin_abcd_smoke"
+    cfg.datasets.vla_data.data_root_dir = "playground/Datasets"
     if not Path("playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD_SMOKE").exists():
         pytest.skip("CALVIN preprocessed dataset not found")
 
