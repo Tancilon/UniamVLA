@@ -19,7 +19,8 @@ framework:
     action_model_type: MLP
     action_dim: 7
     action_hidden_dim: 4096            # overridden at runtime to qwen hidden_size
-    future_action_window_size: 7        # action_horizon = future + 1 = 8
+    action_horizon: 5
+    future_action_window_size: 4        # action_horizon = future + 1 = 5
     past_action_window_size: 0
   obs_image_size: [640, 640]
   # Shared frozen VAE for future + recon heads (diffusers AutoencoderKL).
