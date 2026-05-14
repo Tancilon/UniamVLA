@@ -535,6 +535,7 @@ def compute_lerobot_stats(
     normalized_action_mode = str(action_mode).lower()
     action_mode_aliases = {
         "absolute": "abs",
+        "raw": "abs",
         "delta_qpos": "delta",
         "relative": "rel",
     }
@@ -545,7 +546,7 @@ def compute_lerobot_stats(
     if normalized_action_mode not in {"abs", "delta", "rel"}:
         raise CalvinLeRobotMergeError(
             f"Unsupported action_mode {action_mode!r}; expected one of "
-            "'abs', 'absolute', 'delta', 'delta_qpos', 'relative', or 'rel'."
+            "'abs', 'absolute', 'raw', 'delta', 'delta_qpos', 'relative', or 'rel'."
         )
 
     data_config = ROBOT_TYPE_CONFIG_MAP[robot_type]
@@ -644,15 +645,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scene-dir",
+        "--scene_dir",
         action="append",
         required=True,
         type=Path,
+        dest="scene_dir",
         help="Input scene dataset directory. Repeat for multiple scenes.",
     )
     parser.add_argument(
         "--output-dir",
+        "--output_dir",
         required=True,
         type=Path,
+        dest="output_dir",
         help="Output dataset directory.",
     )
     parser.add_argument(
@@ -662,18 +667,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--skip-stats",
+        "--skip_stats",
         action="store_true",
+        dest="skip_stats",
         help="Skip GR00T/LeRobot stats generation after merging.",
     )
     parser.add_argument(
         "--robot-type",
+        "--robot_type",
         default="uamvla_calvin_franka",
+        dest="robot_type",
         help="Robot type key used for merged metadata and stats.",
     )
     parser.add_argument(
         "--action-mode",
+        "--action_mode",
         default="abs",
-        help="Action stats mode: abs, absolute, delta, delta_qpos, relative, or rel.",
+        dest="action_mode",
+        help=(
+            "Action stats mode: abs, absolute, raw, delta, delta_qpos, relative, "
+            "or rel."
+        ),
     )
     return parser
 

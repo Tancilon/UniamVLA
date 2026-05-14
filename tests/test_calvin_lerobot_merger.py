@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,7 @@ from tools.preprocess.calvin_lerobot_merger import (
     CalvinLeRobotMergeError,
     ExistingOutputError,
     SceneDatasetMismatchError,
+    compute_lerobot_stats,
     merge_lerobot_scene_outputs,
 )
 
@@ -492,6 +495,113 @@ def test_cli_accepts_multiple_scene_dirs(
             "uamvla_calvin_franka",
             "abs",
         )
+    ]
+
+
+def test_cli_accepts_underscore_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.preprocess.calvin_lerobot_merger import main
+
+    scene_a = tmp_path / "lerobot_calvin_A"
+    out_dir = tmp_path / "merged"
+    calls = []
+
+    def fake_merge_lerobot_scene_outputs(
+        scene_dirs: list[Path],
+        output_dir: Path,
+        *,
+        overwrite: bool,
+        skip_stats: bool,
+        robot_type: str,
+        action_mode: str,
+    ) -> None:
+        calls.append(
+            {
+                "scene_dirs": scene_dirs,
+                "output_dir": output_dir,
+                "overwrite": overwrite,
+                "skip_stats": skip_stats,
+                "robot_type": robot_type,
+                "action_mode": action_mode,
+            }
+        )
+
+    monkeypatch.setattr(
+        "tools.preprocess.calvin_lerobot_merger.merge_lerobot_scene_outputs",
+        fake_merge_lerobot_scene_outputs,
+    )
+
+    main(
+        [
+            "--scene_dir",
+            str(scene_a),
+            "--output_dir",
+            str(out_dir),
+            "--overwrite",
+            "--skip_stats",
+            "--robot_type",
+            "fake_robot",
+            "--action_mode",
+            "raw",
+        ]
+    )
+
+    assert calls == [
+        {
+            "scene_dirs": [scene_a],
+            "output_dir": out_dir,
+            "overwrite": True,
+            "skip_stats": True,
+            "robot_type": "fake_robot",
+            "action_mode": "raw",
+        }
+    ]
+
+
+def test_compute_lerobot_stats_normalizes_raw_action_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class FakeDataConfig:
+        def modality_config(self) -> str:
+            return "fake_modality_config"
+
+        def transform(self) -> str:
+            return "fake_transform"
+
+    def fake_lerobot_single_dataset(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    fake_datasets = types.ModuleType("starVLA.dataloader.gr00t_lerobot.datasets")
+    fake_datasets.LeRobotSingleDataset = fake_lerobot_single_dataset
+    fake_registry = types.ModuleType("starVLA.dataloader.gr00t_lerobot.registry")
+    fake_registry.ROBOT_TYPE_CONFIG_MAP = {"fake_robot": FakeDataConfig()}
+    fake_registry.ROBOT_TYPE_TO_EMBODIMENT_TAG = {"fake_robot": "fake_embodiment"}
+    monkeypatch.setitem(
+        sys.modules,
+        "starVLA.dataloader.gr00t_lerobot.datasets",
+        fake_datasets,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "starVLA.dataloader.gr00t_lerobot.registry",
+        fake_registry,
+    )
+
+    compute_lerobot_stats(tmp_path, robot_type="fake_robot", action_mode="raw")
+
+    assert calls == [
+        {
+            "dataset_path": tmp_path,
+            "modality_configs": "fake_modality_config",
+            "embodiment_tag": "fake_embodiment",
+            "transforms": "fake_transform",
+            "data_cfg": {"action_mode": "abs"},
+        }
     ]
 
 
