@@ -3,13 +3,28 @@ import pytest
 import runners.preprocess_calvin_multiscene as runner
 
 
-def test_runner_rejects_existing_output_without_overwrite(tmp_path):
+def test_runner_rejects_existing_output_without_overwrite(tmp_path, monkeypatch):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     work_dir = tmp_path / "work"
     input_dir.mkdir()
     output_dir.mkdir()
     work_dir.mkdir()
+
+    called = []
+
+    def fail_if_called(*args, **kwargs):
+        called.append((args, kwargs))
+        pytest.fail("runner should reject existing output_dir before doing work")
+
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fail_if_called)
+    monkeypatch.setattr(runner, "_run_preprocessor", fail_if_called)
+    monkeypatch.setattr(
+        runner,
+        "merge_lerobot_scene_outputs",
+        fail_if_called,
+        raising=False,
+    )
 
     with pytest.raises(SystemExit):
         runner.main(
@@ -20,8 +35,17 @@ def test_runner_rejects_existing_output_without_overwrite(tmp_path):
                 str(output_dir),
                 "--work_dir",
                 str(work_dir),
+                "--scenes",
+                "A,B",
+                "--skip_stats",
+                "--robot_type",
+                "uamvla_calvin_franka",
+                "--action_mode",
+                "delta",
             ]
         )
+
+    assert called == []
 
 
 def test_runner_clears_scene_outputs_and_calls_lerobot_merger(tmp_path, monkeypatch):
@@ -39,7 +63,7 @@ def test_runner_clears_scene_outputs_and_calls_lerobot_merger(tmp_path, monkeypa
     preprocess_calls = []
     merge_calls = []
 
-    def fake_split(input_dir, output_dir, scenes, overwrite):
+    def fake_split(*, input_dir, output_dir, scenes, overwrite):
         scene_tuple = tuple(scenes)
         split_calls.append((input_dir, output_dir, scene_tuple, overwrite))
         scene_inputs = {}
@@ -76,7 +100,7 @@ def test_runner_clears_scene_outputs_and_calls_lerobot_merger(tmp_path, monkeypa
 
     monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
     monkeypatch.setattr(runner, "_run_preprocessor", fake_preprocess)
-    monkeypatch.setattr(runner, "merge_lerobot_scene_outputs", fake_merge)
+    monkeypatch.setattr(runner, "merge_lerobot_scene_outputs", fake_merge, raising=False)
 
     runner.main(
         [
