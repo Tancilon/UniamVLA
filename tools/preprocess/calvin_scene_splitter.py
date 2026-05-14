@@ -23,8 +23,8 @@ dir. Each virtual split:
     `cfg.env.scene` points at the target scene's calvin_env scene config
 
 The caller then runs `runners/preprocess_calvin.py` once per virtual split,
-each with the right URDF baked in. A separate merger (calvin_split_merger.py)
-fuses the per-scene outputs into one UAM-format dataset.
+each with the right URDF baked in. The LeRobot merger fuses the per-scene
+outputs into one dataset.
 
 CLI
 ---
