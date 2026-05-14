@@ -16,9 +16,11 @@ from a CALVIN multi-scene split:
 Usage
 -----
     python runners/preprocess_calvin_multiscene.py \\
-        --input_dir  /data/calvin/task_ABCD_D/training \\
-        --work_dir   /tmp/abcd_split_work \\
-        --output_dir datasets/uamvla_calvin_lerobot/task_ABCD_D/training \\
+        --input_dir datasets/calvin/task_ABCD_D/training \\
+        --work_dir datasets/calvin2uam/work_multiscene_abcd \\
+        --output_dir datasets/calvin2uam/lerobot_calvin_abcd \\
+        --scenes A,B,C,D \\
+        --overwrite \\
         --num_workers 8 \\
         --on_missing_target skip
 
