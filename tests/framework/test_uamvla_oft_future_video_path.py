@@ -75,3 +75,11 @@ def test_image_future_video_path_uses_lerobot_chunk_metadata(
         tmp_path / "videos" / "chunk-001" / "video.primary_image" /
         "episode_001000.mp4"
     )
+
+
+def test_image_future_frame_index_is_episode_terminal_frame(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+
+    assert module.UamVLAOFT._image_future_frame_index(video_length=65) == 64
+    assert module.UamVLAOFT._image_future_frame_index(video_length=1) == 0
+    assert module.UamVLAOFT._image_future_frame_index(video_length=0) is None

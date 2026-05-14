@@ -361,9 +361,8 @@ class UamVLAOFT(Qwenvl_OFT):
             self._image_target_cache.move_to_end(traj)
             out["image_target"] = self._image_target_cache[traj]
 
-        # image_future: load t=base+H-1 from raw mp4 via decord random seek.
-        # _pack_sample drops the time dim (keeps only frame 0), so we must
-        # fetch the future frame here instead of relying on the LeRobot loader.
+        # image_future: load the terminal primary frame of this task episode.
+        # Each CALVIN LeRobot episode corresponds to one language task window.
         future_tensor = self._load_image_future(traj, base)
         if future_tensor is not None:
             out["image_future"] = future_tensor
@@ -409,15 +408,18 @@ class UamVLAOFT(Qwenvl_OFT):
         )
         return self.sidecar_root / video_filename
 
+    @staticmethod
+    def _image_future_frame_index(video_length: int) -> int | None:
+        if video_length <= 0:
+            return None
+        return video_length - 1
+
     def _load_image_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
-        """Read t=base_index + H - 1 frame from primary video.
+        """Read the task episode's terminal primary video frame.
 
         Returns CHW float in [-1, 1] (matching VAE input normalization spec
-        in :meth:`FutureHead._normalize_for_vae`). Clamps future_idx to the
-        last frame of the episode, mirroring LeRobot's natural end-of-episode
-        padding behavior.
+        in :meth:`FutureHead._normalize_for_vae`).
         """
-        future_idx = base_index + self.action_horizon - 1
         video_path = self._image_future_video_path(trajectory_id)
         if not video_path.exists():
             return None
@@ -428,7 +430,9 @@ class UamVLAOFT(Qwenvl_OFT):
             # (it calls frames.asnumpy() which only exists under the default
             # 'native' bridge). Use the default bridge and convert manually.
             vr = decord.VideoReader(str(video_path))
-            future_idx = min(future_idx, len(vr) - 1)
+            future_idx = self._image_future_frame_index(len(vr))
+            if future_idx is None:
+                return None
             frame_np = vr[future_idx].asnumpy()          # (H, W, C) uint8 ndarray
             chw = torch.from_numpy(frame_np).permute(2, 0, 1).float() / 255.0  # (C,H,W) in [0,1]
             return (chw - 0.5) / 0.5                      # → [-1, 1]
