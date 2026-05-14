@@ -117,10 +117,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _path_is_or_contains(parent: Path, candidate: Path) -> bool:
     parent_resolved = parent.resolve(strict=False)
     candidate_resolved = candidate.resolve(strict=False)
-    return (
-        candidate_resolved == parent_resolved
-        or candidate_resolved.is_relative_to(parent_resolved)
-    )
+    if candidate_resolved == parent_resolved:
+        return True
+    try:
+        candidate_resolved.relative_to(parent_resolved)
+    except ValueError:
+        return False
+    return True
 
 
 def _guard_output_path(

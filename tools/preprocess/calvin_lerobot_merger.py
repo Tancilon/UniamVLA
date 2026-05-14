@@ -89,15 +89,21 @@ def _check_output_does_not_overlap_sources(
     output_resolved = output_dir.resolve(strict=False)
     for scene_dir in scene_dirs:
         scene_resolved = scene_dir.resolve(strict=False)
-        if (
-            output_resolved == scene_resolved
-            or output_resolved.is_relative_to(scene_resolved)
-            or scene_resolved.is_relative_to(output_resolved)
-        ):
+        output_inside_scene = _path_is_relative_to(output_resolved, scene_resolved)
+        scene_inside_output = _path_is_relative_to(scene_resolved, output_resolved)
+        if output_resolved == scene_resolved or output_inside_scene or scene_inside_output:
             raise CalvinLeRobotMergeError(
                 f"Output directory overlaps scene input: output={output_dir}, "
                 f"scene={scene_dir}"
             )
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def _same_json_or_bytes(left: Path, right: Path) -> bool:
