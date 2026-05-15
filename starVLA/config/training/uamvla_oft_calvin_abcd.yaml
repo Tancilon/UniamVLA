@@ -1,4 +1,4 @@
-run_id: uamvla_oft_calvin_abcd_baseline
+run_id: uamvla_oft_calvin_abcd
 run_root_dir: playground/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
