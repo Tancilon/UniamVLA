@@ -90,7 +90,7 @@ trainer:
 
   learning_rate:
     base:               1.0e-4         # fallback for unmatched groups (incl. aux_heads.{pose,future,recon}.*)
-    qwen_vl_interface:  5.0e-5         # backbone
+    qwen_vl_interface:  1.0e-5         # backbone
     action_model:       1.0e-4         # MLP L1 regression head
     # NOTE: state_encoder removed in spec §2.2 cleanup; model has no such attribute.
     # NOTE: aux_heads.{pose,future,recon} fall into the `base` group by default;
