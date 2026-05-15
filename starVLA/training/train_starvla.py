@@ -14,7 +14,6 @@ Conventions:
 import argparse
 import json
 import os
-import shutil
 import time
 from pathlib import Path
 from typing import Tuple
@@ -224,58 +223,6 @@ class VLATrainer(TrainerUtils):
         if isinstance(self.config, AccessTrackedConfig):
             self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
             logger.info(f"📊 Accessed config snapshot saved at {output_dir / 'config.yaml'}")
-
-        self._save_dataset_statistics_json()
-
-    def _save_dataset_statistics_json(self):
-        """Convert UamVLA-style statistics.yaml → starVLA dataset_statistics.json schema."""
-        if not self.accelerator.is_main_process:
-            return
-        # Read source statistics.yaml from the dataset's data_root_dir
-        from pathlib import Path
-        import yaml, json
-
-        data_root = Path(self.config.datasets.vla_data.data_root_dir)
-        # Pick first subdir matching mixture (Phase 1: single subdir)
-        from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
-        mixture = DATASET_NAMED_MIXTURES.get(self.config.datasets.vla_data.data_mix)
-        if mixture is None:
-            return  # Skip silently for non-UamVLA datasets
-        subdir, _w, embodiment = mixture[0]
-        stats_yaml = data_root / subdir / "statistics.yaml"
-        if not stats_yaml.exists():
-            return
-
-        with open(stats_yaml) as f:
-            src = yaml.safe_load(f)
-        emb_stats = src["embodiment_stats"][embodiment]
-        # mask: True for min-max dims, False for binarized (gripper at dim 6)
-        mask = [True] * 6 + [False]
-        out = {
-            embodiment: {
-                "action": {
-                    "min":  emb_stats["action_min_bound"],
-                    "max":  emb_stats["action_max_bound"],
-                    "mask": mask,
-                }
-            }
-        }
-        out_path = Path(self.config.output_dir) / "dataset_statistics.json"
-        with open(out_path, "w") as f:
-            json.dump(out, f, indent=2)
-        logger.info(f"Wrote dataset_statistics.json to {out_path}")
-        self._copy_stats_yaml_to_run_dir(stats_yaml, Path(self.config.output_dir))
-
-    @staticmethod
-    def _copy_stats_yaml_to_run_dir(stats_yaml_src: Path, output_dir: Path) -> None:
-        """Copy UamVLA statistics.yaml into the run dir if the source exists.
-
-        Mirrors the dataset_statistics.json placement so read_mode_config's
-        run_dir = checkpoint_pt.parents[1] resolution finds both files.
-        """
-        if stats_yaml_src.exists():
-            shutil.copy(stats_yaml_src, output_dir / "statistics.yaml")
-            logger.info(f"Copied statistics.yaml to {output_dir}")
 
     def _init_checkpointing(self):
         """Initialize checkpoint directory and handle checkpoint loading."""

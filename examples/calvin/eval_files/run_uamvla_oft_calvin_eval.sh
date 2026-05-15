@@ -6,8 +6,8 @@
 # matching policy server (run_policy_server_uamvla_oft.sh) is up.
 #
 # eval_calvin.py uses tyro CLI; arguments follow the --args.<name> convention.
-# unnorm_key uses the embodiment tag because train_starvla.py writes
-# dataset_statistics.json keyed by embodiment (see _save_dataset_statistics_json).
+# unnorm_key uses the embodiment tag because the LeRobot dataloader writes
+# dataset_statistics.json keyed by embodiment.
 # For uamvla_calvin_abcd the embodiment is `franka_calvin`.
 #
 # === Please modify the following paths according to your environment ===
