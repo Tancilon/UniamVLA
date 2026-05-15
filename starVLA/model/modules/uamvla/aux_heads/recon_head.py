@@ -191,7 +191,7 @@ class ReconHead(AuxHead):
         for i, idx in enumerate(valid_indices):
             idx_int = idx.item()
             input_img = tensor_to_pil(batch["image"][idx_int, 0])  # agentview
-            gt_img = tensor_to_pil(batch["image_target"][idx_int])
+            gt_img = tensor_to_pil(batch["image_target"][idx_int], mean=0.0, std=1.0)
             pred_img = tensor_to_pil(pred_downscaled[i], mean=0.0, std=1.0)
             combined = concat_images_h([input_img, gt_img, pred_img])
             caption = batch["instruction"][idx_int] if "instruction" in batch else ""

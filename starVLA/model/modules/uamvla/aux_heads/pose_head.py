@@ -459,8 +459,8 @@ class PoseHead(AuxHead):
             cam_R = ext_rot[idx_int].detach().float().cpu().numpy()
             cam_t = ext_trans[idx_int].detach().float().cpu().numpy()
 
-            gt_R_6d = batch["pose_gt"]["rotation"][idx_int].detach().float().cpu().numpy()
-            gt_R = rotation_6d_to_matrix_np(gt_R_6d)
+            gt_R_value = batch["pose_gt"]["rotation"][idx_int].detach().float().cpu().numpy()
+            gt_R = gt_R_value if gt_R_value.shape == (3, 3) else rotation_6d_to_matrix_np(gt_R_value)
             gt_t = batch["pose_gt"]["translation"][idx_int].detach().float().cpu().numpy()
 
             gt_img = input_pil.copy()

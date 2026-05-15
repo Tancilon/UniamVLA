@@ -22,7 +22,7 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
+from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
 
@@ -414,6 +414,294 @@ class UamVLAOFT(Qwenvl_OFT):
             return None
         return video_length - 1
 
+    @staticmethod
+    def _to_rgb_pil(image) -> Image.Image:
+        """Convert PIL / numpy / tensor image values into an RGB PIL image."""
+        if isinstance(image, Image.Image):
+            return image.convert("RGB")
+
+        if torch.is_tensor(image):
+            arr = image.detach().float().cpu().numpy()
+        else:
+            arr = np.asarray(image)
+
+        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+            arr = np.moveaxis(arr, 0, -1)
+        if arr.ndim == 2:
+            arr = np.repeat(arr[..., None], 3, axis=-1)
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        if arr.ndim == 3 and arr.shape[-1] == 4:
+            arr = arr[..., :3]
+
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.float32)
+            finite = arr[np.isfinite(arr)]
+            if finite.size and finite.min() < 0.0:
+                arr = (arr + 1.0) / 2.0
+            elif finite.size and finite.max() > 1.5:
+                arr = arr / 255.0
+            arr = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+        return Image.fromarray(arr).convert("RGB")
+
+    @staticmethod
+    def _to_action_numpy(action) -> np.ndarray:
+        """Convert action arrays/tensors to ``float32`` numpy."""
+        if torch.is_tensor(action):
+            return action.detach().float().cpu().numpy()
+        return np.asarray(action, dtype=np.float32)
+
+    @staticmethod
+    def _fit_for_viz(image: Image.Image, height: int = 160) -> Image.Image:
+        scale = height / max(1, image.height)
+        width = max(1, int(round(image.width * scale)))
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        return image.resize((width, height), resample)
+
+    @staticmethod
+    def _draw_action_comparison(pred_action: np.ndarray, gt_action: np.ndarray | None) -> Image.Image:
+        """Draw predicted-vs-ground-truth normalized action curves."""
+        pred = np.asarray(pred_action, dtype=np.float32)
+        if pred.ndim == 1:
+            pred = pred[:, None]
+
+        gt = None
+        if gt_action is not None:
+            gt = np.asarray(gt_action, dtype=np.float32)
+            if gt.ndim == 1:
+                gt = gt[:, None]
+
+        dims = pred.shape[-1]
+        if gt is not None:
+            dims = min(dims, gt.shape[-1])
+        dims = min(dims, 7)
+
+        width = 560
+        row_h = 34
+        top = 30
+        left = 48
+        right = width - 16
+        height = top + max(1, dims) * row_h + 14
+        canvas = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(canvas)
+        draw.text((10, 8), "actions: pred red / gt blue", fill=(32, 32, 32))
+
+        for dim in range(dims):
+            y_mid = top + dim * row_h + row_h // 2
+            y0 = y_mid - 11
+            y1 = y_mid + 11
+            draw.text((10, y_mid - 7), f"a{dim}", fill=(55, 65, 81))
+            draw.line((left, y_mid, right, y_mid), fill=(229, 231, 235), width=1)
+            draw.rectangle((left, y0, right, y1), outline=(229, 231, 235))
+
+            series = [pred[:, dim]]
+            if gt is not None:
+                series.append(gt[:, dim])
+            finite = np.concatenate([
+                s[np.isfinite(s)] for s in series if np.isfinite(s).any()
+            ]) if any(np.isfinite(s).any() for s in series) else np.array([0.0])
+            lo = float(finite.min())
+            hi = float(finite.max())
+            if abs(hi - lo) < 1e-6:
+                lo -= 0.5
+                hi += 0.5
+            pad = 0.05 * (hi - lo)
+            lo -= pad
+            hi += pad
+
+            def _points(values: np.ndarray) -> list[tuple[int, int]]:
+                points = []
+                denom = max(1, len(values) - 1)
+                for idx, value in enumerate(values):
+                    if not np.isfinite(value):
+                        continue
+                    x = int(round(left + idx * (right - left) / denom))
+                    y = int(round(y1 - (float(value) - lo) * (y1 - y0) / (hi - lo)))
+                    points.append((x, y))
+                return points
+
+            if gt is not None:
+                pts = _points(gt[:, dim])
+                if len(pts) >= 2:
+                    draw.line(pts, fill=(37, 99, 235), width=2)
+                elif pts:
+                    x, y = pts[0]
+                    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(37, 99, 235))
+
+            pts = _points(pred[:, dim])
+            if len(pts) >= 2:
+                draw.line(pts, fill=(220, 38, 38), width=2)
+            elif pts:
+                x, y = pts[0]
+                draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(220, 38, 38))
+
+        return canvas
+
+    @classmethod
+    def _make_visualization_canvas(
+        cls,
+        images: list,
+        pred_action: np.ndarray,
+        gt_action: np.ndarray | None,
+    ) -> Image.Image:
+        view_imgs = [
+            cls._fit_for_viz(cls._to_rgb_pil(img))
+            for img in images[:4]
+            if img is not None
+        ]
+        chart = cls._draw_action_comparison(pred_action, gt_action)
+
+        gap = 8
+        if view_imgs:
+            view_width = sum(img.width for img in view_imgs) + gap * (len(view_imgs) - 1)
+            view_height = max(img.height for img in view_imgs)
+        else:
+            view_width = 0
+            view_height = 0
+
+        width = max(chart.width, view_width)
+        height = chart.height + (view_height + gap if view_imgs else 0)
+        canvas = Image.new("RGB", (width, height), "white")
+
+        x = 0
+        for img in view_imgs:
+            canvas.paste(img, (x, 0))
+            x += img.width + gap
+        canvas.paste(chart, (0, view_height + gap if view_imgs else 0))
+        return canvas
+
+    @classmethod
+    def _pil_to_normalized_chw(cls, image, device: torch.device | None = None) -> torch.Tensor:
+        """Convert a visualization image to CHW tensor in [-1, 1]."""
+        pil = cls._to_rgb_pil(image)
+        arr = np.asarray(pil, dtype=np.float32) / 255.0
+        tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+        tensor = (tensor - 0.5) / 0.5
+        if device is not None:
+            tensor = tensor.to(device)
+        return tensor
+
+    @classmethod
+    def _make_visualization_image_batch(
+        cls,
+        examples: list[dict],
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Build ``[B, V, C, H, W]`` normalized image tensor for aux visualizers."""
+        per_sample: list[list[torch.Tensor]] = []
+        max_views = 0
+        for example in examples:
+            images = example.get("image", [])
+            if isinstance(images, Image.Image) or not isinstance(images, (list, tuple)):
+                images = [images]
+            tensors = [
+                cls._pil_to_normalized_chw(img, device=device)
+                for img in images
+                if img is not None
+            ]
+            per_sample.append(tensors)
+            max_views = max(max_views, len(tensors))
+
+        if max_views == 0:
+            raise ValueError("visualize_batch requires at least one image view")
+
+        template = next(t for tensors in per_sample for t in tensors)
+        padded_samples = []
+        for tensors in per_sample:
+            if not tensors:
+                tensors = [torch.zeros_like(template)]
+            while len(tensors) < max_views:
+                tensors.append(torch.zeros_like(tensors[0]))
+            padded_samples.append(torch.stack(tensors[:max_views], dim=0))
+        return torch.stack(padded_samples, dim=0)
+
+    def _visualization_forward_context(
+        self,
+        selected: list[dict],
+    ) -> tuple[list[dict], np.ndarray, torch.Tensor, dict]:
+        """Run one inference forward pass and build shared aux visualization inputs."""
+        examples = [
+            self._unpack_lerobot_sample(e) if "__trajectory_id" in e else e
+            for e in selected
+        ]
+
+        batch_images = [self._force_resize_640(e["image"]) for e in examples]
+        examples = [
+            {**example, "image": images}
+            for example, images in zip(examples, batch_images)
+        ]
+        instructions = [e["lang"] for e in examples]
+
+        action_tokens = self.action_token * self.chunk_len
+        prompt_suffix = (
+            f" Please predict the next {self.chunk_len} robot actions: "
+            f"<action>{action_tokens}<action>."
+        )
+        instructions = [s + prompt_suffix for s in instructions]
+
+        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
+            images=batch_images, instructions=instructions,
+        )
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            qwenvl_outputs = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_attentions=False,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+        hidden = qwenvl_outputs.hidden_states[-1]
+
+        with torch.autocast("cuda", dtype=torch.float32):
+            action_queries = self._gather_action_token_embeddings(
+                hidden, qwen_inputs["input_ids"], action_token_id=self.action_token_id,
+            )
+            pred_actions = self.action_model.predict_action(action_queries)
+
+        batch_dict = self._collate_aux(examples, qwen_inputs)
+        batch_dict["image"] = self._make_visualization_image_batch(
+            examples, device=qwen_inputs["input_ids"].device,
+        )
+        batch_dict["instruction"] = [e["lang"] for e in examples]
+
+        return examples, pred_actions.detach().cpu().numpy(), hidden, batch_dict
+
+    def _collect_aux_head_visualizations(
+        self,
+        hidden_states: torch.Tensor,
+        batch_dict: dict,
+        num_samples: int,
+        outputs: dict,
+    ) -> dict:
+        """Append enabled aux-head visualizations to ``outputs``."""
+        aux_heads = getattr(self, "aux_heads", {})
+        if not aux_heads:
+            return outputs
+
+        batch_size = hidden_states.shape[0]
+        device = hidden_states.device
+        for name, head in aux_heads.items():
+            if not hasattr(head, "visualize"):
+                continue
+            try:
+                mask = self._resolve_head_mask(name, batch_dict, batch_size, device)
+                kwargs = {}
+                if name == "pose":
+                    kwargs["camera_params"] = getattr(head, "camera_params", None)
+                images = head.visualize(
+                    hidden_states,
+                    batch_dict,
+                    mask=mask,
+                    num_samples=num_samples,
+                    **kwargs,
+                )
+                for idx, image in enumerate(images or []):
+                    outputs[f"viz/uamvla_oft/{name}_{idx}"] = image
+            except Exception as exc:
+                logger.warning("UamVLAOFT %s visualization failed: %s", name, exc)
+        return outputs
+
     def _load_image_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
         """Read the task episode's terminal primary video frame.
 
@@ -602,6 +890,64 @@ class UamVLAOFT(Qwenvl_OFT):
                 ] = metric_value
 
         return {"action_loss": total, **log_metrics}
+
+    @torch.inference_mode()
+    def visualize_batch(self, batch: List[dict], n_samples: int = 1) -> dict:
+        """Visualize action predictions plus any enabled aux heads."""
+        if not isinstance(batch, list):
+            batch = [batch]
+        limit = min(max(int(n_samples), 0), len(batch))
+        if limit == 0:
+            return {}
+
+        selected = batch[:limit]
+        was_training = bool(getattr(self, "training", False))
+        self.eval()
+        try:
+            examples, pred_actions, hidden_states, batch_dict = (
+                self._visualization_forward_context(selected)
+            )
+            if pred_actions.ndim == 2:
+                pred_actions = pred_actions[None, ...]
+
+            try:
+                import wandb
+            except ImportError:
+                wandb = None
+
+            outputs = {}
+            for idx, sample in enumerate(examples):
+                pred = pred_actions[idx]
+                horizon = int(getattr(self, "action_horizon", pred.shape[0]))
+
+                gt_action = None
+                if "action" in sample:
+                    gt_action = self._to_action_numpy(sample["action"])
+                    if gt_action.ndim >= 2:
+                        gt_action = gt_action[-horizon:, :pred.shape[-1]]
+
+                images = sample.get("image", [])
+                if isinstance(images, Image.Image) or not isinstance(images, (list, tuple)):
+                    images = [images]
+
+                canvas = self._make_visualization_canvas(
+                    images=list(images),
+                    pred_action=pred,
+                    gt_action=gt_action,
+                )
+                caption = str(sample.get("lang", ""))
+                value = wandb.Image(canvas, caption=caption) if wandb is not None else canvas
+                outputs[f"viz/uamvla_oft/action_{idx}"] = value
+
+            return self._collect_aux_head_visualizations(
+                hidden_states,
+                batch_dict,
+                num_samples=limit,
+                outputs=outputs,
+            )
+        finally:
+            if was_training:
+                self.train()
 
     # ──────────────────────────────────────────────────────────────────
     #  Inference

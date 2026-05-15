@@ -32,6 +32,7 @@ def _load_uamvla_oft_module(monkeypatch):
 
     torch = types.ModuleType("torch")
     torch.inference_mode = lambda: (lambda fn: fn)
+    torch.is_tensor = lambda _value: False
     nn = types.ModuleType("torch.nn")
     torch.nn = nn
     monkeypatch.setitem(sys.modules, "torch", torch)
@@ -100,3 +101,106 @@ def test_aux_metric_log_key_drops_duplicate_head_prefix(monkeypatch):
     assert module.UamVLAOFT._aux_metric_log_key(
         "pose", "pose_translation_residual_mean"
     ) == "pose_translation_residual_mean_raw"
+
+
+def test_visualize_batch_builds_wandb_images_without_heavy_model(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+
+    class _WandbImage:
+        def __init__(self, image, caption=None):
+            self.image = image
+            self.caption = caption
+
+    wandb = types.ModuleType("wandb")
+    wandb.Image = _WandbImage
+    monkeypatch.setitem(sys.modules, "wandb", wandb)
+
+    class _FakeModel(module.UamVLAOFT):
+        action_horizon = 2
+
+        def __init__(self):
+            self.training = True
+
+        def eval(self):
+            self.training = False
+
+        def train(self):
+            self.training = True
+
+        def _visualization_forward_context(self, selected):
+            return (
+                selected,
+                module.np.ones(
+                    (len(selected), self.action_horizon, 7), dtype=module.np.float32,
+                ),
+                None,
+                {},
+            )
+
+    sample = {
+        "image": [module.Image.new("RGB", (24, 16), color=(255, 0, 0))],
+        "lang": "open the drawer",
+        "action": module.np.zeros((2, 7), dtype=module.np.float32),
+    }
+
+    model = _FakeModel()
+    out = module.UamVLAOFT.visualize_batch(model, [sample], n_samples=1)
+
+    assert list(out) == ["viz/uamvla_oft/action_0"]
+    logged = out["viz/uamvla_oft/action_0"]
+    assert logged.caption == "open the drawer"
+    assert logged.image.mode == "RGB"
+    assert logged.image.width > 24
+    assert logged.image.height > 16
+    assert model.training is True
+
+
+def test_collect_aux_head_visualizations_dispatches_all_enabled_heads(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+
+    class _Hidden:
+        shape = (2, 4, 8)
+        device = "cpu"
+
+    class _Head:
+        def __init__(self, name):
+            self.name = name
+            self.camera_params = {"intrinsic": {"fx": 1.0}} if name == "pose" else None
+            self.calls = []
+
+        def visualize(self, hidden_states, batch, mask, num_samples, **kwargs):
+            self.calls.append((hidden_states, batch, mask, num_samples, kwargs))
+            return [f"{self.name}-image"]
+
+    model = object.__new__(module.UamVLAOFT)
+    model.aux_heads = {
+        "recon": _Head("recon"),
+        "future": _Head("future"),
+        "pose": _Head("pose"),
+    }
+    model._resolve_head_mask = (
+        lambda head_name, batch, batch_size, device: batch[f"{head_name}_mask"]
+    )
+    batch = {
+        "recon_mask": "recon-mask",
+        "future_mask": "future-mask",
+        "pose_mask": "pose-mask",
+    }
+
+    out = {"viz/uamvla_oft/action_0": "action-image"}
+    module.UamVLAOFT._collect_aux_head_visualizations(
+        model, _Hidden(), batch, num_samples=1, outputs=out,
+    )
+
+    assert out == {
+        "viz/uamvla_oft/action_0": "action-image",
+        "viz/uamvla_oft/recon_0": "recon-image",
+        "viz/uamvla_oft/future_0": "future-image",
+        "viz/uamvla_oft/pose_0": "pose-image",
+    }
+    assert model.aux_heads["recon"].calls[0][2] == "recon-mask"
+    assert model.aux_heads["future"].calls[0][2] == "future-mask"
+    assert model.aux_heads["pose"].calls[0][2] == "pose-mask"
+    assert model.aux_heads["pose"].calls[0][4]["camera_params"] == (
+        model.aux_heads["pose"].camera_params
+    )
