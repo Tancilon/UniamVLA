@@ -32,7 +32,7 @@ class UamVLACalvinDataConfig:
     ]
     language_keys = ["annotation.human.action.task_description"]
 
-    action_horizon = 8  # must match framework's action_horizon
+    action_horizon = 5  # must match framework's action_horizon
     action_indices = list(range(action_horizon))
 
     # Slice indices for unpack in framework (per spec §4.1 aux_state_slice)
@@ -46,7 +46,7 @@ class UamVLACalvinDataConfig:
     def modality_config(self):
         return {
             "video": ModalityConfig(
-                delta_indices=[0, self.action_horizon - 1],  # = [0, 7]
+                delta_indices=[0, self.action_horizon - 1],  # = [0, 4]
                 modality_keys=self.video_keys,
             ),
             "state": ModalityConfig(delta_indices=[0], modality_keys=self.state_keys),
