@@ -85,6 +85,10 @@ DATASET_NAMED_MIXTURES = {
     "uamvla_calvin_abcd": [
         ("lerobot_calvin_abcd", 1.0, "uamvla_calvin_franka"),
     ],
+    # D-only preprocessed dataset (datasets/calvin2uam/lerobot_calvin_d).
+    "uamvla_calvin_d": [
+        ("lerobot_calvin_d", 1.0, "uamvla_calvin_franka"),
+    ],
     # Smoke alias kept for the dataloader / framework smokes that ship in
     # tests/. yaml's data_root_dir is playground/Datasets when using this
     # mixture; change in test fixture if you swap to a different root.

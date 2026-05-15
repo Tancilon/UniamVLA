@@ -49,6 +49,13 @@ class _QWen3_VL_Interface(nn.Module):
         qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3-VL-4B-Instruct")
         attn_implementation = qwenvl_config.get("attn_implementation", "sdpa")
+        trainer_config = getattr(config, "trainer", None)
+        enable_grad_ckpt = bool(
+            qwenvl_config.get(
+                "enable_gradient_checkpointing",
+                getattr(trainer_config, "enable_gradient_checkpointing", False),
+            )
+        )
 
         # Fallback to sdpa if flash_attention_2 is requested but flash_attn is not installed
         if attn_implementation == "flash_attention_2":
@@ -73,6 +80,25 @@ class _QWen3_VL_Interface(nn.Module):
 
         # alin qwen3 with qwen2.5
         self.model.config.hidden_size = self.model.config.text_config.hidden_size
+        # Training/inference forward paths consume full hidden states, not
+        # autoregressive KV cache. Keep cache off unless generate() opts in.
+        self.model.config.use_cache = False
+
+        if enable_grad_ckpt:
+            try:
+                self.model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                if hasattr(self.model, "enable_input_require_grads"):
+                    self.model.enable_input_require_grads()
+            except Exception as exc:
+                print(f"[Qwen3] failed to enable gradient_checkpointing: {exc}", flush=True)
+
+        print(
+            f"[Qwen3] use_cache={getattr(self.model.config, 'use_cache', None)}, "
+            f"gradient_checkpointing={bool(getattr(self.model, 'is_gradient_checkpointing', False))}",
+            flush=True,
+        )
 
         # only for fast base model
         if "-Action" in model_id:
@@ -84,9 +110,10 @@ class _QWen3_VL_Interface(nn.Module):
         **kwargs,
     ) -> CausalLMOutputWithPast:
         """
-        Forward pass delegating to underlying Qwen2.5-VL backbone.
+        Forward pass delegating to underlying Qwen3-VL backbone.
         """
 
+        kwargs.setdefault("use_cache", False)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             outputs = self.model(
                 **kwargs,
@@ -106,6 +133,7 @@ class _QWen3_VL_Interface(nn.Module):
         Returns:
             GenerateOutput | Model-dependent generation return.
         """
+        kwargs.setdefault("use_cache", True)
         with torch.autocast("cuda", dtype=torch.float16):
             generation_output = self.model.generate(
                 **kwargs,

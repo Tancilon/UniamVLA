@@ -18,10 +18,11 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=10000
 export NCCL_SOCKET_TIMEOUT_MS=360000
 
-config_yaml=./starVLA/config/training/uamvla_oft_calvin_abcd.yaml
+config_yaml=${CONFIG_YAML:-./starVLA/config/training/uamvla_oft_calvin_abcd.yaml}
 # Caller can override:
 #   NUM_GPUS=4   bash run_uamvla_oft_train.sh   (4-GPU run, default 8)
 #   GRAD_ACCUM=4 bash run_uamvla_oft_train.sh   (effective_batch = per_device_batch × NUM_GPUS × GRAD_ACCUM)
+#   CONFIG_YAML=./starVLA/config/training/uamvla_oft_calvin_d.yaml bash run_uamvla_oft_train.sh
 NUM_GPUS=${NUM_GPUS:-8}
 GRAD_ACCUM=${GRAD_ACCUM:-1}
 # DEEPSPEED_CONFIG: accelerate config file path; switch to deepspeed_zero3.yaml
