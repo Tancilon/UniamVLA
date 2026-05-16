@@ -13,10 +13,10 @@
 set -euo pipefail
 
 # NCCL networking: auto-detect for single-node multi-GPU runs.
-export NCCL_BLOCKING_WAIT=1
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=10000
-export NCCL_SOCKET_TIMEOUT_MS=360000
+export TORCH_NCCL_BLOCKING_WAIT="${TORCH_NCCL_BLOCKING_WAIT:-1}"
+export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+export NCCL_TIMEOUT="${NCCL_TIMEOUT:-10000}"
+export NCCL_SOCKET_TIMEOUT_MS="${NCCL_SOCKET_TIMEOUT_MS:-360000}"
 
 config_yaml=${CONFIG_YAML:-./starVLA/config/training/uamvla_oft_calvin_abcd.yaml}
 # Caller can override:

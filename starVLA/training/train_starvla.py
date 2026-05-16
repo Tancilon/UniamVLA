@@ -36,8 +36,10 @@ from starVLA.dataloader import build_dataloader
 from starVLA.model.framework.base_framework import build_framework
 from starVLA.model.framework.share_tools import apply_config_compat
 from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, wrap_config
+from starVLA.training.trainer_utils.distributed import configure_cuda_device_from_env, distributed_barrier
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, normalize_dotlist_args
 
+configure_cuda_device_from_env()
 deepspeed_plugin = DeepSpeedPlugin()
 accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
 accelerator.print(accelerator.state)
@@ -105,7 +107,7 @@ def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
     vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 
     accelerator.dataloader_config.dispatch_batches = False
-    dist.barrier()
+    distributed_barrier()
     return vla_train_dataloader
 
 
@@ -407,7 +409,7 @@ class VLATrainer(TrainerUtils):
             step_metrics["mse_score"] = score / num_pots
 
         del examples
-        dist.barrier()
+        distributed_barrier()
         return step_metrics
 
     def _log_training_config(self):
@@ -486,7 +488,7 @@ def main(cfg) -> None:
     trainer.train()
 
     logger.info("... and that's all, folks!")
-    dist.barrier()
+    distributed_barrier()
     dist.destroy_process_group()
 
 

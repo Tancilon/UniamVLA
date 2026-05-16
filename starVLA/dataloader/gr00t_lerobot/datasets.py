@@ -41,6 +41,7 @@ from PIL import Image
 import torch.distributed as dist
 
 from starVLA.dataloader.gr00t_lerobot.video import get_all_frames, get_frames_by_timestamps
+from starVLA.training.trainer_utils.distributed import distributed_barrier
 
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from starVLA.dataloader.gr00t_lerobot.schema import (
@@ -845,8 +846,7 @@ class LeRobotSingleDataset(Dataset):
         else:
             le_statistics = None
 
-        if dist.is_initialized():
-            dist.barrier()
+        distributed_barrier()
 
         if le_statistics is None:
             le_statistics = _load_stats_cache(
@@ -1012,8 +1012,7 @@ class LeRobotSingleDataset(Dataset):
             print(f"[RANK 0] Cached steps saved to {steps_path}")
     
         # ---------- sync after rank0  ----------
-        if dist.is_initialized():
-            dist.barrier()
+        distributed_barrier()
     
         # ---------- read by all rank ----------
         with open(steps_path, "rb") as f:
