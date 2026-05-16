@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from starVLA.training.trainer_utils.distributed import (
+    all_ranks_true,
     configure_cuda_device_from_env,
     distributed_barrier,
 )
@@ -75,3 +76,22 @@ def test_distributed_barrier_passes_current_cuda_device_for_nccl(monkeypatch):
     distributed_barrier()
 
     assert dist.calls == [{"device_ids": [3]}]
+
+
+def test_all_ranks_true_returns_false_when_any_rank_reports_false(monkeypatch):
+    class _ReduceOp:
+        MIN = "min"
+
+    class _DistWithAllReduce(_Dist):
+        ReduceOp = _ReduceOp
+
+        def all_reduce(self, tensor, op=None) -> None:
+            assert op == self.ReduceOp.MIN
+            tensor.fill_(0)
+
+    monkeypatch.setattr(
+        "starVLA.training.trainer_utils.distributed.dist",
+        _DistWithAllReduce(),
+    )
+
+    assert all_ranks_true(True, device="cpu") is False

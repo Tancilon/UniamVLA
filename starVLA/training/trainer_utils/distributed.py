@@ -65,6 +65,16 @@ def _dist_backend() -> str | None:
         return None
 
 
+def all_ranks_true(value: bool, device=None) -> bool:
+    """Return True only when every distributed rank reports True."""
+    if not _dist_is_ready():
+        return bool(value)
+
+    flag = torch.tensor(1 if value else 0, device=device, dtype=torch.int32)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag.item())
+
+
 def distributed_barrier() -> None:
     """Synchronize ranks, passing device_ids for NCCL barriers when possible."""
     if not _dist_is_ready():
