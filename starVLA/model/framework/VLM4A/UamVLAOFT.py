@@ -33,7 +33,6 @@ from starVLA.model.modules.uamvla.collator_helpers import (
     stack_static_cam_extrinsic,
 )
 from starVLA.model.tools import FRAMEWORK_REGISTRY
-from starVLA.training.trainer_utils.distributed import all_ranks_true
 
 # Aux heads whose mask defaults to all-True when their ``<head>_mask`` key
 # is missing from batch_dict.  Currently empty: all three perception heads
@@ -766,30 +765,6 @@ class UamVLAOFT(Qwenvl_OFT):
         )
         return f"{head_name}_{metric_core}_raw"
 
-    def _align_aux_head_mask_across_ranks(
-        self,
-        head_name: str,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Keep ZeRO-2 aux-head backward graphs consistent across ranks."""
-        if not self.training:
-            return mask
-
-        has_local_sample = bool(mask.any().detach().item())
-        if all_ranks_true(has_local_sample, device=mask.device):
-            return mask
-
-        warned = getattr(self, "_aux_mask_skip_warned", set())
-        if head_name not in warned:
-            logger.warning(
-                "Skipping %s aux head on a micro-batch because at least one "
-                "distributed rank has no valid target sample.",
-                head_name,
-            )
-            warned.add(head_name)
-            self._aux_mask_skip_warned = warned
-        return torch.zeros_like(mask, dtype=torch.bool)
-
     def _collate_aux(self, examples: List[dict], qwen_inputs: dict) -> dict:
         """Stack per-sample optional fields into batch tensors.
 
@@ -905,7 +880,6 @@ class UamVLAOFT(Qwenvl_OFT):
         assert "input_ids" in batch_dict, "future/recon heads require input_ids"
         for name, head in self.aux_heads.items():
             mask = self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
-            mask = self._align_aux_head_mask_across_ranks(name, mask)
             out = head.compute_loss(hidden, batch_dict, mask=mask)
             if out.loss is not None:
                 total = total + out.loss
