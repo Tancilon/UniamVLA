@@ -6,7 +6,7 @@ produces matches spec §4.3 (LeRobot v2 parquet + sidecar):
     <dataset>/
     ├── data/chunk-XXX/episode_NNNNNN.parquet
     ├── videos/chunk-XXX/video.{primary,wrist}_image/episode_NNNNNN.mp4
-    ├── image_targets/<traj>.png
+    ├── image_targets/<traj>/<base>.png
     ├── point_clouds/<traj>/<base>.npy
     ├── camera_params.json
     └── meta/{modality.json, episodes.jsonl, tasks.jsonl, info.json}
@@ -122,9 +122,26 @@ def test_sidecars_and_camera_params_loadable():
         assert key in cam, f"camera_params.json missing {key}"
     assert cam["width"] == 256 and cam["height"] == 256
 
-    # image_targets: at least one per episode the preprocessor kept.
-    img_targets = sorted((CALVIN_PATH / "image_targets").glob("*.png"))
-    assert img_targets, "No image_target sidecars emitted"
+    episodes = [
+        json.loads(line)
+        for line in (CALVIN_PATH / "meta" / "episodes.jsonl").read_text().splitlines()
+    ]
+    has_frame_targets = bool(list((CALVIN_PATH / "image_targets").glob("*/*.png")))
+    has_legacy_targets = bool(list((CALVIN_PATH / "image_targets").glob("*.png")))
+    if not has_frame_targets and has_legacy_targets:
+        pytest.skip(
+            "Smoke dataset uses legacy episode-level image_targets; "
+            "rerun CALVIN preprocessing to produce per-frame image_targets.",
+        )
+
+    # image_targets: one PNG per kept episode frame.
+    for episode in episodes:
+        traj = int(episode["episode_index"])
+        expected = int(episode["length"])
+        img_targets = sorted((CALVIN_PATH / "image_targets" / str(traj)).glob("*.png"))
+        assert [path.name for path in img_targets] == [
+            f"{base}.png" for base in range(expected)
+        ]
 
     # point_clouds: each episode dir must have at least one (1024, 3)
     # float32 array.

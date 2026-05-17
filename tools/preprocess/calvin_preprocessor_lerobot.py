@@ -8,7 +8,7 @@ Output layout (spec §4.3):
     ├── data/chunk-XXX/episode_NNNNNN.parquet
     ├── videos/chunk-XXX/video.primary_image/episode_NNNNNN.mp4
     ├── videos/chunk-XXX/video.wrist_image/episode_NNNNNN.mp4
-    ├── image_targets/<trajectory_id>.png
+    ├── image_targets/<trajectory_id>/<base_index>.png
     ├── point_clouds/<trajectory_id>/<base_index>.npy
     ├── camera_params.json
     └── meta/{modality.json, tasks.jsonl, episodes.jsonl, info.json}
@@ -41,6 +41,7 @@ from tools.preprocess.calvin_task_map import (
     resolve_target_object,
 )
 from starVLA.utils.geometry import (
+    crop_target_from_seg,
     depth_to_world_points,
     mat_to_6d,
 )
@@ -236,7 +237,7 @@ class _EpisodeBuffers:
     primary_frames: list[np.ndarray]   # uint8 (H, W, 3)
     wrist_frames: list[np.ndarray]     # uint8 (H, W, 3)
     point_clouds: list[np.ndarray]     # (1024, 3) float32 after cleaning
-    image_target: np.ndarray | None    # uint8 (h, w, 3) — taken from first valid frame
+    image_targets: list[np.ndarray]    # one uint8 (h, w, 3) target crop per frame
     instruction: str
 
 
@@ -365,22 +366,24 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                         window.window_idx,
                     )
                     continue
-                if buffers.image_target is None:
-                    # Per code review I5: if no frame in the episode yielded
-                    # a visible target crop, drop the WHOLE episode rather
-                    # than leave parquet rows that reference nonexistent
-                    # sidecars. This keeps the dataset internally consistent.
+                if len(buffers.image_targets) != len(buffers.samples):
                     logger.warning(
-                        "Episode %d (window %d): dropped (no image_target "
-                        "visible in any frame).",
-                        episode_index, window.window_idx,
+                        "Episode %d (window %d): dropped (%d image_targets "
+                        "for %d frames).",
+                        episode_index,
+                        window.window_idx,
+                        len(buffers.image_targets),
+                        len(buffers.samples),
                     )
                     continue
-                if not buffers.point_clouds:
+                if len(buffers.point_clouds) != len(buffers.samples):
                     logger.warning(
-                        "Episode %d (window %d): dropped (no point clouds "
-                        "extracted).",
-                        episode_index, window.window_idx,
+                        "Episode %d (window %d): dropped (%d point clouds "
+                        "for %d frames).",
+                        episode_index,
+                        window.window_idx,
+                        len(buffers.point_clouds),
+                        len(buffers.samples),
                     )
                     continue
 
@@ -406,7 +409,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     output_dir, episode_index, fps=FPS,
                 )
                 self._emit_episode_sidecars(
-                    buffers.image_target, buffers.point_clouds,
+                    buffers.image_targets, buffers.point_clouds,
                     output_dir, episode_index,
                 )
                 # Commit the global counter and episode slot.
@@ -484,7 +487,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         222-372 of calvin_preprocessor.py) but skips disk writes for the
         per-frame .jpg/.npy artifacts — we keep the raw arrays so the
         episode-level writers can emit one parquet + two mp4 + one
-        point_cloud dir + one image_target.png.
+        point_cloud dir + one image_target PNG per frame.
         """
         # Target object resolution (mirrors CalvinWorker.process_window
         # lines 222-240).
@@ -515,7 +518,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         primary_frames: list[np.ndarray] = []
         wrist_frames: list[np.ndarray] = []
         point_clouds: list[np.ndarray] = []
-        image_target: np.ndarray | None = None
+        image_targets: list[np.ndarray] = []
         # Dataset-global row counter; advances 1-per-sample and is written
         # to the `index` column (LeRobot v2 invariant).
         global_index = global_index_start
@@ -541,9 +544,9 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 np.ascontiguousarray(rendered["rgb_wrist"], dtype=np.uint8)
             )
 
-            # Try to extract point cloud + image_target. On miss, the frame
-            # is still recorded in parquet but with sidecar omission (the
-            # framework falls back to defaults at training time).
+            # Try to extract point cloud + per-frame image_target. On miss,
+            # drop/abort the whole window so parquet rows and sidecars stay
+            # one-to-one.
             pts = depth_to_world_points(
                 depth=rendered["depth_static"],
                 seg_mask=rendered["seg_static"],
@@ -572,8 +575,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 # appended unconditionally above, so silently skipping just
                 # this frame leaves point_clouds shorter than parquet rows —
                 # dataloader would FileNotFoundError on the missing sidecar
-                # at training time. Episode-level drop is the same policy as
-                # image_target=None upstream (see process() lines 367-377).
+                # at training time.
                 logger.warning(
                     "Target %r not visible in frame %d (window %d); "
                     "dropping entire window per --on_missing_target=skip.",
@@ -581,16 +583,23 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 )
                 return None
 
-            if image_target is None:
-                # We follow spec §4.2 — one image_target per trajectory,
-                # taken from the first frame where the target is visible.
-                from starVLA.utils.geometry import crop_target_from_seg
-                target_img = crop_target_from_seg(
-                    rendered["rgb_static"], rendered["seg_static"],
-                    target_id=target_seg_id,
+            target_img = crop_target_from_seg(
+                rendered["rgb_static"], rendered["seg_static"],
+                target_id=target_seg_id,
+            )
+            if target_img is None:
+                if self.on_missing_target == "abort":
+                    raise RuntimeError(
+                        f"Target {target_object_id!r} crop missing in frame {t} "
+                        f"(window {window.window_idx})"
+                    )
+                logger.warning(
+                    "Target %r crop missing in frame %d (window %d); dropping "
+                    "entire window per --on_missing_target=skip.",
+                    target_object_id, t, window.window_idx,
                 )
-                if target_img is not None:
-                    image_target = np.asarray(target_img, dtype=np.uint8)
+                return None
+            image_targets.append(np.asarray(target_img, dtype=np.uint8))
 
             # State vector (33 dims): robot_obs (15) || target_pose_rot6d (6)
             # || target_pose_trans (3) || static_cam_rot6d (6) ||
@@ -661,7 +670,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             primary_frames=primary_frames,
             wrist_frames=wrist_frames,
             point_clouds=point_clouds,
-            image_target=image_target,
+            image_targets=image_targets,
             instruction=window.instruction,
         )
 
@@ -700,14 +709,20 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         )
 
     def _emit_episode_sidecars(
-        self, image_target: np.ndarray, point_clouds: list,
+        self, image_targets: list[np.ndarray], point_clouds: list,
         output_dir: Path, episode_index: int,
     ) -> None:
-        img_target_dir = output_dir / "image_targets"
+        if len(image_targets) != len(point_clouds):
+            raise RuntimeError(
+                f"image_targets length {len(image_targets)} != "
+                f"point_clouds length {len(point_clouds)}"
+            )
+        img_target_dir = output_dir / "image_targets" / str(episode_index)
         img_target_dir.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(image_target).save(
-            img_target_dir / f"{episode_index}.png",
-        )
+        for base_index, image_target in enumerate(image_targets):
+            Image.fromarray(np.asarray(image_target, dtype=np.uint8)).save(
+                img_target_dir / f"{base_index}.png",
+            )
         pc_episode_dir = output_dir / "point_clouds" / str(episode_index)
         pc_episode_dir.mkdir(parents=True, exist_ok=True)
         for base_index, pc in enumerate(point_clouds):

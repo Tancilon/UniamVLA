@@ -97,7 +97,7 @@ LeRobot parquet (CALVIN side)
   ├─ videos/chunk-000/...mp4
   ├─ meta/{modality.json,episodes.jsonl,tasks.jsonl,info.json,stats_gr00t.json}
   ├─ point_clouds/<trajectory_id>/<base_index>.npy   ← sidecar，命名规约
-  ├─ image_targets/<trajectory_id>.png               ← sidecar，按 episode 存
+  ├─ image_targets/<trajectory_id>/<base_index>.png   ← sidecar，按帧存
   └─ camera_params.json                              ← PoseHead viz 用的相机内参
         │
         ▼ LeRobotSingleDataset.__getitem__ → _pack_sample (patched per §4.4)
@@ -110,7 +110,7 @@ batch dict (LeRobot-style):
     ├─ _unpack_lerobot_sample(e)            ← LeRobot key → framework key + sidecar IO（§4.5）
     │    ├─ split state tensor → pose_gt, static_cam_extrinsic
     │    ├─ load point_clouds/<__trajectory_id>/<__base_index>.npy → point_cloud
-    │    └─ load image_targets/<__trajectory_id>.png (cached) → image_target
+    │    └─ load image_targets/<__trajectory_id>/<__base_index>.png (cached) → image_target
     ├─ _force_resize_640(image)             ← 训练 + 推理同函数（§5.2）
     ├─ instructions += " Please predict the next K robot actions: <action>🔍🔍...🔍<action>."
     ├─ qwen_inputs = build_qwenvl_inputs(images, instructions)        ← user-turn only
@@ -178,7 +178,7 @@ class UamVLACalvinDataConfig:
 
 | 字段 | 存法 | 修订理由（相对 v1） |
 |---|---|---|
-| `image_target` | **按 episode (trajectory_id) 存 sidecar**：`<dataset_root>/image_targets/<trajectory_id>.png` | v1 是按 task 存，但 CALVIN 的 stack/unstack 任务同 task 有多目标 —— v2 直接按 episode 存，规避降级分支，CALVIN/LIBERO 统一处理 |
+| `image_target` | **按帧存 sidecar**：`<dataset_root>/image_targets/<trajectory_id>/<base_index>.png` | 每个训练样本使用自身时刻的目标裁图，避免一个 episode 内所有帧共享同一张目标图 |
 | `image_future` | **不存**，dataloader 端用 `ModalityConfig(delta_indices=[H-1], modality_keys=["video.primary_image"])` 取未来帧 | 不变 |
 | `pose_6d` + `static_cam_extrinsic` | **合并进标准 `state` modality**，按 index slice | v1 是新 `aux_state` modality —— LeRobot 不支持。改为合并进 `state` |
 | `point_cloud` | **sidecar `.npy` per-frame**：`<dataset_root>/point_clouds/<trajectory_id>/<base_index>.npy`，**framework 端 IO**，不在 transform 里加载 | v1 是 transform 加载 —— `_pack_sample` 不透传 transform 写入的非标准字段。改为 framework 端用 `__trajectory_id` + `__base_index` 直接 IO |
@@ -225,7 +225,7 @@ playground/Datasets/UAMVLA_LEROBOT_CALVIN_ABCD/
 - 7D action → parquet `action.*` 列
 - 33 维 state（15 维 `state.robot_obs` + 9 维 pose + 9 维 cam extrinsic）→ parquet `state.*` 列；其中 robot_obs 取自 `scene_obs` 前 15 维（详见 [calvin_preprocessor.py](../../tools/preprocess/calvin_preprocessor.py) 现状），pose/cam 由现有 target object resolver + camera 内外参生成
 - task instruction → parquet `annotation.human.action.task_description` 列（从 CALVIN 的 `lang_annotations/*.npy` 读）
-- 目标物体裁图（同 task 一次性裁好）→ `image_targets/<trajectory_id>.png`
+- 目标物体裁图（每帧裁图）→ `image_targets/<trajectory_id>/<base_index>.png`
 - 点云（每帧由 depth_static + cam 内参反投影）→ `point_clouds/<trajectory_id>/<base_index>.npy`
 - 相机内参 → 整个 dataset 一份 `camera_params.json`
 
@@ -333,8 +333,8 @@ PoseHead / `static_cam_extrinsic` 消费方拿到的就是未经污染的原始�
 | `state` (33 维) | 按 `aux_state_slice` 切片 → `pose_gt`、`static_cam_extrinsic` | 6D rotation → 3×3 matrix（用 [`rotation_6d_to_matrix`](../../starVLA/model/modules/uamvla/components/pose/pose_utils.py)，**不是** v1 spec 里写错的 `rot6d_to_matrix`） |
 | `action` (H, 7) | `action: Tensor` (H, 7) | 直接透传 |
 | `lang` | `lang: str` | 直接透传 |
-| `__trajectory_id` (int) | 用来反查 sidecar | `np.load(sidecar_root/point_clouds/<id>/<base>.npy)` → `point_cloud`；`Image.open(sidecar_root/image_targets/<id>.png)` → `image_target`（结果 LRU cached by `__trajectory_id`） |
-| `__base_index` (int) | 同上 | 用于 point_cloud 文件名 |
+| `__trajectory_id` (int) | 用来反查 sidecar | `np.load(sidecar_root/point_clouds/<id>/<base>.npy)` → `point_cloud`；`Image.open(sidecar_root/image_targets/<id>/<base>.png)` → `image_target`（结果 LRU cached by `(__trajectory_id, __base_index)`） |
+| `__base_index` (int) | 同上 | 用于 point_cloud 和 image_target 文件名 |
 
 framework 的 `forward(examples)` 在最前面调 `_unpack_lerobot_sample`，输出含 `image / lang / action / image_future / pose_gt / static_cam_extrinsic / point_cloud / image_target` 的标准 framework sample。
 
@@ -362,7 +362,7 @@ framework 的 `forward(examples)` 在最前面调 `_unpack_lerobot_sample`，输
 - [ ] 新 LeRobot dataset 通过 [`lerobot_datasets.py` __main__](../../starVLA/dataloader/lerobot_datasets.py#L102-L139) 的 batch iteration smoke test
 - [ ] sample dict 含 `__trajectory_id`、`__base_index` 两个 int（patch 1 生效）
 - [ ] `state` modality 33 维（15 robot_obs + 9 pose + 9 cam_extrinsic）
-- [ ] sidecar 文件存在：`point_clouds/<traj>/<base>.npy` 和 `image_targets/<traj>.png` 全部可加载
+- [ ] sidecar 文件存在：`point_clouds/<traj>/<base>.npy` 和 `image_targets/<traj>/<base>.png` 全部可加载
 - [ ] **smoke test 命令在 Claude 跑之前先 `nvidia-smi` 检查空闲卡，按 [CLAUDE.md GPU 使用规则](../../CLAUDE.md#GPU-使用规则) 执行**
 
 ## 5. Phase 2：UamVLAOFT framework
@@ -728,7 +728,7 @@ UniamVLA/
 - [ ] 新 LeRobot dataset 通过 [`lerobot_datasets.py` __main__](../../starVLA/dataloader/lerobot_datasets.py#L102-L139) 的 batch iteration smoke test
 - [ ] sample dict 含 `__trajectory_id`、`__base_index`、`image`、`lang`、`action`、`state`(33 维) 全部字段
 - [ ] `meta/stats_gr00t.json` 自动生成成功
-- [ ] sidecar 文件全部可加载：`point_clouds/<traj>/<base>.npy` shape == (1024, 3)；`image_targets/<traj>.png` 可 PIL 打开
+- [ ] sidecar 文件全部可加载：`point_clouds/<traj>/<base>.npy` shape == (1024, 3)；`image_targets/<traj>/<base>.png` 可 PIL 打开
 - [ ] `camera_params.json` 存在且 PoseHead viz 能从中读出 fx/fy/cx/cy
 
 ### 8.2 Phase 2（UamVLAOFT）

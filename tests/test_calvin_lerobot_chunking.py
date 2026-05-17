@@ -77,6 +77,37 @@ def test_episode_files_are_chunked_every_1000_episodes(tmp_path, monkeypatch):
     ) in video_paths
 
 
+def test_episode_sidecars_write_image_target_per_frame(tmp_path, monkeypatch):
+    _stub_imageio_if_needed(monkeypatch)
+
+    module = importlib.import_module(
+        "tools.preprocess.calvin_preprocessor_lerobot",
+    )
+    CalvinPreprocessorLeRobot = module.CalvinPreprocessorLeRobot
+
+    preprocessor = CalvinPreprocessorLeRobot(default_scene="D")
+    image_targets = [
+        np.full((2, 2, 3), 11, dtype=np.uint8),
+        np.full((2, 2, 3), 22, dtype=np.uint8),
+    ]
+    point_clouds = [
+        np.zeros((module.NUM_POINTS, 3), dtype=np.float32),
+        np.ones((module.NUM_POINTS, 3), dtype=np.float32),
+    ]
+
+    preprocessor._emit_episode_sidecars(
+        image_targets,
+        point_clouds,
+        tmp_path,
+        episode_index=7,
+    )
+
+    assert (tmp_path / "image_targets" / "7" / "0.png").exists()
+    assert (tmp_path / "image_targets" / "7" / "1.png").exists()
+    assert (tmp_path / "point_clouds" / "7" / "0.npy").exists()
+    assert (tmp_path / "point_clouds" / "7" / "1.npy").exists()
+
+
 def test_preprocessor_meta_uses_lerobot_chunk_size_1000(tmp_path, monkeypatch):
     _stub_imageio_if_needed(monkeypatch)
 

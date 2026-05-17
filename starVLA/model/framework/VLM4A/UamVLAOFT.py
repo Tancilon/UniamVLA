@@ -95,12 +95,14 @@ class UamVLAOFT(Qwenvl_OFT):
         self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
         self._init_lerobot_video_path_config()
 
-        # Per-trajectory image_target cache (single PNG per traj on disk).
+        # Per-frame image_target cache (one PNG per trajectory/base index).
         # OrderedDict + LRU eviction so worker RAM stays bounded on full-scale
-        # datasets (1000+ trajectories × ~480 KB/entry ≈ multi-GB without a cap).
+        # datasets (many frame crops per trajectory; cap bounds worker memory).
         # 256 entries ≈ 120 MB per worker — comfortable headroom even for 16 workers.
         from collections import OrderedDict
-        self._image_target_cache: "OrderedDict[int, torch.Tensor]" = OrderedDict()
+        self._image_target_cache: "OrderedDict[tuple[int, int], torch.Tensor]" = (
+            OrderedDict()
+        )
         self._image_target_cache_maxsize = int(
             self.config.datasets.vla_data.get("image_target_cache_maxsize", 256)
         )
@@ -284,8 +286,8 @@ class UamVLAOFT(Qwenvl_OFT):
             sidecar ``<sidecar_root>/point_clouds/<traj>/<base>.npy`` if
             present.
           * ``image_target`` (optional): ``Tensor (C, H, W)`` — loaded from
-            sidecar ``<sidecar_root>/image_targets/<traj>.png`` if present
-            (cached by trajectory_id).
+            sidecar ``<sidecar_root>/image_targets/<traj>/<base>.png`` if
+            present (cached by trajectory_id and base_index).
 
         ``image_future`` is deferred to PR 6 (FutureHead is the only
         consumer; this field is intentionally absent here).
@@ -346,20 +348,21 @@ class UamVLAOFT(Qwenvl_OFT):
             pc = np.load(pc_path)
             out["point_cloud"] = torch.as_tensor(pc, dtype=torch.float32)
 
-        if traj not in self._image_target_cache:
-            it_path = self.sidecar_root / "image_targets" / f"{traj}.png"
+        image_target_key = (traj, base)
+        if image_target_key not in self._image_target_cache:
+            it_path = self.sidecar_root / "image_targets" / str(traj) / f"{base}.png"
             if it_path.exists():
                 arr = np.array(Image.open(it_path).convert("RGB"), dtype=np.uint8)
-                self._image_target_cache[traj] = (
+                self._image_target_cache[image_target_key] = (
                     torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
                 )
                 # LRU eviction: drop least-recently-used entries past maxsize.
                 while len(self._image_target_cache) > self._image_target_cache_maxsize:
                     self._image_target_cache.popitem(last=False)
-        if traj in self._image_target_cache:
+        if image_target_key in self._image_target_cache:
             # Mark as recently used so subsequent evictions skip it.
-            self._image_target_cache.move_to_end(traj)
-            out["image_target"] = self._image_target_cache[traj]
+            self._image_target_cache.move_to_end(image_target_key)
+            out["image_target"] = self._image_target_cache[image_target_key]
 
         # image_future: load the terminal primary frame of this task episode.
         # Each CALVIN LeRobot episode corresponds to one language task window.

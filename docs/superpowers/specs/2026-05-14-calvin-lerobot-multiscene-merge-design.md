@@ -28,7 +28,7 @@ The formal pipeline must:
   data/chunk-XXX/episode_NNNNNN.parquet
   videos/chunk-XXX/video.primary_image/episode_NNNNNN.mp4
   videos/chunk-XXX/video.wrist_image/episode_NNNNNN.mp4
-  image_targets/<episode_index>.png
+  image_targets/<episode_index>/<base_index>.png
   point_clouds/<episode_index>/<base_index>.npy
   camera_params.json
   meta/modality.json
@@ -120,7 +120,7 @@ Each input directory must contain:
 data/chunk-*/episode_*.parquet
 videos/chunk-*/video.primary_image/episode_*.mp4
 videos/chunk-*/video.wrist_image/episode_*.mp4
-image_targets/*.png
+image_targets/<episode_index>/<base_index>.png
 point_clouds/<episode_index>/<base_index>.npy
 camera_params.json
 meta/tasks.jsonl
@@ -161,7 +161,7 @@ It also maps files to the matching global episode id:
   -> `videos/chunk-*/video.primary_image/episode_<global>.mp4`;
 - `videos/chunk-*/video.wrist_image/episode_<old>.mp4`
   -> `videos/chunk-*/video.wrist_image/episode_<global>.mp4`;
-- `image_targets/<old>.png` -> `image_targets/<global>.png`;
+- `image_targets/<old>/<base>.png` -> `image_targets/<global>/<base>.png`;
 - `point_clouds/<old>/<base>.npy` -> `point_clouds/<global>/<base>.npy`.
 
 Files should be hard-linked where possible and copied when hard-linking fails,

@@ -303,14 +303,17 @@ def _copy_image_targets(scene: _SceneMeta, output_dir: Path) -> None:
     for episode_row in scene.episodes:
         local_episode = int(episode_row["episode_index"])
         global_episode = scene.episode_index_to_global[local_episode]
-        src_path = image_targets_dir / f"{local_episode}.png"
-        if not src_path.exists():
-            raise CalvinLeRobotMergeError(
-                f"Missing image target for episode {local_episode}: {src_path}"
-            )
-        dst_path = output_dir / "image_targets" / f"{global_episode}.png"
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
+        src_dir = image_targets_dir / str(local_episode)
+        dst_dir = output_dir / "image_targets" / str(global_episode)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for base_index in range(_episode_length(episode_row)):
+            src_path = src_dir / f"{base_index}.png"
+            if not src_path.exists():
+                raise CalvinLeRobotMergeError(
+                    f"Missing image target for episode {local_episode}, "
+                    f"frame {base_index}: {src_path}"
+                )
+            shutil.copy2(src_path, dst_dir / f"{base_index}.png")
 
 
 def _copy_point_clouds(scene: _SceneMeta, output_dir: Path) -> None:
@@ -377,15 +380,15 @@ def _validate_scene_assets(scenes: Sequence[_SceneMeta]) -> None:
             for video_key in _video_feature_keys(scene.info):
                 _source_video_path(scene, video_key, local_episode)
 
-            image_target = scene.root / "image_targets" / f"{local_episode}.png"
-            if not image_target.exists():
-                raise CalvinLeRobotMergeError(
-                    f"Missing image target for episode {local_episode}: "
-                    f"{image_target}"
-                )
-
+            image_target_dir = scene.root / "image_targets" / str(local_episode)
             point_cloud_dir = scene.root / "point_clouds" / str(local_episode)
             for base_index in range(expected_length):
+                image_target = image_target_dir / f"{base_index}.png"
+                if not image_target.exists():
+                    raise CalvinLeRobotMergeError(
+                        f"Missing image target for episode {local_episode}, "
+                        f"frame {base_index}: {image_target}"
+                    )
                 point_cloud = point_cloud_dir / f"{base_index}.npy"
                 if not point_cloud.exists():
                     raise CalvinLeRobotMergeError(

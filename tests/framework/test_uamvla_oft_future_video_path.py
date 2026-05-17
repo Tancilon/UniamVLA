@@ -4,7 +4,10 @@ import importlib.util
 import json
 import sys
 import types
+from collections import OrderedDict
 from pathlib import Path
+
+import numpy as np
 
 
 def _load_uamvla_oft_module(monkeypatch):
@@ -30,9 +33,56 @@ def _load_uamvla_oft_module(monkeypatch):
     tools.FRAMEWORK_REGISTRY = _Registry()
     monkeypatch.setitem(sys.modules, "starVLA.model.tools", tools)
 
+    pose_utils = types.ModuleType(
+        "starVLA.model.modules.uamvla.components.pose.pose_utils",
+    )
+    pose_utils.rotation_6d_to_matrix = lambda value: value
+    monkeypatch.setitem(
+        sys.modules,
+        "starVLA.model.modules.uamvla.components.pose.pose_utils",
+        pose_utils,
+    )
+
+    class _FakeTensor:
+        def __init__(self, array):
+            self.array = np.asarray(array)
+
+        @property
+        def ndim(self):
+            return self.array.ndim
+
+        @property
+        def shape(self):
+            return self.array.shape
+
+        def squeeze(self, axis=None):
+            return _FakeTensor(np.squeeze(self.array, axis=axis))
+
+        def to(self, dtype=None):
+            if dtype is None:
+                return self
+            return _FakeTensor(self.array.astype(dtype))
+
+        def __getitem__(self, item):
+            return _FakeTensor(self.array[item])
+
+        def permute(self, *dims):
+            return _FakeTensor(np.transpose(self.array, axes=dims))
+
+        def float(self):
+            return _FakeTensor(self.array.astype(np.float32))
+
+        def __truediv__(self, value):
+            return _FakeTensor(self.array / value)
+
     torch = types.ModuleType("torch")
     torch.inference_mode = lambda: (lambda fn: fn)
-    torch.is_tensor = lambda _value: False
+    torch.float32 = np.float32
+    torch.is_tensor = lambda value: isinstance(value, _FakeTensor)
+    torch.as_tensor = lambda value, dtype=None: _FakeTensor(
+        np.asarray(value, dtype=dtype),
+    )
+    torch.from_numpy = lambda value: _FakeTensor(np.asarray(value))
     nn = types.ModuleType("torch.nn")
     torch.nn = nn
     monkeypatch.setitem(sys.modules, "torch", torch)
@@ -44,6 +94,51 @@ def _load_uamvla_oft_module(monkeypatch):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_unpack_lerobot_sample_loads_image_target_by_trajectory_and_base(
+    tmp_path,
+    monkeypatch,
+):
+    module = _load_uamvla_oft_module(monkeypatch)
+    target_dir = tmp_path / "image_targets" / "3"
+    target_dir.mkdir(parents=True)
+    module.Image.new("RGB", (2, 2), color=(10, 20, 30)).save(
+        target_dir / "0.png",
+    )
+    module.Image.new("RGB", (2, 2), color=(40, 50, 60)).save(
+        target_dir / "1.png",
+    )
+
+    model = object.__new__(module.UamVLAOFT)
+    model.sidecar_root = tmp_path
+    model._image_target_cache = OrderedDict()
+    model._image_target_cache_maxsize = 8
+    model._load_image_future = lambda traj, base: None
+    model.aux_state_slice = {
+        "target_pose_rot6d": (15, 21),
+        "target_pose_trans": (21, 24),
+        "static_cam_rot6d": (24, 30),
+        "static_cam_trans": (30, 33),
+    }
+    sample = {
+        "image": [module.Image.new("RGB", (4, 4))],
+        "lang": "open drawer",
+        "action": np.zeros((1, 7), dtype=np.float32),
+        "state": np.zeros((1, 33), dtype=np.float32),
+        "__trajectory_id": 3,
+        "__base_index": 1,
+    }
+
+    out = module.UamVLAOFT._unpack_lerobot_sample(model, sample)
+
+    assert "image_target" in out
+    assert out["image_target"].array.shape == (3, 2, 2)
+    np.testing.assert_allclose(
+        out["image_target"].array[:, 0, 0],
+        np.array([40, 50, 60], dtype=np.float32) / 255.0,
+    )
+    assert list(model._image_target_cache.keys()) == [(3, 1)]
 
 
 def test_image_future_video_path_uses_lerobot_chunk_metadata(

@@ -73,11 +73,10 @@ def _write_scene_dataset(
             data_dir / f"episode_{local_episode_id:06d}.parquet"
         )
 
-        image_target_dir = scene_root / "image_targets"
+        image_target_dir = scene_root / "image_targets" / str(local_episode_id)
         image_target_dir.mkdir(parents=True, exist_ok=True)
-        (image_target_dir / f"{local_episode_id}.png").write_bytes(
-            b"\x89PNG\r\n\x1a\n"
-        )
+        for offset in range(length):
+            (image_target_dir / f"{offset}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
         point_cloud_dir = scene_root / "point_clouds" / str(local_episode_id)
         point_cloud_dir.mkdir(parents=True, exist_ok=True)
@@ -241,8 +240,18 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
         for episode_index in range(4)
     ]
 
-    image_targets = sorted((out_dir / "image_targets").glob("*.png"))
-    assert [path.name for path in image_targets] == ["0.png", "1.png", "2.png", "3.png"]
+    image_target_dirs = sorted((out_dir / "image_targets").iterdir())
+    assert [path.name for path in image_target_dirs] == ["0", "1", "2", "3"]
+    image_target_files = [
+        [path.name for path in sorted(image_target_dir.glob("*.png"))]
+        for image_target_dir in image_target_dirs
+    ]
+    assert image_target_files == [
+        ["0.png", "1.png"],
+        ["0.png", "1.png", "2.png"],
+        ["0.png"],
+        ["0.png", "1.png"],
+    ]
 
     point_cloud_dirs = sorted((out_dir / "point_clouds").iterdir())
     assert [path.name for path in point_cloud_dirs] == ["0", "1", "2", "3"]
@@ -779,7 +788,7 @@ def test_merge_rejects_missing_image_target(tmp_path: Path) -> None:
         task_names=["open drawer"],
         episode_lengths=[1],
     )
-    (scene_a / "image_targets" / "0.png").unlink()
+    (scene_a / "image_targets" / "0" / "0.png").unlink()
 
     with pytest.raises(CalvinLeRobotMergeError):
         merge_lerobot_scene_outputs(

@@ -506,7 +506,7 @@ def test_sidecar_files_exist_for_sample(dataset):
     traj = sample["__trajectory_id"]
     base = sample["__base_index"]
     pc_path = CALVIN_PATH / "point_clouds" / str(traj) / f"{base}.npy"
-    img_target_path = CALVIN_PATH / "image_targets" / f"{traj}.png"
+    img_target_path = CALVIN_PATH / "image_targets" / str(traj) / f"{base}.png"
     assert pc_path.exists(), f"missing point cloud: {pc_path}"
     assert img_target_path.exists(), f"missing image_target: {img_target_path}"
 
@@ -539,7 +539,7 @@ git commit -m "feat(preprocess): CALVIN ABCD_D → LeRobot parquet + sidecar
 
 Rewrite output format: per-episode parquet (data/chunk-000/),
 two-stream mp4 (videos/chunk-000/video.{primary,wrist}_image/),
-sidecar point_clouds/<traj>/<base>.npy and image_targets/<traj>.png,
+sidecar point_clouds/<traj>/<base>.npy and image_targets/<traj>/<base>.png,
 camera_params.json, plus LeRobot v2 meta/ files (modality, episodes, tasks, info).
 
 Extraction logic (npz parsing, scene_obs, target object, point cloud) unchanged."
@@ -958,15 +958,16 @@ Append to the class:
             pc = np.load(pc_path)
             out["point_cloud"] = torch.as_tensor(pc, dtype=torch.float32)
 
-        if traj not in self._image_target_cache:
-            it_path = self.sidecar_root / "image_targets" / f"{traj}.png"
+        image_target_key = (traj, base)
+        if image_target_key not in self._image_target_cache:
+            it_path = self.sidecar_root / "image_targets" / str(traj) / f"{base}.png"
             if it_path.exists():
                 arr = np.array(Image.open(it_path).convert("RGB"), dtype=np.uint8)
-                self._image_target_cache[traj] = (
+                self._image_target_cache[image_target_key] = (
                     torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
                 )
-        if traj in self._image_target_cache:
-            out["image_target"] = self._image_target_cache[traj]
+        if image_target_key in self._image_target_cache:
+            out["image_target"] = self._image_target_cache[image_target_key]
 
         # image_future deferred — PR 6 (FutureHead) needs it
         # out["image_future"] = ...   # TODO PR 6
