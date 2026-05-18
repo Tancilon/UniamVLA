@@ -199,12 +199,8 @@ class ReconHead(AuxHead):
         return results
 
     def _normalize_for_vae(self, images: torch.Tensor) -> torch.Tensor:
-        image_std = self.image_std.to(device=images.device, dtype=images.dtype)
-        image_mean = self.image_mean.to(device=images.device, dtype=images.dtype)
-        images_vae = (
-            (images * image_std + image_mean - 0.5) / 0.5
-        ).clamp(-1.0, 1.0)
-        return images_vae
+        # image_target sidecars are loaded as CHW floats in [0, 1].
+        return ((images - 0.5) / 0.5).clamp(-1.0, 1.0)
 
     def _encode_to_latent(self, images_vae: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():

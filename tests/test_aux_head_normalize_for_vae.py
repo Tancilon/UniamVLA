@@ -32,3 +32,15 @@ def test_normalize_for_vae_uses_image_tensor_device(head_cls):
     normalized = head._normalize_for_vae(images)
 
     assert normalized.device == images.device
+
+
+def test_recon_normalize_for_vae_maps_sidecar_unit_range_to_vae_range():
+    head = _head_with_cpu_image_buffers(ReconHead)
+    head.image_mean = torch.tensor([0.5, 0.5, 0.5]).view(1, -1, 1, 1)
+    head.image_std = torch.tensor([0.5, 0.5, 0.5]).view(1, -1, 1, 1)
+    images = torch.tensor([0.0, 0.5, 1.0]).view(1, 3, 1, 1)
+
+    normalized = head._normalize_for_vae(images)
+
+    expected = torch.tensor([-1.0, 0.0, 1.0]).view(1, 3, 1, 1)
+    torch.testing.assert_close(normalized, expected)
