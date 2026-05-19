@@ -70,7 +70,8 @@ def test_uamvla_gr00t_calvin_d_config_uses_horizon_8():
     assert cfg["framework"]["name"] == "UamVLAGR00T"
     assert cfg["framework"]["action_model"]["action_model_type"] == "DiT-B"
     assert cfg["framework"]["action_model"]["action_horizon"] == 8
-    assert cfg["framework"]["action_model"]["state_dim"] == 0
+    assert cfg["framework"]["action_model"]["state_dim"] == 7
+    assert cfg["framework"]["action_model"]["repeated_diffusion_steps"] == 8
     assert "Action" not in cfg["framework"]["qwenvl"]["base_vlm"]
     assert cfg["datasets"]["vla_data"]["data_mix"] == "uamvla_calvin_d_h8"
 
@@ -131,6 +132,56 @@ def test_uamvla_gr00t_registers_framework_and_uses_flow_matching_forward(monkeyp
     np.testing.assert_allclose(actions[0].numpy(), sample["action"][-8:])
 
 
+def test_uamvla_gr00t_forward_repeats_extracted_calvin_robot_obs_state(monkeypatch):
+    module = _load_uamvla_gr00t_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeQwenInterface:
+        image_token_id = 99
+
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.full((len(images), 400), 99, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones((kwargs["input_ids"].shape[0], 400, 16), dtype=torch.float32)
+            return types.SimpleNamespace(hidden_states=[hidden])
+
+    class _FakeActionModel:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, vl_embs, actions, state):
+            self.calls.append((vl_embs, actions, state))
+            return torch.tensor(1.0)
+
+    model = object.__new__(module.UamVLAGR00T)
+    model.qwen_vl_interface = _FakeQwenInterface()
+    model.action_model = _FakeActionModel()
+    model.action_horizon = 8
+    model.aux_heads = {}
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            action_model=_AttrDict(repeated_diffusion_steps=2, state_dim=7),
+        ),
+    )
+
+    packed_state = np.arange(33, dtype=np.float32).reshape(1, 33)
+    sample = {
+        "__trajectory_id": 1,
+        "image": [object()],
+        "lang": "open the drawer",
+        "action": np.arange(10 * 7, dtype=np.float32).reshape(10, 7),
+        "state": packed_state,
+    }
+
+    module.UamVLAGR00T.forward(model, [sample])
+
+    _vl_embs, _actions, state = model.action_model.calls[0]
+    assert state.shape == (2, 1, 7)
+    np.testing.assert_allclose(state[0].numpy(), packed_state[:, :7])
+    np.testing.assert_allclose(state[1].numpy(), packed_state[:, :7])
+
+
 def test_uamvla_gr00t_init_does_not_walk_into_uamvla_oft_init(monkeypatch):
     module = _load_uamvla_gr00t_module(monkeypatch)
     init_calls = []
@@ -149,3 +200,19 @@ def test_uamvla_gr00t_init_does_not_walk_into_uamvla_oft_init(monkeypatch):
     assert model.config == "cfg"
     assert model.action_horizon == 8
     assert init_calls == ["cfg"]
+
+
+def test_uamvla_gr00t_unpacks_calvin_robot_obs_as_action_aligned_state(monkeypatch):
+    module = _load_uamvla_gr00t_module(monkeypatch)
+    model = object.__new__(module.UamVLAGR00T)
+
+    packed_state = np.arange(33, dtype=np.float32).reshape(1, 33)
+    sample = {
+        "__trajectory_id": 1,
+        "state": packed_state,
+    }
+
+    out = module.UamVLAGR00T._unpack_lerobot_sample(model, sample)
+
+    assert out["state"].shape == (1, 7)
+    np.testing.assert_allclose(out["state"].numpy(), packed_state[:, :7])

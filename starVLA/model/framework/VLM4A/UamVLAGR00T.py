@@ -101,6 +101,37 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
             for example in examples
         ]
 
+    def _unpack_lerobot_sample(self, sample: dict) -> dict:
+        """Unpack sidecar sample and expose CALVIN ``robot_obs[:7]`` to GR00T.
+
+        UAMVLA packs CALVIN state as ``robot_obs(15) + aux pose/camera(18)``.
+        For GR00T's 7-D state branch we keep the action-aligned proprio state:
+        TCP position, TCP Euler orientation, and gripper opening width.
+        """
+        out = UamVLAOFT._unpack_lerobot_sample(self, sample)
+        if "state" in sample:
+            out["state"] = self._extract_gr00t_state_from_packed_calvin_state(sample["state"])
+        return out
+
+    @staticmethod
+    def _extract_gr00t_state_from_packed_calvin_state(state) -> torch.Tensor:
+        """Return ``robot_obs[:7]`` as ``(1, 7)`` float tensor for GR00T."""
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(np.asarray(state), dtype=torch.float32)
+        else:
+            state = state.to(dtype=torch.float32)
+
+        if state.ndim == 2 and state.shape[0] == 1:
+            state = state.squeeze(0)
+        elif state.ndim > 1:
+            state = state.reshape(-1, state.shape[-1])[0]
+
+        if state.shape[-1] < 7:
+            raise RuntimeError(
+                f"Expected packed CALVIN state with at least 7 dims, got shape {tuple(state.shape)}."
+            )
+        return state[..., :7].reshape(1, 7)
+
     def _state_batch_or_none(self, examples: List[dict], device, dtype):
         """Return raw proprio state only when the GR00T state encoder is enabled."""
         state_dim = int(self.config.framework.action_model.get("state_dim", 0) or 0)
