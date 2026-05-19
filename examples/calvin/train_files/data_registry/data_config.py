@@ -71,12 +71,21 @@ class UamVLACalvinDataConfig:
         ])
 
 
+class UamVLACalvinH8DataConfig(UamVLACalvinDataConfig):
+    """CALVIN UAMVLA config with 8-step action chunks for GR00T experiments."""
+
+    action_horizon = 8
+    action_indices = list(range(action_horizon))
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "uamvla_calvin_franka": UamVLACalvinDataConfig(),
+    "uamvla_calvin_franka_h8": UamVLACalvinH8DataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "uamvla_calvin_franka": EmbodimentTag.FRANKA,
+    "uamvla_calvin_franka_h8": EmbodimentTag.FRANKA,
 }
 
 DATASET_NAMED_MIXTURES = {
@@ -88,6 +97,12 @@ DATASET_NAMED_MIXTURES = {
     # D-only preprocessed dataset (datasets/calvin2uam/lerobot_calvin_d).
     "uamvla_calvin_d": [
         ("lerobot_calvin_d", 1.0, "uamvla_calvin_franka"),
+    ],
+    "uamvla_calvin_abcd_h8": [
+        ("lerobot_calvin_abcd", 1.0, "uamvla_calvin_franka_h8"),
+    ],
+    "uamvla_calvin_d_h8": [
+        ("lerobot_calvin_d", 1.0, "uamvla_calvin_franka_h8"),
     ],
     # Smoke alias kept for the dataloader / framework smokes that ship in
     # tests/. yaml's data_root_dir is playground/Datasets when using this
