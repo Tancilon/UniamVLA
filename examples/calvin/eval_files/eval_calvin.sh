@@ -5,7 +5,7 @@ set -euo pipefail
 # === Please modify the following paths according to your environment ===
 export PYTHONPATH=$(pwd):${PYTHONPATH:-} # let Calvin client find websocket tools from main repo
 export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/matplotlib-calvin}
-calvin_python=${CALVIN_PYTHON:-/home/user01/miniconda3/envs/calvin_venv/bin/python}
+# NOTE: activate the calvin conda env before running this script.
 
 host=${HOST:-127.0.0.1}
 base_port=${PORT:-5694}
@@ -23,7 +23,7 @@ folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 LOG_DIR=${LOG_DIR:-logs/calvin_eval_${folder_name}_$(date +"%Y%m%d_%H%M%S")}
 mkdir -p ${LOG_DIR}
 
-${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
+python ./examples/calvin/eval_files/eval_calvin.py \
     --args.pretrained-path "${your_ckpt}" \
     --args.unnorm-key "${unnorm_key}" \
     --args.host "$host" \
