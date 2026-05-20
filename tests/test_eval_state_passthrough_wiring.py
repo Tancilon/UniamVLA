@@ -207,6 +207,31 @@ def test_step_pops_raw_state_even_when_passthrough_disabled(make_client):
     assert "canonical_state" not in sent_example
 
 
+def test_step_surfaces_policy_server_error_response(make_client):
+    """A policy server inference error has no data field; surface its message."""
+    client = make_client(unnorm_key=None)
+
+    def fail_predict_action(_query_info: dict) -> dict:
+        return {
+            "status": "error",
+            "ok": False,
+            "type": "inference_result",
+            "error": {
+                "message": "synthetic server failure",
+                "traceback": "Traceback line 1\nValueError: synthetic server failure",
+            },
+        }
+
+    client.client.predict_action = fail_predict_action
+
+    example = {
+        "image": [np.zeros((224, 224, 3), dtype=np.uint8) for _ in range(2)],
+        "lang": "move the slider left",
+    }
+    with pytest.raises(RuntimeError, match="Traceback line 1"):
+        client.step(example, step=0)
+
+
 def test_resize_image_is_noop_when_shape_already_matches():
     """CALVIN train-renderer eval feeds 256x256 images; avoid an extra resize."""
     from examples.LIBERO.eval_files.model2libero_interface import ModelClient

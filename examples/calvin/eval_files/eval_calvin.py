@@ -26,7 +26,10 @@ from pathlib import Path
 
 import hydra
 import numpy as np
-import tyro
+try:
+    import tyro
+except ModuleNotFoundError:
+    tyro = None
 
 # # Add Calvin to path
 # CALVIN_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "calvin"
@@ -66,7 +69,7 @@ class Args:
     host: str = "127.0.0.1"
     port: int = 8000
     resize_size: int = 256
-    replan_steps: int = 5
+    replan_steps: int = 0  # 0 means use the model checkpoint's default action horizon
     pretrained_path: str = ""
     unnorm_key: str = ""
     use_train_renderer: bool = True
@@ -100,7 +103,7 @@ class CalvinPolicyClient:
         host: str,
         port: int,
         resize_size: int = 256,
-        replan_steps: int = 5,
+        replan_steps: int = 0,
         pretrained_path: str = "",
         unnorm_key: str = "",
         train_renderer=None,
@@ -113,7 +116,7 @@ class CalvinPolicyClient:
             image_size=[resize_size, resize_size],
             unnorm_key=(unnorm_key or None),
             gripper_binarize_threshold=gripper_binarize_threshold,
-            action_query_interval=replan_steps,
+            action_query_interval=replan_steps if replan_steps > 0 else None,
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
@@ -495,5 +498,45 @@ def main(args: Args):
     )
 
 
+def _parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean value, got {value!r}")
+
+
+def _parse_args_with_argparse() -> Args:
+    """Small tyro-compatible fallback for older CALVIN envs without tyro."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Evaluate a policy server on CALVIN.")
+    for field in dataclasses.fields(Args):
+        default = field.default
+        dashed = field.name.replace("_", "-")
+        flags = (f"--args.{dashed}", f"--args.{field.name}")
+        if isinstance(default, bool):
+            group = parser.add_mutually_exclusive_group()
+            group.add_argument(
+                *flags,
+                dest=field.name,
+                nargs="?",
+                const=True,
+                default=default,
+                type=_parse_bool,
+            )
+            group.add_argument(f"--args.no-{dashed}", dest=field.name, action="store_false")
+        else:
+            parser.add_argument(*flags, dest=field.name, default=default, type=type(default))
+
+    return Args(**vars(parser.parse_args()))
+
+
 if __name__ == "__main__":
-    tyro.cli(main)
+    if tyro is not None:
+        tyro.cli(main)
+    else:
+        main(_parse_args_with_argparse())

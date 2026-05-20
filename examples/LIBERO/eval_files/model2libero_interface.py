@@ -235,11 +235,31 @@ class ModelClient:
         action_query_interval = self.action_query_interval
         if step % action_query_interval == 0 or not hasattr(self, "raw_actions"):
             response = self.client.predict_action(vla_input)
+            if isinstance(response, dict) and response.get("ok") is False:
+                error = response.get("error", {})
+                if isinstance(error, dict):
+                    message = error.get("message") or repr(error)
+                    tb = error.get("traceback")
+                else:
+                    message = str(error)
+                    tb = None
+                details = f"Policy server inference failed: {message}"
+                if tb:
+                    details = f"{details}\n{tb}"
+                raise RuntimeError(details)
+
             try:
                 normalized_actions = response["data"]["normalized_actions"]  # B, chunk, D
-            except KeyError:
+            except KeyError as e:
                 print(f"Response data: {response}")
-                raise KeyError(f"Key 'normalized_actions' not found in response data: {response['data'].keys()}")
+                data = response.get("data") if isinstance(response, dict) else None
+                data_keys = list(data.keys()) if isinstance(data, dict) else None
+                response_keys = list(response.keys()) if isinstance(response, dict) else None
+                raise KeyError(
+                    "Malformed policy server response: "
+                    f"missing {e.args[0]!r}; "
+                    f"response_keys={response_keys}; data_keys={data_keys}"
+                ) from e
 
             normalized_actions = normalized_actions[0]
             self.raw_actions = self.unnormalize_actions(

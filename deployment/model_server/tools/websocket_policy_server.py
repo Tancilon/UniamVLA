@@ -2,6 +2,8 @@
 # Licensed under the MIT License, Version 1.0 (the "License");
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -116,8 +118,8 @@ class WebsocketPolicyServer:
             try:
                 output_dict = self._policy.predict_action(**payload)
             except Exception as e:
+                tb = traceback.format_exc()
                 logging.exception("Policy inference error (request_id=%s)", req_id)
-                logging.exception(e)
 
                 return {
                     "status": "error",
@@ -126,6 +128,7 @@ class WebsocketPolicyServer:
                     "request_id": req_id,
                     "error": {
                         "message": str(e),
+                        "traceback": tb,
                     },
                 }
             data = output_dict

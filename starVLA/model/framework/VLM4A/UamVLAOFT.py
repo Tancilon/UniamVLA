@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
 
+from deployment.model_server.tools.image_tools import to_pil_preserve
 from starVLA.model.framework.VLM4A.QwenOFT import Qwenvl_OFT
 from starVLA.model.modules.uamvla.collator_helpers import (
     stack_optional_tensor_fields,
@@ -237,7 +238,7 @@ class UamVLAOFT(Qwenvl_OFT):
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────
     def _force_resize_640(self, image_list: list) -> list:
-        """Resize each PIL image to 640x640 via ``Image.BICUBIC``, idempotent.
+        """Resize each image to 640x640 via ``Image.BICUBIC``, idempotent.
 
         Qwen3VLProcessor produces ``image_grid_thw=(1, 40, 40)``
         (i.e. ppv=400) at this resolution, which matches the
@@ -254,12 +255,11 @@ class UamVLAOFT(Qwenvl_OFT):
         """
         out: list = []
         for img in image_list:
-            if isinstance(img, Image.Image):
-                if img.size != (640, 640):
-                    img = img.resize((640, 640), Image.BICUBIC)
-                out.append(img)
-            else:
-                out.append(img)
+            if not isinstance(img, Image.Image):
+                img = to_pil_preserve(img)
+            if img.size != (640, 640):
+                img = img.resize((640, 640), Image.BICUBIC)
+            out.append(img)
         return out
 
     # ──────────────────────────────────────────────────────────────────
