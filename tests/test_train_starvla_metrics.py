@@ -209,3 +209,47 @@ def test_train_step_logs_all_scalar_forward_metrics(monkeypatch):
         "loss/recon_loss_raw": 5.0,
         "loss/future_loss_raw": 6.0,
     }
+
+
+def test_train_step_does_not_advance_scheduler_on_accumulation_microstep(monkeypatch):
+    _install_train_starvla_stubs(monkeypatch)
+    sys.modules.pop("starVLA.training.train_starvla", None)
+    train_starvla = importlib.import_module("starVLA.training.train_starvla")
+
+    class _Model:
+        def forward(self, _batch):
+            return {"action_loss": _FakeTensor(10.0)}
+
+        def parameters(self):
+            return []
+
+    class _Counter:
+        def __init__(self):
+            self.calls = 0
+
+        def step(self):
+            self.calls += 1
+
+    optimizer_step = _Counter()
+    scheduler_step = _Counter()
+    optimizer = SimpleNamespace(
+        zero_grad=lambda: None,
+        step=optimizer_step.step,
+    )
+    lr_scheduler = SimpleNamespace(step=scheduler_step.step)
+    accelerator = train_starvla.Accelerator()
+    accelerator.sync_gradients = False
+
+    trainer = object.__new__(train_starvla.VLATrainer)
+    trainer.model = _Model()
+    trainer.optimizer = optimizer
+    trainer.lr_scheduler = lr_scheduler
+    trainer.accelerator = accelerator
+    trainer.config = SimpleNamespace(
+        trainer=SimpleNamespace(gradient_clipping=None),
+    )
+
+    trainer._train_step(batch_vla={})
+
+    assert optimizer_step.calls == 1
+    assert scheduler_step.calls == 0
