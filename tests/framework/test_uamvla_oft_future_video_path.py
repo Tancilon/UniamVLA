@@ -21,6 +21,7 @@ def _load_uamvla_oft_module(monkeypatch):
 
     helpers = types.ModuleType("starVLA.model.modules.uamvla.collator_helpers")
     helpers.stack_optional_tensor_fields = lambda *args, **kwargs: None
+    helpers.stack_optional_string_fields = lambda *args, **kwargs: {}
     helpers.stack_pose_gt = lambda *args, **kwargs: None
     helpers.stack_static_cam_extrinsic = lambda *args, **kwargs: None
     monkeypatch.setitem(
@@ -115,6 +116,7 @@ def test_unpack_lerobot_sample_loads_image_target_by_trajectory_and_base(
     model._image_target_cache = OrderedDict()
     model._image_target_cache_maxsize = 8
     model._load_image_future = lambda traj, base: None
+    model._load_image_action_future = lambda traj, base: None
     model.aux_state_slice = {
         "target_pose_rot6d": (15, 21),
         "target_pose_trans": (21, 24),

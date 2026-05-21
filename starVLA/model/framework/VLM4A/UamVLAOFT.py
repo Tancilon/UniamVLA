@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 from deployment.model_server.tools.image_tools import to_pil_preserve
 from starVLA.model.framework.VLM4A.QwenOFT import Qwenvl_OFT
 from starVLA.model.modules.uamvla.collator_helpers import (
+    stack_optional_string_fields,
     stack_optional_tensor_fields,
     stack_pose_gt,
     stack_static_cam_extrinsic,
@@ -456,6 +457,23 @@ class UamVLAOFT(Qwenvl_OFT):
         future_tensor = self._load_image_future(traj, base)
         if future_tensor is not None:
             out["image_future"] = future_tensor
+
+        depth = self._load_depth_target(traj, base)
+        if depth is not None:
+            out["depth_target"] = depth
+
+        grounding = self._load_grounding_mask(traj, base)
+        if grounding is not None:
+            out["grounding_mask"] = grounding["mask"]
+            out["grounding_level"] = grounding["level"]
+
+        affordance = self._load_affordance_heatmap(traj, base)
+        if affordance is not None:
+            out["affordance_heatmap"] = affordance
+
+        image_action_future = self._load_image_action_future(traj, base)
+        if image_action_future is not None:
+            out["image_action_future"] = image_action_future
         return out
 
     # ──────────────────────────────────────────────────────────────────
@@ -503,6 +521,63 @@ class UamVLAOFT(Qwenvl_OFT):
         if video_length <= 0:
             return None
         return video_length - 1
+
+    @staticmethod
+    def _load_npy_sidecar(path: Path) -> torch.Tensor | None:
+        if not path.exists():
+            return None
+        arr = np.load(path)
+        if arr.ndim == 2:
+            arr = arr[None, ...]
+        elif arr.ndim == 3 and arr.shape[-1] == 1 and arr.shape[0] != 1:
+            arr = np.moveaxis(arr, -1, 0)
+        return torch.as_tensor(arr, dtype=torch.float32)
+
+    def _load_depth_target(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+        path = self.sidecar_root / "depths" / "static" / str(trajectory_id) / f"{base_index}.npy"
+        return self._load_npy_sidecar(path)
+
+    def _load_grounding_mask(self, trajectory_id: int, base_index: int) -> dict | None:
+        mask_path = (
+            self.sidecar_root
+            / "grounding_masks"
+            / "static"
+            / str(trajectory_id)
+            / f"{base_index}.npy"
+        )
+        mask = self._load_npy_sidecar(mask_path)
+        if mask is None:
+            return None
+        level = "object"
+        meta_path = mask_path.with_suffix(".json")
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                level = str(meta.get("grounding_level", meta.get("level", level)))
+            except Exception as exc:
+                logger.warning("Failed to load grounding metadata %s: %s", meta_path, exc)
+        return {"mask": mask, "level": level}
+
+    def _load_affordance_heatmap(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+        path = (
+            self.sidecar_root
+            / "affordance_heatmaps"
+            / "static"
+            / str(trajectory_id)
+            / f"{base_index}.npy"
+        )
+        return self._load_npy_sidecar(path)
+
+    def _image_action_future_frame_index(self, base_index: int, video_length: int) -> int | None:
+        if video_length <= 0:
+            return None
+        action_model_cfg = self.config.framework.action_model
+        offset = int(action_model_cfg.get("future_action_window_size", 0))
+        frame_index = int(base_index) + offset
+        if frame_index < 0 or frame_index >= video_length:
+            return None
+        return frame_index
 
     @staticmethod
     def _to_rgb_pil(image) -> Image.Image:
@@ -821,6 +896,28 @@ class UamVLAOFT(Qwenvl_OFT):
             )
             return None
 
+    def _load_image_action_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+        """Read the local future frame aligned to the current action chunk."""
+        video_path = self._image_future_video_path(trajectory_id)
+        if not video_path.exists():
+            return None
+        try:
+            import decord
+
+            vr = decord.VideoReader(str(video_path))
+            future_idx = self._image_action_future_frame_index(base_index, len(vr))
+            if future_idx is None:
+                return None
+            frame_np = vr[future_idx].asnumpy()
+            chw = torch.from_numpy(frame_np).permute(2, 0, 1).float() / 255.0
+            return (chw - 0.5) / 0.5
+        except Exception as e:
+            logger.warning(
+                f"Failed to load image_action_future for traj={trajectory_id} "
+                f"base={base_index}: {e}"
+            )
+            return None
+
     # ──────────────────────────────────────────────────────────────────
     #  Aux-head helper utilities (used by PR 5+)
     # ──────────────────────────────────────────────────────────────────
@@ -866,12 +963,29 @@ class UamVLAOFT(Qwenvl_OFT):
             "input_ids": qwen_inputs["input_ids"],
         }
         batch_dict.update(stack_optional_tensor_fields(
-            examples, ["image_target", "image_future", "point_cloud"],
+            examples,
+            [
+                "image_target",
+                "image_future",
+                "point_cloud",
+                "depth_target",
+                "grounding_mask",
+                "affordance_heatmap",
+                "image_action_future",
+                "action",
+            ],
         ))
+        batch_dict.update(stack_optional_string_fields(examples, ["grounding_level"]))
         if "image_target_mask" in batch_dict:
             batch_dict["recon_mask"] = batch_dict["image_target_mask"]
         if "image_future_mask" in batch_dict:
             batch_dict["future_mask"] = batch_dict["image_future_mask"]
+        if "depth_target_mask" in batch_dict:
+            batch_dict["depth_mask"] = batch_dict["depth_target_mask"]
+        if "affordance_heatmap_mask" in batch_dict:
+            batch_dict["affordance_mask"] = batch_dict["affordance_heatmap_mask"]
+        if "image_action_future_mask" in batch_dict:
+            batch_dict["action_conditioned_future_mask"] = batch_dict["image_action_future_mask"]
 
         pose_out = stack_pose_gt(examples)
         if pose_out is not None:
