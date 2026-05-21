@@ -234,6 +234,93 @@ class UamVLAOFT(Qwenvl_OFT):
                 **{**vision_extra, **recon_cfg},
             )
 
+        map_vision_extra = {
+            "image_token_id": getattr(
+                self.qwen_vl_interface,
+                "image_token_id",
+                self.qwen_vl_interface.processor.tokenizer.convert_tokens_to_ids(
+                    "<|image_pad|>"
+                ),
+            ),
+            "patches_per_view": 400,
+        }
+
+        if cfg_heads.get("depth", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.depth_head import DepthDenoisingHead
+
+            depth_cfg = {
+                k: v for k, v in cfg_heads.depth.items()
+                if k not in ("enabled", "lr")
+            }
+            self.aux_heads["depth"] = DepthDenoisingHead(
+                hidden_size=hidden_size,
+                **{**map_vision_extra, **depth_cfg},
+            )
+
+        if cfg_heads.get("grounding", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.grounding_head import (
+                GroundingMaskDenoisingHead,
+            )
+
+            grounding_cfg = {
+                k: v for k, v in cfg_heads.grounding.items()
+                if k not in ("enabled", "lr")
+            }
+            self.aux_heads["grounding"] = GroundingMaskDenoisingHead(
+                hidden_size=hidden_size,
+                **{**map_vision_extra, **grounding_cfg},
+            )
+
+        if cfg_heads.get("affordance", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.affordance_head import (
+                AffordanceHeatmapDenoisingHead,
+            )
+
+            affordance_cfg = {
+                k: v for k, v in cfg_heads.affordance.items()
+                if k not in ("enabled", "lr")
+            }
+            self.aux_heads["affordance"] = AffordanceHeatmapDenoisingHead(
+                hidden_size=hidden_size,
+                **{**map_vision_extra, **affordance_cfg},
+            )
+
+        if cfg_heads.get("action_conditioned_future", {}).get("enabled", False):
+            from starVLA.model.modules.uamvla.aux_heads.action_conditioned_future_head import (
+                ActionConditionedFutureHead,
+            )
+            from starVLA.model.modules.uamvla.components.pixel_decoder.vae import (
+                VAEPixelDecoder,
+            )
+
+            if not hasattr(self, "vae") or self.vae is None:
+                self.vae = VAEPixelDecoder(self.config.framework.vae.path)
+
+            action_future_cfg = {
+                k: v for k, v in cfg_heads.action_conditioned_future.items()
+                if k not in ("enabled", "lr")
+            }
+            action_model_cfg = self.config.framework.action_model
+            action_dim = int(action_model_cfg.get("action_dim", 7))
+            action_horizon = int(
+                getattr(self, "action_horizon", action_model_cfg.get("action_horizon"))
+            )
+            vision_extra = {
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std":  [0.5, 0.5, 0.5],
+                "image_token_id": map_vision_extra["image_token_id"],
+                "patches_per_view": 400,
+                "n_patches": 400,
+                "target_resize": 320,
+            }
+            self.aux_heads["action_conditioned_future"] = ActionConditionedFutureHead(
+                hidden_size=hidden_size,
+                vae=self.vae,
+                action_dim=action_dim,
+                action_horizon=action_horizon,
+                **{**vision_extra, **action_future_cfg},
+            )
+
     # ──────────────────────────────────────────────────────────────────
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────

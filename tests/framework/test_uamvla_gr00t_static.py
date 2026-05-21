@@ -76,6 +76,16 @@ def test_uamvla_gr00t_calvin_d_config_uses_horizon_8():
     assert cfg["datasets"]["vla_data"]["data_mix"] == "uamvla_calvin_d_h8"
 
 
+def test_uamvla_gr00t_config_defines_aux_loss_control_and_new_heads():
+    cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin_d.yaml").read_text())
+    assert cfg["framework"]["aux_loss_control"]["enabled"] is True
+    assert cfg["framework"]["aux_loss_control"]["aux_ratio_cap"] == 0.5
+    heads = cfg["framework"]["aux_heads"]
+    for name in ["depth", "action_conditioned_future", "grounding", "affordance"]:
+        assert name in heads
+        assert heads[name]["enabled"] is False
+
+
 def test_uamvla_gr00t_registers_framework_and_uses_flow_matching_forward(monkeypatch):
     module = _load_uamvla_gr00t_module(monkeypatch)
     monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
