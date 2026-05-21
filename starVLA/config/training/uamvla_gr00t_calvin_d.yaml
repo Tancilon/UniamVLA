@@ -49,10 +49,6 @@ framework:
   aux_loss_control:
     enabled: true
     aux_budget: 1.0
-    warmup_steps: 2000
-    aux_ratio_cap: 0.5
-    action_loss_ema_beta: 0.99
-    eps: 1.0e-8
   aux_heads:
     pose:
       enabled: false

@@ -268,7 +268,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 k: v for k, v in cfg_heads.grounding.items()
                 if k not in ("enabled", "lr")
             }
-            self.aux_heads["grounding"] = GroundingMaskDenoisingHead(
+            self.aux_heads["grounding_mask"] = GroundingMaskDenoisingHead(
                 hidden_size=hidden_size,
                 **{**map_vision_extra, **grounding_cfg},
             )
@@ -334,10 +334,6 @@ class UamVLAOFT(Qwenvl_OFT):
         allowed = {
             "enabled",
             "aux_budget",
-            "warmup_steps",
-            "aux_ratio_cap",
-            "action_loss_ema_beta",
-            "eps",
         }
         suite_kwargs = {
             key: value

@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
+
+
+def _build_sincos_pos_embed(max_horizon: int, dim: int) -> torch.Tensor:
+    pe = torch.zeros(max_horizon, dim)
+    position = torch.arange(max_horizon, dtype=torch.float32).unsqueeze(1)
+    div_term = torch.exp(
+        torch.arange(0, dim, 2, dtype=torch.float32) * (-math.log(10000.0) / dim)
+    )
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term[: pe[:, 1::2].shape[1]])
+    return pe.unsqueeze(0)
 
 
 class ActionChunkEncoder(nn.Module):
@@ -19,7 +32,9 @@ class ActionChunkEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.input_proj = nn.Linear(action_dim, action_embed_dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, max_horizon, action_embed_dim))
+        self.pos_embed = nn.Parameter(
+            _build_sincos_pos_embed(max_horizon, action_embed_dim)
+        )
         layer = nn.TransformerEncoderLayer(
             d_model=action_embed_dim,
             nhead=num_heads,

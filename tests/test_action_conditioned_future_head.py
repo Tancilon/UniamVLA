@@ -25,6 +25,29 @@ def test_action_chunk_encoder_outputs_hidden_size():
     assert torch.isfinite(out).all()
 
 
+def test_action_chunk_encoder_uses_learnable_sincos_position_init():
+    encoder = ActionChunkEncoder(
+        action_dim=7,
+        hidden_size=16,
+        action_embed_dim=6,
+        num_layers=1,
+        num_heads=2,
+        max_horizon=4,
+    )
+
+    position = torch.arange(4, dtype=torch.float32).unsqueeze(1)
+    div_term = torch.exp(
+        torch.arange(0, 6, 2, dtype=torch.float32) * (-torch.log(torch.tensor(10000.0)) / 6)
+    )
+    expected = torch.zeros(1, 4, 6)
+    expected[0, :, 0::2] = torch.sin(position * div_term)
+    expected[0, :, 1::2] = torch.cos(position * div_term)
+
+    assert isinstance(encoder.pos_embed, nn.Parameter)
+    assert encoder.pos_embed.requires_grad
+    assert torch.allclose(encoder.pos_embed.detach(), expected)
+
+
 class _FakeVAE(nn.Module):
     latent_channels = 2
     scaling_factor = 1.0

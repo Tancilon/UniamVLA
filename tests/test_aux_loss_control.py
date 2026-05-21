@@ -22,15 +22,11 @@ class _Head(nn.Module):
         )
 
 
-def test_aux_suite_applies_warmup_and_ema_budget():
+def test_aux_suite_applies_static_aux_budget_only():
     heads = nn.ModuleDict({"depth": _Head(4.0, 0.5), "grounding": _Head(2.0, 1.0)})
     suite = AuxDenoisingSuite(
         heads=heads,
-        aux_budget=1.0,
-        warmup_steps=10,
-        aux_ratio_cap=0.5,
-        action_loss_ema_beta=0.0,
-        eps=1.0e-8,
+        aux_budget=0.25,
     )
     hidden = torch.zeros(2, 5, 3)
     batch = {}
@@ -48,13 +44,16 @@ def test_aux_suite_applies_warmup_and_ema_budget():
         global_step=5,
     )
 
-    # raw aux = 6.0, cap = 1.0, budget scale = 1/6, warmup = 0.5
-    assert torch.allclose(aux_loss, torch.tensor(0.5))
+    # raw aux = 6.0, final aux = aux_budget * raw aux = 1.5
+    assert torch.allclose(aux_loss, torch.tensor(1.5))
     assert metrics["aux_total_pre_budget"].item() == 6.0
-    assert torch.allclose(metrics["aux_scale_budget"], torch.tensor(1.0 / 6.0))
-    assert torch.allclose(metrics["aux_budget_warmup"], torch.tensor(0.5))
-    assert torch.allclose(metrics["depth_loss_contribution_post_budget"], torch.tensor(4.0 / 12.0))
-    assert torch.allclose(metrics["grounding_loss_contribution_post_budget"], torch.tensor(2.0 / 12.0))
+    assert torch.allclose(metrics["aux_total_post_budget"], torch.tensor(1.5))
+    assert "aux_scale_budget" not in metrics
+    assert "aux_budget_warmup" not in metrics
+    assert "action_loss_ema" not in metrics
+    assert "aux_cap" not in metrics
+    assert torch.allclose(metrics["depth_loss_contribution_post_budget"], torch.tensor(1.0))
+    assert torch.allclose(metrics["grounding_loss_contribution_post_budget"], torch.tensor(0.5))
     assert metrics["depth_valid_ratio"] == 0.5
     assert metrics["grounding_valid_ratio"] == 1.0
 

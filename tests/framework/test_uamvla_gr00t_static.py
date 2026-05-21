@@ -79,7 +79,10 @@ def test_uamvla_gr00t_calvin_d_config_uses_horizon_8():
 def test_uamvla_gr00t_config_defines_aux_loss_control_and_new_heads():
     cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin_d.yaml").read_text())
     assert cfg["framework"]["aux_loss_control"]["enabled"] is True
-    assert cfg["framework"]["aux_loss_control"]["aux_ratio_cap"] == 0.5
+    assert cfg["framework"]["aux_loss_control"]["aux_budget"] == 1.0
+    assert "warmup_steps" not in cfg["framework"]["aux_loss_control"]
+    assert "aux_ratio_cap" not in cfg["framework"]["aux_loss_control"]
+    assert "action_loss_ema_beta" not in cfg["framework"]["aux_loss_control"]
     heads = cfg["framework"]["aux_heads"]
     for name in ["depth", "action_conditioned_future", "grounding", "affordance"]:
         assert name in heads
