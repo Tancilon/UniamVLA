@@ -122,6 +122,37 @@ class CalvinPolicyClient:
         self.replan_steps = replan_steps
         self.step_count = 0
         self.train_renderer = train_renderer
+        self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
+
+    @staticmethod
+    def _nested_config_get(config, *keys):
+        current = config
+        for key in keys:
+            if current is None:
+                return None
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = getattr(current, key, None)
+        return current
+
+    @classmethod
+    def _client_uses_uamvla_gr00t_state(cls, client) -> bool:
+        config = getattr(client, "model_config", None)
+        framework_name = cls._nested_config_get(config, "framework", "name")
+        state_dim = cls._nested_config_get(config, "framework", "action_model", "state_dim")
+        try:
+            state_dim = int(state_dim or 0)
+        except (TypeError, ValueError):
+            state_dim = 0
+        return framework_name == "UamVLAGR00T" and state_dim >= 7
+
+    @staticmethod
+    def _extract_uamvla_gr00t_state(obs: dict) -> np.ndarray:
+        robot_obs = np.asarray(obs["robot_obs"], dtype=np.float32).reshape(-1)
+        if robot_obs.shape[0] < 7:
+            raise ValueError(f"Expected CALVIN robot_obs with at least 7 dims, got {robot_obs.shape}.")
+        return robot_obs[:7].reshape(1, 7)
 
     def reset(self):
         """Reset action plan buffer."""
@@ -167,6 +198,8 @@ class CalvinPolicyClient:
             "image": [image, wrist_image],
             "lang": lang_annotation,
         }
+        if self.send_uamvla_gr00t_state:
+            example["state"] = self._extract_uamvla_gr00t_state(obs)
 
         # Spec parallel of LIBERO state-passthrough: hand the inner ModelClient
         # the raw 15-D CALVIN robot_obs only when ModelClient successfully

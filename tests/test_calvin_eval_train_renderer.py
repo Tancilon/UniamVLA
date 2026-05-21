@@ -120,6 +120,78 @@ def test_calvin_policy_client_uses_train_renderer_images(monkeypatch):
     assert action.shape == (7,)
 
 
+def test_calvin_policy_client_passes_uamvla_gr00t_robot_state(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class UamVLAGR00TModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model_config = {
+                "framework": {
+                    "name": "UamVLAGR00T",
+                    "action_model": {"state_dim": 7},
+                },
+            }
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", UamVLAGR00TModelClient)
+
+    policy = eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        pretrained_path="fake.pt",
+        unnorm_key="franka_calvin",
+    )
+
+    robot_obs = np.arange(15, dtype=np.float32)
+    obs = {
+        "rgb_obs": {
+            "rgb_static": np.zeros((200, 200, 3), dtype=np.uint8),
+            "rgb_gripper": np.zeros((84, 84, 3), dtype=np.uint8),
+        },
+        "robot_obs": robot_obs,
+    }
+    policy.step(obs, "push the drawer")
+
+    sent_state = policy.client.last_example["state"]
+    assert sent_state.shape == (1, 7)
+    assert sent_state.dtype == np.float32
+    np.testing.assert_allclose(sent_state, robot_obs[:7].reshape(1, 7))
+
+
+def test_calvin_policy_client_does_not_pass_robot_state_to_other_frameworks(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class QwenOFTModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model_config = {
+                "framework": {
+                    "name": "QwenOFT",
+                    "action_model": {"state_dim": 0},
+                },
+            }
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", QwenOFTModelClient)
+
+    policy = eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        pretrained_path="fake.pt",
+        unnorm_key="franka_calvin",
+    )
+
+    obs = {
+        "rgb_obs": {
+            "rgb_static": np.zeros((200, 200, 3), dtype=np.uint8),
+            "rgb_gripper": np.zeros((84, 84, 3), dtype=np.uint8),
+        },
+        "robot_obs": np.arange(15, dtype=np.float32),
+    }
+    policy.step(obs, "push the drawer")
+
+    assert "state" not in policy.client.last_example
+
+
 def test_calvin_policy_client_passes_zero_gripper_threshold(monkeypatch):
     """CALVIN rel_actions use a signed gripper convention; the generic client
     must not apply its legacy 0.5 binary threshold here."""

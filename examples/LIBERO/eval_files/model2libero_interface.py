@@ -85,7 +85,8 @@ class ModelClient:
         # get_action_stats resolved it locally but did NOT update self.
         # Doing it here makes self.unnorm_key authoritative for both
         # action stats and state stats lookups.
-        _, _norm_stats = read_mode_config(policy_ckpt_path)
+        _model_config, _norm_stats = read_mode_config(policy_ckpt_path)
+        self.model_config = _model_config
         self.unnorm_key = self._check_unnorm_key(_norm_stats, unnorm_key)
         self.action_norm_stats = _norm_stats[self.unnorm_key]["action"]
 
