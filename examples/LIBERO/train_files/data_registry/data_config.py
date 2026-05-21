@@ -63,8 +63,60 @@ class Libero4in1DataConfig:
         ])
 
 
+class UamVLALiberoH8DataConfig:
+    video_keys = [
+        "video.primary_image",
+        "video.wrist_image",
+    ]
+    state_keys = [
+        "state.robot_obs",
+        "state.target_pose_rot6d",
+        "state.target_pose_trans",
+        "state.static_cam_rot6d",
+        "state.static_cam_trans",
+    ]
+    action_keys = [
+        "action.x",
+        "action.y",
+        "action.z",
+        "action.roll",
+        "action.pitch",
+        "action.yaw",
+        "action.gripper",
+    ]
+    language_keys = ["annotation.human.action.task_description"]
+    action_horizon = 8
+    action_indices = list(range(action_horizon))
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(delta_indices=[0], modality_keys=self.video_keys),
+            "state": ModalityConfig(delta_indices=[0], modality_keys=self.state_keys),
+            "action": ModalityConfig(
+                delta_indices=self.action_indices,
+                modality_keys=self.action_keys,
+            ),
+            "language": ModalityConfig(delta_indices=[0], modality_keys=self.language_keys),
+        }
+
+    def transform(self):
+        return ComposedModalityTransform(transforms=[
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={k: "min_max" for k in self.action_keys[:-1]},
+            ),
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=["state.robot_obs"],
+                normalization_modes={"state.robot_obs": "mean_std"},
+            ),
+        ])
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
+    "uamvla_libero_franka_h8": UamVLALiberoH8DataConfig(),
 }
 
 
@@ -73,6 +125,7 @@ ROBOT_TYPE_CONFIG_MAP = {
 # ---------------------------------------------------------------------------
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "libero_franka": EmbodimentTag.FRANKA,
+    "uamvla_libero_franka_h8": EmbodimentTag.FRANKA,
 }
 
 
@@ -91,5 +144,23 @@ DATASET_NAMED_MIXTURES = {
     ],
     "multi_robot": [
         ("LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
+    ],
+    "uamvla_libero_all_h8": [
+        ("lerobot_libero_object", 1.0, "uamvla_libero_franka_h8"),
+        ("lerobot_libero_goal", 1.0, "uamvla_libero_franka_h8"),
+        ("lerobot_libero_spatial", 1.0, "uamvla_libero_franka_h8"),
+        ("lerobot_libero_10", 1.0, "uamvla_libero_franka_h8"),
+    ],
+    "uamvla_libero_spatial_h8": [
+        ("lerobot_libero_spatial", 1.0, "uamvla_libero_franka_h8"),
+    ],
+    "uamvla_libero_object_h8": [
+        ("lerobot_libero_object", 1.0, "uamvla_libero_franka_h8"),
+    ],
+    "uamvla_libero_goal_h8": [
+        ("lerobot_libero_goal", 1.0, "uamvla_libero_franka_h8"),
+    ],
+    "uamvla_libero_10_h8": [
+        ("lerobot_libero_10", 1.0, "uamvla_libero_franka_h8"),
     ],
 }
