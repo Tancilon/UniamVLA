@@ -269,6 +269,9 @@ def _configure_worker_env(gpu_id: str) -> None:
     os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    # Editable robosuite installs may fail while creating numba cache locators.
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 
 def _run_task_job(job: TaskJob) -> dict[str, Any]:
@@ -549,6 +552,7 @@ class _TaskReplayWorker:
         rgb_static_aligned = self._render_rgb_aligned(STATIC_CAM)
         rgb_wrist = self._render_rgb(WRIST_CAM)
         depth_static = self._render_depth(STATIC_CAM)
+        seg_instance = self._render_segmentation_instance(STATIC_CAM)
         seg_geom = self._render_segmentation_geom(STATIC_CAM)
 
         static_cam_id = self.env.sim.model.camera_name2id(STATIC_CAM)
@@ -561,7 +565,7 @@ class _TaskReplayWorker:
         for body_name in self._candidate_bodies:
             body_payload = self._body_payload(
                 body_name=body_name,
-                seg_geom=seg_geom,
+                seg_instance=seg_instance,
                 depth_static=depth_static,
                 rgb_static=rgb_static_aligned,
                 intrinsic=self._intrinsics[STATIC_CAM],
@@ -583,6 +587,7 @@ class _TaskReplayWorker:
             "rgb_static_aligned": rgb_static_aligned,
             "rgb_wrist": rgb_wrist,
             "depth_static": depth_static,
+            "seg_instance": seg_instance,
             "seg_geom": seg_geom,
             "static_cam_pos": static_cam_pos,
             "static_cam_mat": static_cam_mat,
@@ -594,7 +599,7 @@ class _TaskReplayWorker:
     def _body_payload(
         self,
         body_name: str,
-        seg_geom: np.ndarray,
+        seg_instance: np.ndarray,
         depth_static: np.ndarray,
         rgb_static: np.ndarray,
         intrinsic: dict[str, float],
@@ -606,7 +611,11 @@ class _TaskReplayWorker:
         body_pos = self.env.sim.data.body_xpos[body_id].copy()
         body_mat = self.env.sim.data.body_xmat[body_id].reshape(3, 3).copy()
         geom_ids = self._geom_ids_for_body(body_name)
-        mask = np.isin(seg_geom, geom_ids).astype(np.uint8)
+        instance_id = self._instance_id_for_body(body_name)
+        if instance_id is None:
+            mask = np.zeros(seg_instance.shape, dtype=np.uint8)
+        else:
+            mask = (seg_instance == instance_id).astype(np.uint8)
         point_cloud = self._point_cloud_from_mask(
             depth=depth_static,
             mask=mask,
@@ -619,6 +628,7 @@ class _TaskReplayWorker:
             "body_name": body_name,
             "body_pos": body_pos,
             "body_mat": body_mat,
+            "instance_id": instance_id,
             "geom_ids": geom_ids,
             "mask": mask,
             "point_cloud": point_cloud,
@@ -711,6 +721,26 @@ class _TaskReplayWorker:
         geom_bodyids = self.env.sim.model.geom_bodyid
         return [i for i in range(len(geom_bodyids)) if int(geom_bodyids[i]) == body_id]
 
+    def _instance_id_for_body(self, body_name: str) -> int | None:
+        instance_name = self._instance_name_for_body(body_name)
+        if instance_name is None:
+            return None
+        instance_names = list(self.env.env.model.instances_to_ids.keys())
+        return instance_names.index(instance_name) + 1
+
+    def _instance_name_for_body(self, body_name: str) -> str | None:
+        instance_names = list(self.env.env.model.instances_to_ids.keys())
+        candidates = [body_name]
+        if body_name.endswith("_main"):
+            candidates.append(body_name[: -len("_main")])
+        for candidate in candidates:
+            if candidate in instance_names:
+                return candidate
+        for instance_name in instance_names:
+            if body_name.startswith(f"{instance_name}_"):
+                return instance_name
+        return None
+
     def _render_rgb(self, camera_name: str) -> np.ndarray:
         rgb = self.env.sim.render(
             camera_name=camera_name,
@@ -748,6 +778,17 @@ class _TaskReplayWorker:
         depth = np.asarray(depth[::-1].copy(), dtype=np.float32)
         return linearize_depth(depth, znear, zfar).astype(np.float32)
 
+    def _render_segmentation_instance(self, camera_name: str) -> np.ndarray:
+        obs = self._get_observations(force_update=True)
+        key = f"{camera_name}_segmentation_instance"
+        if key not in obs:
+            raise RuntimeError(f"Missing LIBERO segmentation observable: {key}")
+        seg = np.asarray(obs[key])
+        if seg.ndim == 3:
+            seg = seg[..., 0]
+        seg = self._align_observable_segmentation(seg)
+        return np.asarray(seg, dtype=np.int32)
+
     def _render_segmentation_geom(self, camera_name: str) -> np.ndarray:
         seg = self.env.sim.render(
             camera_name=camera_name,
@@ -759,6 +800,24 @@ class _TaskReplayWorker:
             seg = seg[-1]
         seg = np.asarray(seg[::-1].copy())
         return seg[:, :, 1] if seg.ndim == 3 else seg
+
+    def _get_observations(self, force_update: bool = False) -> dict[str, Any]:
+        if hasattr(self.env, "env") and hasattr(self.env.env, "_get_observations"):
+            try:
+                return self.env.env._get_observations(force_update=force_update)
+            except TypeError:
+                return self.env.env._get_observations()
+        return self.env._get_observations()
+
+    @staticmethod
+    def _align_observable_segmentation(seg: np.ndarray) -> np.ndarray:
+        try:
+            from robosuite import macros
+        except ImportError:
+            return seg
+        if getattr(macros, "IMAGE_CONVENTION", "opengl") == "opengl":
+            return seg[::-1].copy()
+        return seg.copy()
 
     def _target_point_affordance_heatmap(
         self,

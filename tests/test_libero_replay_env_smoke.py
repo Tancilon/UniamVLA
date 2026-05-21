@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 libero = pytest.importorskip("libero.libero")
 pytest.importorskip("robosuite")

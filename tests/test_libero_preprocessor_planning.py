@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from runners.preprocess_libero import build_suite_jobs, default_output_name, parse_args
+from tools.preprocess.libero_preprocessor import _TaskReplayWorker
 
 
 def test_default_output_name():
@@ -55,3 +56,24 @@ def test_parse_args_accepts_parallel_options():
     assert args.max_demos_per_task == 2
     assert args.max_frames_per_demo == 3
     assert args.overwrite is True
+
+
+def test_replay_worker_maps_main_body_to_instance_id():
+    worker = object.__new__(_TaskReplayWorker)
+
+    class Model:
+        instances_to_ids = {
+            "robot0": {},
+            "akita_black_bowl_1": {},
+            "plate_1": {},
+        }
+
+    class InnerEnv:
+        model = Model()
+
+    class Env:
+        env = InnerEnv()
+
+    worker.env = Env()
+    assert worker._instance_name_for_body("akita_black_bowl_1_main") == "akita_black_bowl_1"
+    assert worker._instance_id_for_body("akita_black_bowl_1_main") == 2
