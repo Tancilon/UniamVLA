@@ -19,6 +19,7 @@ def _load_uamvla_oft_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "starVLA.model.framework.VLM4A.QwenOFT", qwen_oft)
 
     collator_helpers = types.ModuleType("starVLA.model.modules.uamvla.collator_helpers")
+    collator_helpers.stack_optional_string_fields = lambda *a, **kw: None
     collator_helpers.stack_optional_tensor_fields = lambda *a, **kw: None
     collator_helpers.stack_pose_gt = lambda *a, **kw: None
     collator_helpers.stack_static_cam_extrinsic = lambda *a, **kw: None

@@ -23,10 +23,13 @@ from omegaconf import OmegaConf
 
 def _free_gpu_id() -> int | None:
     """Return index of first GPU with <100 MiB used and <5% utilization."""
-    out = subprocess.check_output(
-        ["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
-         "--format=csv,noheader,nounits"]
-    ).decode()
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
+             "--format=csv,noheader,nounits"]
+        ).decode()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
     for line in out.strip().splitlines():
         idx, mem, util = [x.strip() for x in line.split(",")]
         if int(mem) < 100 and int(util) < 5:
@@ -110,3 +113,35 @@ def test_recon_head_loss_below_dummy(configured_model_and_batch):
         f"dummy={dummy_loss}. Check that image_target is populated in batch_dict "
         f"and recon_mask has any True entries."
     )
+
+
+@pytest.mark.parametrize(
+    "head_name,metric_key",
+    [
+        ("depth", "depth_loss_weighted_pre_budget"),
+        ("grounding", "grounding_loss_weighted_pre_budget"),
+        ("affordance", "affordance_loss_weighted_pre_budget"),
+        (
+            "action_conditioned_future",
+            "action_conditioned_future_loss_weighted_pre_budget",
+        ),
+    ],
+)
+def test_new_aux_head_loss_above_dummy_when_labels_exist(
+    configured_model_and_batch,
+    head_name,
+    metric_key,
+):
+    model, batch = configured_model_and_batch
+    if head_name not in model.aux_heads:
+        pytest.skip(f"{head_name} disabled in this smoke config")
+
+    out = model.forward(batch)
+    valid_ratio_key = f"{head_name}_valid_ratio"
+    if valid_ratio_key not in out or float(out[valid_ratio_key]) == 0.0:
+        pytest.skip(f"{head_name} labels absent from this smoke fixture")
+
+    assert metric_key in out
+    real_loss = out[metric_key].item()
+    dummy_loss = model.aux_heads[head_name].get_dummy_loss().item()
+    assert real_loss > dummy_loss

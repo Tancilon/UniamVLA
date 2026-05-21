@@ -257,6 +257,52 @@ def test_uamvla_gr00t_init_does_not_walk_into_uamvla_oft_init(monkeypatch):
     assert init_calls == ["cfg"]
 
 
+def test_uamvla_gr00t_predict_action_ignores_aux_sidecars(monkeypatch):
+    module = _load_uamvla_gr00t_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeQwenInterface:
+        image_token_id = 99
+
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.full((len(images), 400), 99, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones((kwargs["input_ids"].shape[0], 400, 16), dtype=torch.float32)
+            return types.SimpleNamespace(hidden_states=[hidden])
+
+    class _FakeActionModel:
+        def predict_action(self, hidden, state):
+            assert hidden.shape == (1, 400, 16)
+            assert state is None
+            return torch.zeros(1, 8, 7)
+
+    def _forbid_aux_unpack(self, sample):
+        forbidden = {
+            "depth_target",
+            "grounding_mask",
+            "affordance_heatmap",
+            "image_action_future",
+        }
+        assert not forbidden.intersection(sample)
+        return sample
+
+    model = object.__new__(module.UamVLAGR00T)
+    model.qwen_vl_interface = _FakeQwenInterface()
+    model.action_model = _FakeActionModel()
+    model.action_horizon = 8
+    model.config = _AttrDict(framework=_AttrDict(action_model=_AttrDict(state_dim=0)))
+    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._unpack_lerobot_sample = types.MethodType(_forbid_aux_unpack, model)
+
+    out = module.UamVLAGR00T.predict_action(
+        model,
+        {"image": [object()], "lang": "open drawer"},
+    )
+
+    assert out["normalized_actions"].shape == (1, 8, 7)
+
+
 def test_uamvla_gr00t_unpacks_calvin_robot_obs_as_action_aligned_state(monkeypatch):
     module = _load_uamvla_gr00t_module(monkeypatch)
     model = object.__new__(module.UamVLAGR00T)
