@@ -1,20 +1,43 @@
-"""Convert LIBERO HDF5 datasets to UamVLA unified format.
+"""Replay official LIBERO HDF5 demos into UamVLA LeRobot datasets.
 
-Requires: mujoco, robosuite, bddl, libero (pip install -e third_party/LIBERO)
+The module intentionally avoids importing LIBERO or robosuite at import time:
+unit tests and training-side registry checks should run in the normal
+``uamvla`` environment, while replay/render execution happens in
+``libero_env``.
 """
-import json
+
+from __future__ import annotations
+
 import logging
+import multiprocessing as mp
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
-from PIL import Image
 
 from tools.preprocess.base_preprocessor import BasePreprocessor
-from tools.preprocess.target_object_resolver import (
-    LLMTargetResolver,
-    TargetResolveError,
+from tools.preprocess.libero_lerobot_writer import (
+    FPS,
+    LiberoEpisodeBuffers,
+    LiberoLerobotWriter,
+)
+from tools.preprocess.libero_preprocess_utils import (
+    compute_episode_plan,
+    gaussian_heatmap_from_pixel,
+    mask_to_token_grid,
+    pack_robot_obs,
+    pointcloud_to_tcp_distance,
+    select_render_gpus,
+    smooth_active_targets,
+    task_name_from_hdf5,
+)
+from tools.preprocess.libero_target_mapping import (
+    TaskTargetPolicy,
+    get_task_policy,
+    validate_policy_table,
 )
 from starVLA.utils.geometry import (
     crop_target_from_seg,
@@ -24,389 +47,164 @@ from starVLA.utils.geometry import (
     linearize_depth,
     mat_to_6d,
 )
+from starVLA.utils.point_cloud import clean_point_cloud
+
 
 logger = logging.getLogger(__name__)
 
-# Cross-embodiment constants (from dataset format spec)
-MAX_ACTION_DIM = 24
-FRANKA_ACTION_DIM = 7
-ACTION_MASK = [1] * FRANKA_ACTION_DIM + [0] * (MAX_ACTION_DIM - FRANKA_ACTION_DIM)
-
-# LIBERO camera names
 STATIC_CAM = "agentview"
 WRIST_CAM = "robot0_eye_in_hand"
-
-# Rendering resolution
 RENDER_W = 256
 RENDER_H = 256
-
-# Point cloud config
 NUM_POINTS = 1024
 
 
-class LiberoPreprocessor(BasePreprocessor):
-    """Convert LIBERO HDF5 demos to UamVLA unified dataset format."""
+@dataclass(frozen=True)
+class TaskJob:
+    suite: str
+    hdf5_path: Path
+    output_dir: Path
+    task_index: int
+    demo_episode_indices: dict[int, int]
+    demo_row_starts: dict[int, int]
+    gpu_id: str
+    min_segment_len: int
+    debug_rgb_check_frames: int
+    max_demos_per_task: int | None = None
+    max_frames_per_demo: int | None = None
 
+
+class LiberoPreprocessor(BasePreprocessor):
     def __init__(
         self,
         suite: str = "libero_spatial",
-        target_object_keyword: str | None = None,
-        target_resolver: LLMTargetResolver | None = None,
-        skip_on_resolve_failure: bool = False,
+        num_workers: int | None = None,
+        render_gpus: str | None = None,
+        min_segment_len: int = 3,
+        debug_rgb_check_frames: int = 3,
+        max_tasks: int | None = None,
+        max_demos_per_task: int | None = None,
+        max_frames_per_demo: int | None = None,
     ):
         self.suite = suite
-        self.target_object_keyword = target_object_keyword
-        self._target_resolver = target_resolver
-        self._skip_on_resolve_failure = skip_on_resolve_failure
-        # Resolved at runtime per-task from MuJoCo body names
-        self._target_body_name: str | None = None
-        # Counters and skip log populated by process()
-        self._resolve_stats = {"llm_hit": 0, "keyword_hit": 0, "skipped": 0}
-        self._skipped_samples: list[tuple[str, str]] = []  # (filename, reason)
+        self.num_workers = num_workers
+        self.render_gpus = render_gpus
+        self.min_segment_len = int(min_segment_len)
+        self.debug_rgb_check_frames = int(debug_rgb_check_frames)
+        self.max_tasks = max_tasks
+        self.max_demos_per_task = max_demos_per_task
+        self.max_frames_per_demo = max_frames_per_demo
 
     def process(self, input_dir: str, output_dir: str):
-        """Read LIBERO HDF5 files, append to UamVLA unified format dataset.
-
-        Supports incremental processing: multiple suites can be processed
-        sequentially into the same output_dir. New samples are appended to
-        data.jsonl, files are added to existing directories, and
-        statistics.yaml is recomputed over all accumulated data.
-
-        Raises FileExistsError if any output file already exists (duplicate
-        sample IDs across suites indicate a naming collision).
-        """
         input_path = Path(input_dir)
         output_path = Path(output_dir)
+        if not input_path.exists():
+            raise FileNotFoundError(f"LIBERO input directory not found: {input_path}")
+        output_path.mkdir(parents=True, exist_ok=True)
 
-        # Create output directories (idempotent)
-        for subdir in [
-            "images/obs/static",
-            "images/obs/wrist",
-            "images/target",
-            "images/future",
-            "point_clouds",
-            "depth/static",
-            "depth/wrist",
-            "depths/static",
-            "grounding_masks/static",
-            "affordance_heatmaps/static",
-        ]:
-            (output_path / subdir).mkdir(parents=True, exist_ok=True)
+        missing = validate_policy_table(input_path.parent)
+        suite_missing = [m for m in missing if m.startswith(f"{self.suite}/")]
+        if suite_missing:
+            raise RuntimeError(f"Missing curated target policies for {suite_missing}")
 
         hdf5_files = sorted(input_path.glob("*.hdf5"))
+        if self.max_tasks is not None:
+            hdf5_files = hdf5_files[: self.max_tasks]
         if not hdf5_files:
             raise FileNotFoundError(f"No .hdf5 files found in {input_path}")
 
-        logger.info(f"Found {len(hdf5_files)} HDF5 files in {input_path}")
-
-        # Load existing sample IDs to detect duplicates
-        existing_ids = self._load_existing_ids(output_path)
-        if existing_ids:
-            logger.info(
-                f"Found {len(existing_ids)} existing samples in {output_path}"
-            )
-
-        new_samples = []
-        camera_intrinsics = None
-        # Reset per-run counters
-        self._resolve_stats = {"llm_hit": 0, "keyword_hit": 0, "skipped": 0}
-        self._skipped_samples = []
-
-        for task_idx, hdf5_file in enumerate(hdf5_files):
-            logger.info(
-                f"Processing task {task_idx}/{len(hdf5_files)}: {hdf5_file.name}"
-            )
-            instruction = extract_instruction_from_filename(hdf5_file.name)
-
-            # Create LIBERO environment for MuJoCo replay
-            env = self._create_env(hdf5_file)
-            try:
-                self._target_body_name = self._resolve_target_body(
-                    env, instruction
-                )
-            except TargetResolveError as e:
-                env.close()
-                if self._skip_on_resolve_failure:
-                    self._resolve_stats["skipped"] += 1
-                    self._skipped_samples.append((hdf5_file.name, str(e)))
-                    logger.warning(
-                        f"  SKIPPED {hdf5_file.name}: {e}"
-                    )
-                    continue
-                raise
-
-            try:
-                # Extract camera intrinsics once (intrinsic is constant in LIBERO;
-                # static cam extrinsic is now stored per-sample, see _replay_and_extract)
-                if camera_intrinsics is None:
-                    camera_intrinsics = self._extract_camera_intrinsics(env)
-
-                with h5py.File(hdf5_file, "r") as f:
-                    demo_keys = sorted(
-                        f["data"].keys(), key=lambda x: int(x.split("_")[1])
-                    )
-
-                    for demo_key in demo_keys:
-                        demo_idx = int(demo_key.split("_")[1])
-                        demo_grp = f[f"data/{demo_key}"]
-
-                        actions = demo_grp["actions"][()]
-                        states = demo_grp["states"][()]
-                        ee_pos = demo_grp["obs/ee_pos"][()]                 # (T, 3)
-                        ee_axis_angle = demo_grp["obs/ee_ori"][()]          # (T, 3) axis-angle rotvec
-                        joint_pos = demo_grp["obs/joint_states"][()]        # (T, 7)
-                        gripper_qpos = demo_grp["obs/gripper_states"][()]   # (T, 2)
-
-                        T = actions.shape[0]
-                        episode_id = (
-                            f"{self.suite}_{task_idx:02d}_ep{demo_idx:04d}"
-                        )
-
-                        for t in range(T):
-                            sample_id = f"{episode_id}_step{t:04d}"
-
-                            # Duplicate check
-                            if sample_id in existing_ids:
-                                raise FileExistsError(
-                                    f"Duplicate sample ID '{sample_id}' — "
-                                    f"this suite may have been processed already"
-                                )
-
-                            # All rendering from MuJoCo replay (256x256, unified resolution)
-                            extracted = self._replay_and_extract(
-                                env,
-                                states[t],
-                                camera_intrinsics,
-                                future_tcp_positions=ee_pos[t:],
-                            )
-
-                            # Save rendered RGB images
-                            static_img_path = (
-                                f"images/obs/static/{sample_id}.jpg"
-                            )
-                            wrist_img_path = (
-                                f"images/obs/wrist/{sample_id}.jpg"
-                            )
-                            self._save_file(
-                                output_path / static_img_path,
-                                lambda p: Image.fromarray(
-                                    extracted["rgb_static"]
-                                ).save(p, quality=95),
-                            )
-                            self._save_file(
-                                output_path / wrist_img_path,
-                                lambda p: Image.fromarray(
-                                    extracted["rgb_wrist"]
-                                ).save(p, quality=95),
-                            )
-
-                            # Save image_future (last frame rendered from MuJoCo)
-                            future_path = f"images/future/{episode_id}.jpg"
-                            if t == T - 1:
-                                self._save_file(
-                                    output_path / future_path,
-                                    lambda p: Image.fromarray(
-                                        extracted["rgb_static"]
-                                    ).save(p, quality=95),
-                                )
-
-                            # Action: pad to 24D
-                            action_7d = actions[t].tolist()
-                            action_24d = action_7d + [0.0] * (
-                                MAX_ACTION_DIM - FRANKA_ACTION_DIM
-                            )
-
-                            sample = {
-                                "id": sample_id,
-                                "episode_id": episode_id,
-                                "step_idx": t,
-                                "total_steps": T,
-                                "image": [static_img_path, wrist_img_path],
-                                "instruction": instruction,
-                                "embodiment": "franka_libero",
-                                "action_dim": FRANKA_ACTION_DIM,
-                                "action": action_24d,
-                                "action_mask": ACTION_MASK,
-                                "robot_obs": ee_pos[t].tolist(),  # kept for backward compat
-                                "ee_pos": ee_pos[t].tolist(),
-                                "ee_axis_angle": ee_axis_angle[t].tolist(),
-                                "joint_pos": joint_pos[t].tolist(),
-                                "gripper_qpos": gripper_qpos[t].tolist(),
-                                "dataset_source": self.suite,
-                                "image_future": future_path,
-                            }
-
-                            # Save depth maps
-                            depth_static_path = (
-                                f"depth/static/{sample_id}.npy"
-                            )
-                            depth_wrist_path = f"depth/wrist/{sample_id}.npy"
-                            self._save_file(
-                                output_path / depth_static_path,
-                                lambda p: np.save(
-                                    p, extracted["depth_static"]
-                                ),
-                            )
-                            self._save_file(
-                                output_path / depth_wrist_path,
-                                lambda p: np.save(
-                                    p, extracted["depth_wrist"]
-                                ),
-                            )
-                            sample["depth_static"] = depth_static_path
-                            sample["depth_wrist"] = depth_wrist_path
-                            self._emit_aux_denoising_sidecars(
-                                output_dir=output_path,
-                                trajectory_id=episode_id,
-                                base_index=t,
-                                depth_static=extracted["depth_static"],
-                                grounding_mask=extracted.get("grounding_mask"),
-                                affordance_heatmap=extracted.get("affordance_heatmap"),
-                                grounding_level="object",
-                            )
-                            sample["depth_target"] = (
-                                f"depths/static/{episode_id}/{t}.npy"
-                            )
-                            if extracted.get("grounding_mask") is not None:
-                                sample["grounding_mask"] = (
-                                    f"grounding_masks/static/{episode_id}/{t}.npy"
-                                )
-                                sample["grounding_level"] = "object"
-                            if extracted.get("affordance_heatmap") is not None:
-                                sample["affordance_heatmap"] = (
-                                    f"affordance_heatmaps/static/{episode_id}/{t}.npy"
-                                )
-
-                            # Wrist camera extrinsic
-                            sample["wrist_cam_extrinsic"] = {
-                                "rotation": extracted[
-                                    "wrist_mat"
-                                ].flatten().tolist(),
-                                "translation": extracted[
-                                    "wrist_pos"
-                                ].tolist(),
-                            }
-
-                            # Static camera extrinsic (per-sample — varies by
-                            # task scene XML, so cannot be a global statistic)
-                            sample["static_cam_extrinsic"] = {
-                                "rotation": extracted[
-                                    "static_cam_mat"
-                                ].flatten().tolist(),
-                                "translation": extracted[
-                                    "static_cam_pos"
-                                ].tolist(),
-                            }
-
-                            # Pose 6D
-                            sample["pose_6d"] = {
-                                "rotation": mat_to_6d(extracted["obj_mat"]),
-                                "translation": extracted["obj_pos"].tolist(),
-                                "object_id": self._target_body_name,
-                            }
-
-                            # Point cloud (world frame)
-                            pts = extracted.get("point_cloud")
-                            if pts is not None:
-                                pc_path = f"point_clouds/{sample_id}.npy"
-                                self._save_file(
-                                    output_path / pc_path,
-                                    lambda p: np.save(p, pts),
-                                )
-                                sample["point_cloud"] = pc_path
-
-                            # Image target (seg crop)
-                            target_img = extracted.get("image_target")
-                            if target_img is not None:
-                                target_path = (
-                                    f"images/target/{sample_id}.jpg"
-                                )
-                                self._save_file(
-                                    output_path / target_path,
-                                    lambda p: target_img.save(
-                                        p, quality=95
-                                    ),
-                                )
-                                sample["image_target"] = target_path
-
-                            new_samples.append(sample)
-
-                        logger.info(f"  {demo_key}: {T} steps processed")
-            finally:
-                env.close()
-
-        # Append new samples to data.jsonl
-        jsonl_path = output_path / "data.jsonl"
-        with open(jsonl_path, "a") as f:
-            for s in new_samples:
-                f.write(json.dumps(s) + "\n")
-        logger.info(
-            f"Appended {len(new_samples)} samples to {jsonl_path} "
-            f"(total: {len(existing_ids) + len(new_samples)})"
+        frame_counts = self._scan_frame_counts(hdf5_files)
+        episode_plan = compute_episode_plan(frame_counts)
+        render_gpus = select_render_gpus(
+            os.environ.get("CUDA_VISIBLE_DEVICES"),
+            self.render_gpus,
         )
+        worker_count = self.num_workers if self.num_workers is not None else len(render_gpus)
+        worker_count = max(1, int(worker_count))
+        jobs = self._build_jobs(hdf5_files, output_path, episode_plan, render_gpus)
 
-        # Recompute statistics over ALL samples (existing + new)
-        # Skip if no samples were produced at all (e.g. all tasks skipped)
-        if camera_intrinsics is not None:
-            all_samples = self._load_all_samples(output_path)
-            if all_samples:
-                self.write_statistics(
-                    all_samples, output_path, camera_intrinsics
-                )
-            else:
-                logger.warning(
-                    "No samples available; skipping statistics.yaml write."
-                )
-
-        # Resolver summary
-        stats = self._resolve_stats
         logger.info(
-            f"[target-resolver] llm-hit: {stats['llm_hit']}  "
-            f"keyword-hit: {stats['keyword_hit']}  "
-            f"skipped: {stats['skipped']}"
+            "Processing %d LIBERO task files with %d worker(s) on render GPUs %s",
+            len(jobs),
+            worker_count,
+            render_gpus,
         )
-        if self._skipped_samples:
-            logger.info(f"[skipped samples] ({len(self._skipped_samples)})")
-            for fname, reason in self._skipped_samples:
-                logger.info(f"  - {fname}  reason: {reason}")
+        if worker_count == 1:
+            results = [_run_task_job(job) for job in jobs]
+        else:
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=worker_count) as pool:
+                results = pool.map(_run_task_job, jobs)
 
-        logger.info(f"Done. Output: {output_path}")
-
-    @staticmethod
-    def _load_existing_ids(output_path: Path) -> set[str]:
-        """Load sample IDs from existing data.jsonl for duplicate detection."""
-        jsonl_path = output_path / "data.jsonl"
-        if not jsonl_path.exists():
-            return set()
-        ids = set()
-        with open(jsonl_path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    ids.add(json.loads(line)["id"])
-        return ids
-
-    @staticmethod
-    def _load_all_samples(output_path: Path) -> list[dict]:
-        """Load all samples from data.jsonl for statistics recomputation."""
-        jsonl_path = output_path / "data.jsonl"
-        samples = []
-        with open(jsonl_path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    samples.append(json.loads(line))
-        return samples
-
-    @staticmethod
-    def _save_file(path: Path, write_fn):
-        """Write a file, raising FileExistsError if it already exists."""
-        if path.exists():
-            raise FileExistsError(
-                f"Output file already exists: {path}. "
-                f"This indicates a duplicate sample ID collision."
+        writer = LiberoLerobotWriter(output_path, fps=FPS)
+        tasks = [task_name_from_hdf5(p) for p in hdf5_files]
+        episode_lengths: dict[int, int] = {}
+        episode_to_task: dict[int, int] = {}
+        total_frames = 0
+        coverage: dict[str, Any] = {"tasks": {}, "totals": {}}
+        camera_params = None
+        for result in results:
+            total_frames += int(result["total_frames"])
+            episode_lengths.update(
+                {int(k): int(v) for k, v in result["episode_lengths"].items()}
             )
-        write_fn(path)
+            episode_to_task.update(
+                {int(k): int(v) for k, v in result["episode_to_task"].items()}
+            )
+            coverage["tasks"][result["task_name"]] = result["coverage"]
+            camera_params = camera_params or result.get("camera_params")
+        coverage["totals"] = _sum_coverage(coverage["tasks"])
+        writer.write_meta(tasks, episode_lengths, episode_to_task, total_frames, coverage)
+        if camera_params is not None:
+            writer.write_camera_params(camera_params)
+
+    def _scan_frame_counts(self, hdf5_files: list[Path]) -> dict[str, list[int]]:
+        counts: dict[str, list[int]] = {}
+        for h5_path in hdf5_files:
+            with h5py.File(h5_path, "r") as f:
+                demo_keys = _sorted_demo_keys(f)
+                if self.max_demos_per_task is not None:
+                    demo_keys = demo_keys[: self.max_demos_per_task]
+                lengths = []
+                for demo_key in demo_keys:
+                    length = int(f[f"data/{demo_key}/actions"].shape[0])
+                    if self.max_frames_per_demo is not None:
+                        length = min(length, int(self.max_frames_per_demo))
+                    lengths.append(length)
+                counts[h5_path.name] = lengths
+        return counts
+
+    def _build_jobs(
+        self,
+        hdf5_files: list[Path],
+        output_path: Path,
+        episode_plan: dict[tuple[str, int], Any],
+        render_gpus: list[str],
+    ) -> list[TaskJob]:
+        jobs = []
+        for task_idx, h5_path in enumerate(hdf5_files):
+            demo_episode_indices = {}
+            demo_row_starts = {}
+            for (filename, demo_idx), plan in episode_plan.items():
+                if filename == h5_path.name:
+                    demo_episode_indices[demo_idx] = plan.episode_index
+                    demo_row_starts[demo_idx] = plan.row_start
+            jobs.append(
+                TaskJob(
+                    suite=self.suite,
+                    hdf5_path=h5_path,
+                    output_dir=output_path,
+                    task_index=task_idx,
+                    demo_episode_indices=demo_episode_indices,
+                    demo_row_starts=demo_row_starts,
+                    gpu_id=render_gpus[task_idx % len(render_gpus)],
+                    min_segment_len=self.min_segment_len,
+                    debug_rgb_check_frames=self.debug_rgb_check_frames,
+                    max_demos_per_task=self.max_demos_per_task,
+                    max_frames_per_demo=self.max_frames_per_demo,
+                )
+            )
+        return jobs
 
     @staticmethod
     def _emit_aux_denoising_sidecars(
@@ -418,334 +216,552 @@ class LiberoPreprocessor(BasePreprocessor):
         affordance_heatmap: np.ndarray | None = None,
         grounding_level: str = "object",
     ) -> None:
-        output_dir = Path(output_dir)
-        trajectory = str(trajectory_id)
-        base = f"{int(base_index)}.npy"
+        LiberoLerobotWriter.write_aux_denoising_sidecar(
+            output_dir=output_dir,
+            trajectory_id=trajectory_id,
+            base_index=base_index,
+            depth_static=depth_static,
+            grounding_mask=grounding_mask,
+            affordance_heatmap=affordance_heatmap,
+            grounding_level=grounding_level,
+        )
 
-        if depth_static is not None:
-            depth_dir = output_dir / "depths" / "static" / trajectory
-            depth_dir.mkdir(parents=True, exist_ok=True)
-            np.save(depth_dir / base, np.asarray(depth_static, dtype=np.float32))
-
-        if grounding_mask is not None:
-            grounding_dir = output_dir / "grounding_masks" / "static" / trajectory
-            grounding_dir.mkdir(parents=True, exist_ok=True)
-            np.save(
-                grounding_dir / base,
-                np.asarray(grounding_mask, dtype=np.float32),
-            )
-            with open(grounding_dir / f"{int(base_index)}.json", "w") as f:
-                json.dump({"grounding_level": str(grounding_level)}, f)
-
-        if affordance_heatmap is not None:
-            affordance_dir = output_dir / "affordance_heatmaps" / "static" / trajectory
-            affordance_dir.mkdir(parents=True, exist_ok=True)
-            np.save(
-                affordance_dir / base,
-                np.asarray(affordance_heatmap, dtype=np.float32),
-            )
-
-    def _create_env(self, hdf5_file: Path):
-        """Create LIBERO OffScreenRenderEnv from HDF5 env_args.
-
-        The BDDL path stored in HDF5 metadata uses object-specific names
-        (e.g. "pick_the_akita_black_bowl_...") that don't match the actual
-        BDDL files on disk ("pick_up_the_black_bowl_..."). We use the
-        benchmark API to resolve the correct BDDL file path by matching
-        the HDF5 filename to the benchmark task name.
-        """
+    def probe_replay_environment(self) -> dict[str, bool]:
+        gpu = select_render_gpus(
+            os.environ.get("CUDA_VISIBLE_DEVICES"),
+            self.render_gpus,
+        )[0]
+        _configure_worker_env(gpu)
+        from libero.libero import benchmark, get_libero_path
         from libero.libero.envs import OffScreenRenderEnv
+        import robosuite
 
-        bddl_file_name = self._resolve_bddl_path(hdf5_file)
-
+        suite = benchmark.get_benchmark_dict()["libero_spatial"]()
+        task = suite.get_task(0)
+        bddl = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
         env = OffScreenRenderEnv(
-            bddl_file_name=bddl_file_name,
+            bddl_file_name=str(bddl),
             robots=["Panda"],
             controller="OSC_POSE",
-            camera_names=[STATIC_CAM, WRIST_CAM],
-            camera_heights=RENDER_H,
-            camera_widths=RENDER_W,
+            camera_names=[STATIC_CAM],
+            camera_heights=64,
+            camera_widths=64,
             camera_depths=True,
-            camera_segmentations="instance",
         )
-        env.reset()
-        return env
+        try:
+            env.reset()
+            rgb = env.sim.render(camera_name=STATIC_CAM, width=64, height=64)
+            return {
+                "libero_import": True,
+                "robosuite_import": robosuite is not None,
+                "render_ok": rgb is not None,
+            }
+        finally:
+            env.close()
 
-    EXCLUDED_BODY_PREFIXES = ("robot", "gripper", "mount")
 
-    def _build_candidate_list(self, env) -> list[dict]:
-        """Collect (_main) object bodies and convert to LLM-friendly form.
+def _sorted_demo_keys(h5_file: h5py.File) -> list[str]:
+    return sorted(h5_file["data"].keys(), key=lambda x: int(x.split("_")[1]))
 
-        Returns a list of {"id": <body_name>, "name": <space-separated>}
-        suitable for passing to LLMTargetResolver.resolve().
-        """
-        candidates = []
-        for body in env.sim.model.body_names:
-            if not body.endswith("_main"):
-                continue
-            if any(body.startswith(p) for p in self.EXCLUDED_BODY_PREFIXES):
-                continue
-            stem = body[: -len("_main")]
-            human = stem.replace("_", " ")
-            candidates.append({"id": body, "name": human})
-        return candidates
 
-    def _resolve_target_body(self, env, instruction: str) -> str:
-        """Find the MuJoCo body name for the target object of this task.
+def _configure_worker_env(gpu_id: str) -> None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
-        Strategy chain:
-        1. If a target_resolver (LLM) is configured, call it first. On hit
-           (returned id is in the candidate set) use it.
-        2. Otherwise, or if the LLM returned None, fall back to the explicit
-           target_object_keyword substring match (only if the keyword is set).
-        3. If neither produces a result, raise TargetResolveError.
-        """
-        candidates = self._build_candidate_list(env)
 
-        # Strategy 1: LLM
-        if self._target_resolver is not None:
-            llm_id = self._target_resolver.resolve(instruction, candidates)
-            valid_ids = {c["id"] for c in candidates}
-            if llm_id is not None and llm_id in valid_ids:
-                self._resolve_stats["llm_hit"] += 1
-                logger.info(
-                    f"  Target body resolved: '{llm_id}' [llm-hit]"
-                )
-                return llm_id
-            if llm_id is not None:
-                logger.warning(
-                    f"  LLM resolver returned id '{llm_id}' not in candidate "
-                    f"set for instruction '{instruction}'; falling through"
-                )
-            else:
-                logger.warning(
-                    f"  LLM resolver returned no match for instruction "
-                    f"'{instruction}'; falling through to keyword strategy"
-                )
+def _run_task_job(job: TaskJob) -> dict[str, Any]:
+    _configure_worker_env(job.gpu_id)
+    from libero.libero.envs import OffScreenRenderEnv
 
-        # Strategy 2: explicit keyword substring match
-        if self.target_object_keyword:
-            kw_matches = [
-                c["id"] for c in candidates
-                if self.target_object_keyword in c["id"]
-            ]
-            if kw_matches:
-                chosen = kw_matches[0]
-                self._resolve_stats["keyword_hit"] += 1
-                logger.info(
-                    f"  Target body resolved: '{chosen}' [keyword-hit] "
-                    f"(keyword='{self.target_object_keyword}')"
-                )
-                return chosen
+    policy = get_task_policy(job.suite, job.hdf5_path.name)
+    bddl_path = _resolve_bddl_path(job.suite, job.hdf5_path)
+    env = OffScreenRenderEnv(
+        bddl_file_name=bddl_path,
+        robots=["Panda"],
+        controller="OSC_POSE",
+        camera_names=[STATIC_CAM, WRIST_CAM],
+        camera_heights=RENDER_H,
+        camera_widths=RENDER_W,
+        camera_depths=True,
+        camera_segmentations="instance",
+    )
+    env.reset()
+    try:
+        worker = _TaskReplayWorker(job, env, policy)
+        return worker.run()
+    finally:
+        env.close()
 
-        raise TargetResolveError(
-            f"Cannot resolve target object for instruction '{instruction}'. "
-            f"Candidates: {[c['id'] for c in candidates]}"
-        )
 
-    def _resolve_bddl_path(self, hdf5_file: Path) -> str:
-        """Resolve the absolute BDDL file path for a given HDF5 demo file.
+def _resolve_bddl_path(suite_name: str, hdf5_file: Path) -> str:
+    from libero.libero import benchmark, get_libero_path
 
-        Uses LIBERO benchmark API: HDF5 filename (minus _demo.hdf5) matches
-        the benchmark task name, which gives the correct BDDL path.
-        """
-        from libero.libero import benchmark, get_libero_path
+    task_name = task_name_from_hdf5(hdf5_file)
+    bench_dict = benchmark.get_benchmark_dict()
+    suite = bench_dict[suite_name]()
+    bddl_root = get_libero_path("bddl_files")
+    for idx in range(suite.n_tasks):
+        task = suite.get_task(idx)
+        if task.name == task_name:
+            return str(Path(bddl_root) / task.problem_folder / task.bddl_file)
+    raise ValueError(f"Task {task_name!r} not found in benchmark suite {suite_name!r}")
 
-        # HDF5 filename like "pick_up_the_black_bowl_from_table_center_..._demo.hdf5"
-        # Task name is the same without "_demo.hdf5"
-        task_name = hdf5_file.stem  # removes .hdf5
-        if task_name.endswith("_demo"):
-            task_name = task_name[: -len("_demo")]
 
-        # Look up suite from benchmark API
-        suite_name = self.suite.replace("_test", "")  # handle test directories
-        bench_dict = benchmark.get_benchmark_dict()
-        if suite_name not in bench_dict:
-            raise ValueError(
-                f"Suite '{suite_name}' not found in LIBERO benchmark. "
-                f"Available: {list(bench_dict.keys())}"
-            )
-        suite = bench_dict[suite_name]()
+class _TaskReplayWorker:
+    def __init__(self, job: TaskJob, env, policy: TaskTargetPolicy):
+        self.job = job
+        self.env = env
+        self.policy = policy
+        self.writer = LiberoLerobotWriter(job.output_dir, fps=FPS)
+        self.task_name = task_name_from_hdf5(job.hdf5_path)
+        self.instruction = extract_instruction_from_filename(job.hdf5_path.name)
+        self._intrinsics = self._extract_camera_intrinsics()
+        self._candidate_bodies = self._resolve_candidate_bodies()
+        self._fallback_body = self._resolve_fallback_body()
 
-        bddl_files_root = get_libero_path("bddl_files")
-        for i in range(suite.n_tasks):
-            task = suite.get_task(i)
-            if task.name == task_name:
-                return os.path.join(
-                    bddl_files_root, task.problem_folder, task.bddl_file
-                )
+    def run(self) -> dict[str, Any]:
+        results = {
+            "task_name": self.task_name,
+            "total_frames": 0,
+            "episode_lengths": {},
+            "episode_to_task": {},
+            "coverage": self._empty_coverage(),
+            "camera_params": self._camera_params(),
+        }
+        with h5py.File(self.job.hdf5_path, "r") as f:
+            demo_keys = _sorted_demo_keys(f)
+            if self.job.max_demos_per_task is not None:
+                demo_keys = demo_keys[: self.job.max_demos_per_task]
+            for demo_key in demo_keys:
+                demo_idx = int(demo_key.split("_")[1])
+                buffers = self._process_demo(f[f"data/{demo_key}"], demo_idx)
+                self.writer.write_episode(buffers)
+                results["total_frames"] += len(buffers.rows)
+                results["episode_lengths"][buffers.episode_index] = len(buffers.rows)
+                results["episode_to_task"][buffers.episode_index] = self.job.task_index
+                self._merge_coverage(results["coverage"], buffers)
+        return results
 
-        raise ValueError(
-            f"Task '{task_name}' not found in suite '{suite_name}'. "
-            f"Available tasks: {[suite.get_task(i).name for i in range(suite.n_tasks)]}"
-        )
+    @staticmethod
+    def _empty_coverage() -> dict[str, dict[str, int]]:
+        return {
+            "image_target": {"valid": 0, "total": 0},
+            "point_cloud": {"valid": 0, "total": 0},
+            "depth": {"valid": 0, "total": 0},
+            "grounding": {"valid": 0, "total": 0},
+            "affordance": {"valid": 0, "total": 0},
+            "debug_rgb": {"valid": 0, "total": 0},
+        }
 
-    def _extract_camera_intrinsics(self, env) -> dict:
-        """Extract camera intrinsic parameters from MuJoCo model."""
+    def _merge_coverage(
+        self,
+        coverage: dict[str, dict[str, int]],
+        buffers: LiberoEpisodeBuffers,
+    ) -> None:
+        self._accumulate(coverage, "image_target", buffers.image_targets)
+        self._accumulate(coverage, "point_cloud", buffers.point_clouds)
+        self._accumulate(coverage, "depth", buffers.depth_targets)
+        self._accumulate(coverage, "grounding", buffers.grounding_masks)
+        self._accumulate(coverage, "affordance", buffers.affordance_heatmaps)
+
+    @staticmethod
+    def _accumulate(
+        coverage: dict[str, dict[str, int]],
+        name: str,
+        values: list[np.ndarray | None],
+    ) -> None:
+        coverage[name]["total"] += len(values)
+        coverage[name]["valid"] += sum(v is not None for v in values)
+
+    def _camera_params(self) -> dict[str, float | int | str]:
+        intr = self._intrinsics[STATIC_CAM]
+        return {
+            "fx": float(intr["fx"]),
+            "fy": float(intr["fy"]),
+            "cx": float(intr["cx"]),
+            "cy": float(intr["cy"]),
+            "width": RENDER_W,
+            "height": RENDER_H,
+            "camera_name": STATIC_CAM,
+        }
+
+    def _extract_camera_intrinsics(self) -> dict[str, dict[str, float]]:
         result = {}
         for cam_name in [STATIC_CAM, WRIST_CAM]:
-            cam_id = env.sim.model.camera_name2id(cam_name)
-            fovy = env.sim.model.cam_fovy[cam_id]
-            result[cam_name] = get_camera_intrinsic_from_fovy(
-                fovy, RENDER_W, RENDER_H
-            )
+            cam_id = self.env.sim.model.camera_name2id(cam_name)
+            fovy = self.env.sim.model.cam_fovy[cam_id]
+            result[cam_name] = get_camera_intrinsic_from_fovy(fovy, RENDER_W, RENDER_H)
         return result
 
-    def _replay_and_extract(
+    def _process_demo(self, demo_grp, demo_idx: int) -> LiberoEpisodeBuffers:
+        actions = np.asarray(demo_grp["actions"][()], dtype=np.float32)
+        states = np.asarray(demo_grp["states"][()], dtype=np.float32)
+        obs = demo_grp["obs"]
+        ee_pos = np.asarray(obs["ee_pos"][()], dtype=np.float32)
+        ee_ori = np.asarray(obs["ee_ori"][()], dtype=np.float32)
+        joint_states = np.asarray(obs["joint_states"][()], dtype=np.float32)
+        gripper_states = np.asarray(obs["gripper_states"][()], dtype=np.float32)
+
+        length = min(actions.shape[0], states.shape[0], ee_pos.shape[0])
+        if self.job.max_frames_per_demo is not None:
+            length = min(length, int(self.job.max_frames_per_demo))
+        if length <= 0:
+            raise RuntimeError(f"{self.job.hdf5_path.name} demo_{demo_idx} has no frames")
+
+        frame_payloads = []
+        active_raw: list[str | None] = []
+        for t in range(length):
+            payload = self._extract_frame_payload(
+                states[t],
+                future_tcp_positions=ee_pos[t:length],
+            )
+            frame_payloads.append(payload)
+            active_raw.append(payload["active_body"])
+            self._maybe_log_rgb_debug(demo_grp, payload, t)
+
+        active_smoothed = smooth_active_targets(
+            active_raw,
+            min_segment_len=self.job.min_segment_len,
+        )
+        episode_index = self.job.demo_episode_indices[demo_idx]
+        global_index = self.job.demo_row_starts[demo_idx]
+
+        rows: list[dict[str, Any]] = []
+        primary_frames: list[np.ndarray] = []
+        wrist_frames: list[np.ndarray] = []
+        image_targets: list[np.ndarray | None] = []
+        point_clouds: list[np.ndarray | None] = []
+        depth_targets: list[np.ndarray | None] = []
+        grounding_masks: list[np.ndarray | None] = []
+        grounding_levels: list[str | None] = []
+        affordance_heatmaps: list[np.ndarray | None] = []
+
+        for frame_idx, payload in enumerate(frame_payloads):
+            active_body = active_smoothed[frame_idx] or self._fallback_body
+            target = payload["bodies"].get(active_body)
+            if target is None:
+                target = payload["bodies"].get(self._fallback_body)
+            if target is None:
+                target = next(iter(payload["bodies"].values()))
+
+            pc = target.get("point_cloud")
+            heatmap = None
+            if pc is not None:
+                heatmap = self._target_point_affordance_heatmap(
+                    point_cloud=pc,
+                    tcp_positions=ee_pos[frame_idx:length],
+                    intrinsic=payload["intrinsic"],
+                    cam_R=payload["static_cam_mat"],
+                    cam_t=payload["static_cam_pos"],
+                )
+
+            grounding_mask, grounding_level = self._grounding_mask_for_frame(
+                payload,
+                active_body,
+                target["mask"],
+            )
+            image_target = crop_target_from_seg(
+                payload["rgb_static_aligned"],
+                target["mask"],
+                target_id=1,
+            )
+
+            robot_obs = pack_robot_obs(
+                ee_pos=ee_pos[frame_idx],
+                ee_ori=ee_ori[frame_idx],
+                joint_states=joint_states[frame_idx],
+                gripper_states=gripper_states[frame_idx],
+            )
+            action = np.asarray(actions[frame_idx], dtype=np.float32).reshape(-1)
+            if action.shape[0] != 7:
+                raise RuntimeError(f"LIBERO action expected 7 dims, got {action.shape[0]}")
+
+            row = {
+                "episode_index": int(episode_index),
+                "frame_index": int(frame_idx),
+                "timestamp": float(frame_idx) / float(FPS),
+                "index": int(global_index + frame_idx),
+                "task_index": int(self.job.task_index),
+                "state.robot_obs": robot_obs.tolist(),
+                "state.target_pose_rot6d": [
+                    float(v) for v in mat_to_6d(np.asarray(target["body_mat"]))
+                ],
+                "state.target_pose_trans": [
+                    float(v) for v in np.asarray(target["body_pos"], dtype=np.float32)
+                ],
+                "state.static_cam_rot6d": [
+                    float(v) for v in mat_to_6d(np.asarray(payload["static_cam_mat"]))
+                ],
+                "state.static_cam_trans": [
+                    float(v) for v in np.asarray(payload["static_cam_pos"], dtype=np.float32)
+                ],
+                "action.x": [float(action[0])],
+                "action.y": [float(action[1])],
+                "action.z": [float(action[2])],
+                "action.roll": [float(action[3])],
+                "action.pitch": [float(action[4])],
+                "action.yaw": [float(action[5])],
+                "action.gripper": [float(action[6])],
+                "annotation.human.action.task_description": self.instruction,
+                "trajectory_id": int(episode_index),
+                "base_index": int(frame_idx),
+            }
+            rows.append(row)
+            primary_frames.append(np.asarray(payload["rgb_static"], dtype=np.uint8))
+            wrist_frames.append(np.asarray(payload["rgb_wrist"], dtype=np.uint8))
+            image_targets.append(
+                np.asarray(image_target, dtype=np.uint8)
+                if image_target is not None
+                else None
+            )
+            point_clouds.append(pc)
+            depth_targets.append(np.asarray(payload["depth_static"], dtype=np.float32))
+            grounding_masks.append(grounding_mask)
+            grounding_levels.append(grounding_level)
+            affordance_heatmaps.append(heatmap)
+
+        return LiberoEpisodeBuffers(
+            episode_index=episode_index,
+            task_index=self.job.task_index,
+            task_name=self.task_name,
+            rows=rows,
+            primary_frames=primary_frames,
+            wrist_frames=wrist_frames,
+            image_targets=image_targets,
+            point_clouds=point_clouds,
+            depth_targets=depth_targets,
+            grounding_masks=grounding_masks,
+            grounding_levels=grounding_levels,
+            affordance_heatmaps=affordance_heatmaps,
+        )
+
+    def _extract_frame_payload(
         self,
-        env,
         state: np.ndarray,
-        camera_intrinsics: dict,
-        future_tcp_positions: np.ndarray | None = None,
-    ) -> dict:
-        """Replay MuJoCo state and extract depth, seg, pose, camera, point cloud."""
-        env.sim.set_state_from_flattened(state)
-        env.sim.forward()
+        future_tcp_positions: np.ndarray,
+    ) -> dict[str, Any]:
+        self.env.sim.set_state_from_flattened(state)
+        self.env.sim.forward()
 
-        # Object pose
-        obj_body_id = env.sim.model.body_name2id(self._target_body_name)
-        obj_pos = env.sim.data.body_xpos[obj_body_id].copy()
-        obj_mat = env.sim.data.body_xmat[obj_body_id].reshape(3, 3).copy()
+        rgb_static = self._render_rgb(STATIC_CAM)
+        rgb_static_aligned = self._render_rgb_aligned(STATIC_CAM)
+        rgb_wrist = self._render_rgb(WRIST_CAM)
+        depth_static = self._render_depth(STATIC_CAM)
+        seg_geom = self._render_segmentation_geom(STATIC_CAM)
 
-        # Wrist camera extrinsic
-        wrist_cam_id = env.sim.model.camera_name2id(WRIST_CAM)
-        wrist_pos = env.sim.data.cam_xpos[wrist_cam_id].copy()
-        wrist_mat = env.sim.data.cam_xmat[wrist_cam_id].reshape(3, 3).copy()
+        static_cam_id = self.env.sim.model.camera_name2id(STATIC_CAM)
+        static_cam_pos = self.env.sim.data.cam_xpos[static_cam_id].copy()
+        static_cam_mat = self.env.sim.data.cam_xmat[static_cam_id].reshape(3, 3).copy()
 
-        # Render RGB from MuJoCo for both cameras (256x256, pixel-aligned
-        # with depth/seg — replaces HDF5 128x128 originals for consistency)
-        rgb_static = self._render_rgb(env, STATIC_CAM)
-        rgb_wrist = self._render_rgb(env, WRIST_CAM)
+        bodies: dict[str, dict[str, Any]] = {}
+        best_body = None
+        best_score = float("inf")
+        for body_name in self._candidate_bodies:
+            body_payload = self._body_payload(
+                body_name=body_name,
+                seg_geom=seg_geom,
+                depth_static=depth_static,
+                rgb_static=rgb_static_aligned,
+                intrinsic=self._intrinsics[STATIC_CAM],
+                static_cam_mat=static_cam_mat,
+                static_cam_pos=static_cam_pos,
+                future_tcp_positions=future_tcp_positions,
+            )
+            bodies[body_name] = body_payload
+            score = body_payload["score"]
+            if score < best_score:
+                best_body = body_name
+                best_score = score
 
-        # Render depth for both cameras.
-        # MuJoCo sim.render(depth=True) returns the raw OpenGL depth buffer
-        # (nonlinear, [0, 1]).  We must linearize to metric depth (meters).
-        extent = env.sim.model.stat.extent
-        znear = env.sim.model.vis.map.znear * extent
-        zfar = env.sim.model.vis.map.zfar * extent
+        if best_body is None or not np.isfinite(best_score):
+            best_body = self._fallback_body
 
-        depth_static = env.sim.render(
-            camera_name=STATIC_CAM,
+        return {
+            "rgb_static": rgb_static,
+            "rgb_static_aligned": rgb_static_aligned,
+            "rgb_wrist": rgb_wrist,
+            "depth_static": depth_static,
+            "seg_geom": seg_geom,
+            "static_cam_pos": static_cam_pos,
+            "static_cam_mat": static_cam_mat,
+            "intrinsic": self._intrinsics[STATIC_CAM],
+            "bodies": bodies,
+            "active_body": best_body,
+        }
+
+    def _body_payload(
+        self,
+        body_name: str,
+        seg_geom: np.ndarray,
+        depth_static: np.ndarray,
+        rgb_static: np.ndarray,
+        intrinsic: dict[str, float],
+        static_cam_mat: np.ndarray,
+        static_cam_pos: np.ndarray,
+        future_tcp_positions: np.ndarray,
+    ) -> dict[str, Any]:
+        body_id = self.env.sim.model.body_name2id(body_name)
+        body_pos = self.env.sim.data.body_xpos[body_id].copy()
+        body_mat = self.env.sim.data.body_xmat[body_id].reshape(3, 3).copy()
+        geom_ids = self._geom_ids_for_body(body_name)
+        mask = np.isin(seg_geom, geom_ids).astype(np.uint8)
+        point_cloud = self._point_cloud_from_mask(
+            depth=depth_static,
+            mask=mask,
+            intrinsic=intrinsic,
+            cam_R=static_cam_mat,
+            cam_t=static_cam_pos,
+        )
+        score = pointcloud_to_tcp_distance(point_cloud, future_tcp_positions) if point_cloud is not None else float("inf")
+        return {
+            "body_name": body_name,
+            "body_pos": body_pos,
+            "body_mat": body_mat,
+            "geom_ids": geom_ids,
+            "mask": mask,
+            "point_cloud": point_cloud,
+            "score": score,
+            "image_target_visible": crop_target_from_seg(rgb_static, mask, target_id=1)
+            is not None,
+        }
+
+    def _point_cloud_from_mask(
+        self,
+        depth: np.ndarray,
+        mask: np.ndarray,
+        intrinsic: dict[str, float],
+        cam_R: np.ndarray,
+        cam_t: np.ndarray,
+    ) -> np.ndarray | None:
+        pts = depth_to_world_points(
+            depth=depth,
+            seg_mask=mask,
+            intrinsic=intrinsic,
+            cam_R=cam_R,
+            cam_t=cam_t,
+            target_id=1,
+            num_points=NUM_POINTS,
+        )
+        if pts is None:
+            return None
+        return clean_point_cloud(pts, num_points=NUM_POINTS).astype(np.float32)
+
+    def _grounding_mask_for_frame(
+        self,
+        payload: dict[str, Any],
+        active_body: str,
+        object_mask: np.ndarray,
+    ) -> tuple[np.ndarray | None, str | None]:
+        part = self.policy.part_grounding
+        if part.enabled:
+            part_mask = self._part_mask(payload["seg_geom"], active_body)
+            if part_mask is not None and np.any(part_mask):
+                return mask_to_token_grid(part_mask, target_size=20), part.grounding_level
+        if object_mask is not None and np.any(object_mask):
+            return mask_to_token_grid(object_mask, target_size=20), "object"
+        return None, None
+
+    def _part_mask(self, seg_geom: np.ndarray, active_body: str) -> np.ndarray | None:
+        part = self.policy.part_grounding
+        body_patterns = part.body_patterns or (active_body,)
+        geom_ids = []
+        for geom_id, geom_name in enumerate(self.env.sim.model.geom_names):
+            body_id = int(self.env.sim.model.geom_bodyid[geom_id])
+            body_name = self.env.sim.model.body_id2name(body_id)
+            if not any(pattern in body_name for pattern in body_patterns):
+                continue
+            if any(pattern in geom_name for pattern in part.geom_patterns):
+                geom_ids.append(geom_id)
+        if not geom_ids:
+            return None
+        return np.isin(seg_geom, geom_ids).astype(np.uint8)
+
+    def _resolve_candidate_bodies(self) -> list[str]:
+        bodies: list[str] = []
+        for target in self.policy.candidate_targets:
+            matches = self._match_body_names(target.body_pattern)
+            for body in matches:
+                if body not in bodies:
+                    bodies.append(body)
+        if not bodies:
+            raise RuntimeError(f"No MuJoCo bodies match policy {self.policy.key}")
+        return bodies
+
+    def _resolve_fallback_body(self) -> str:
+        matches = self._match_body_names(self.policy.fallback_target_pattern)
+        if matches:
+            return matches[0]
+        return self._candidate_bodies[0]
+
+    def _match_body_names(self, pattern: str) -> list[str]:
+        excluded = ("robot", "gripper", "mount", "base", "world")
+        matches = [
+            str(name)
+            for name in self.env.sim.model.body_names
+            if pattern in str(name)
+            and not any(str(name).startswith(prefix) for prefix in excluded)
+        ]
+        main_matches = [m for m in matches if m.endswith("_main")]
+        return main_matches or matches
+
+    def _geom_ids_for_body(self, body_name: str) -> list[int]:
+        body_id = self.env.sim.model.body_name2id(body_name)
+        geom_bodyids = self.env.sim.model.geom_bodyid
+        return [i for i in range(len(geom_bodyids)) if int(geom_bodyids[i]) == body_id]
+
+    def _render_rgb(self, camera_name: str) -> np.ndarray:
+        rgb = self.env.sim.render(
+            camera_name=camera_name,
+            width=RENDER_W,
+            height=RENDER_H,
+            depth=False,
+        )
+        if isinstance(rgb, tuple):
+            rgb = rgb[0]
+        return np.asarray(rgb[::-1, ::-1].copy(), dtype=np.uint8)
+
+    def _render_rgb_aligned(self, camera_name: str) -> np.ndarray:
+        rgb = self.env.sim.render(
+            camera_name=camera_name,
+            width=RENDER_W,
+            height=RENDER_H,
+            depth=False,
+        )
+        if isinstance(rgb, tuple):
+            rgb = rgb[0]
+        return np.asarray(rgb[::-1].copy(), dtype=np.uint8)
+
+    def _render_depth(self, camera_name: str) -> np.ndarray:
+        extent = self.env.sim.model.stat.extent
+        znear = self.env.sim.model.vis.map.znear * extent
+        zfar = self.env.sim.model.vis.map.zfar * extent
+        depth = self.env.sim.render(
+            camera_name=camera_name,
             width=RENDER_W,
             height=RENDER_H,
             depth=True,
         )
-        if isinstance(depth_static, tuple):
-            depth_static = depth_static[1]
-        depth_static = depth_static[::-1].copy()
-        depth_static = linearize_depth(depth_static, znear, zfar)
+        if isinstance(depth, tuple):
+            depth = depth[1]
+        depth = np.asarray(depth[::-1].copy(), dtype=np.float32)
+        return linearize_depth(depth, znear, zfar).astype(np.float32)
 
-        depth_wrist = env.sim.render(
-            camera_name=WRIST_CAM,
-            width=RENDER_W,
-            height=RENDER_H,
-            depth=True,
-        )
-        if isinstance(depth_wrist, tuple):
-            depth_wrist = depth_wrist[1]
-        depth_wrist = depth_wrist[::-1].copy()
-        depth_wrist = linearize_depth(depth_wrist, znear, zfar)
-
-        # Render segmentation for static camera
-        seg_static = env.sim.render(
-            camera_name=STATIC_CAM,
+    def _render_segmentation_geom(self, camera_name: str) -> np.ndarray:
+        seg = self.env.sim.render(
+            camera_name=camera_name,
             width=RENDER_W,
             height=RENDER_H,
             segmentation=True,
         )
-        if isinstance(seg_static, tuple):
-            seg_static = seg_static[-1]
-        seg_static = seg_static[::-1].copy()
+        if isinstance(seg, tuple):
+            seg = seg[-1]
+        seg = np.asarray(seg[::-1].copy())
+        return seg[:, :, 1] if seg.ndim == 3 else seg
 
-        # MuJoCo segmentation returns (type, geom_id) per pixel.
-        # Convert geom-level IDs to a binary mask for the target body.
-        target_geom_ids = self._get_target_geom_ids(env)
-        seg_geom = seg_static[:, :, 1] if seg_static.ndim == 3 else seg_static
-        # Binary mask: 1 where target object, 0 elsewhere
-        target_mask = np.isin(seg_geom, target_geom_ids).astype(np.int32)
-        grounding_mask = self._mask_to_token_grid(target_mask)
-
-        # Static camera extrinsic for point cloud transform
-        static_cam_id = env.sim.model.camera_name2id(STATIC_CAM)
-        static_cam_pos = env.sim.data.cam_xpos[static_cam_id].copy()
-        static_cam_mat = (
-            env.sim.data.cam_xmat[static_cam_id].reshape(3, 3).copy()
-        )
-
-        # Point cloud (world frame) — target_id=1 matches the binary mask
-        point_cloud = depth_to_world_points(
-            depth_static,
-            target_mask,
-            camera_intrinsics[STATIC_CAM],
-            static_cam_mat,
-            static_cam_pos,
-            target_id=1,
-            num_points=NUM_POINTS,
-        )
-        affordance_heatmap = None
-        if point_cloud is not None and future_tcp_positions is not None:
-            affordance_heatmap = self._target_point_affordance_heatmap(
-                point_cloud=point_cloud,
-                tcp_positions=future_tcp_positions,
-                intrinsic=camera_intrinsics[STATIC_CAM],
-                cam_R=static_cam_mat,
-                cam_t=static_cam_pos,
-            )
-
-        # Image target (seg crop from MuJoCo-rendered RGB, pixel-aligned with seg)
-        image_target = crop_target_from_seg(
-            rgb_static, target_mask, target_id=1
-        )
-
-        return {
-            "rgb_static": rgb_static,
-            "rgb_wrist": rgb_wrist,
-            "obj_pos": obj_pos,
-            "obj_mat": obj_mat,
-            "wrist_pos": wrist_pos,
-            "wrist_mat": wrist_mat,
-            "static_cam_pos": static_cam_pos,
-            "static_cam_mat": static_cam_mat,
-            "depth_static": depth_static.astype(np.float32),
-            "depth_wrist": depth_wrist.astype(np.float32),
-            "point_cloud": point_cloud,
-            "image_target": image_target,
-            "grounding_mask": grounding_mask,
-            "affordance_heatmap": affordance_heatmap,
-        }
-
-    @staticmethod
-    def _mask_to_token_grid(mask: np.ndarray, target_size: int = 20) -> np.ndarray:
-        mask_arr = (np.asarray(mask) > 0).astype(np.float32)
-        img = Image.fromarray((mask_arr * 255.0).astype(np.uint8), mode="L")
-        img = img.resize((target_size, target_size), Image.BILINEAR)
-        arr = np.asarray(img, dtype=np.float32) / 255.0
-        return arr[None, ...].astype(np.float32)
-
-    @staticmethod
-    def _gaussian_heatmap_from_pixel(
-        pixel_xy: np.ndarray,
-        image_width: int = RENDER_W,
-        image_height: int = RENDER_H,
-        target_size: int = 20,
-        sigma: float = 1.5,
-    ) -> np.ndarray:
-        x, y = float(pixel_xy[0]), float(pixel_xy[1])
-        if not np.isfinite(x) or not np.isfinite(y):
-            return np.zeros((1, target_size, target_size), dtype=np.float32)
-
-        cx = (x + 0.5) * target_size / max(1, image_width) - 0.5
-        cy = (y + 0.5) * target_size / max(1, image_height) - 0.5
-        yy, xx = np.mgrid[0:target_size, 0:target_size].astype(np.float32)
-        heatmap = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
-        max_value = float(heatmap.max())
-        if max_value > 0.0:
-            heatmap = heatmap / max_value
-        return heatmap[None, ...].astype(np.float32)
-
-    @classmethod
     def _target_point_affordance_heatmap(
-        cls,
+        self,
         point_cloud: np.ndarray,
         tcp_positions: np.ndarray,
         intrinsic: dict,
@@ -757,7 +773,6 @@ class LiberoPreprocessor(BasePreprocessor):
         tcp = np.asarray(tcp_positions, dtype=np.float32).reshape(-1, 3)
         if points.size == 0 or tcp.size == 0:
             return np.zeros((1, target_size, target_size), dtype=np.float32)
-
         distances = np.linalg.norm(points[:, None, :] - tcp[None, :, :], axis=-1)
         target_point = points[np.argmin(distances.min(axis=1))]
         from starVLA.utils.vis_draw import world_to_pixel
@@ -768,120 +783,51 @@ class LiberoPreprocessor(BasePreprocessor):
             cam_R=np.asarray(cam_R, dtype=np.float32),
             cam_t=np.asarray(cam_t, dtype=np.float32),
         )[0]
-        return cls._gaussian_heatmap_from_pixel(target_size=target_size, pixel_xy=pixel)
-
-    @staticmethod
-    def _render_rgb(env, camera_name: str) -> np.ndarray:
-        """Render RGB image from MuJoCo, flipped to image convention."""
-        rgb = env.sim.render(
-            camera_name=camera_name,
-            width=RENDER_W,
-            height=RENDER_H,
-            depth=False,
-        )
-        if isinstance(rgb, tuple):
-            rgb = rgb[0]
-        return rgb[::-1, ::-1].copy()
-
-    def _get_target_geom_ids(self, env) -> list[int]:
-        """Get all MuJoCo geom IDs belonging to the target body.
-
-        MuJoCo segmentation renders geom IDs, not body IDs. A single body
-        (e.g. akita_black_bowl_1_main) can have many geoms (g0..g40).
-        """
-        body_id = env.sim.model.body_name2id(self._target_body_name)
-        geom_bodyids = env.sim.model.geom_bodyid
-        return [i for i in range(len(geom_bodyids)) if geom_bodyids[i] == body_id]
-
-    def write_statistics(
-        self,
-        samples: list[dict],
-        output_path: Path,
-        camera_intrinsics: dict,
-    ):
-        """Compute normalization statistics and write statistics.yaml.
-
-        DEPRECATED post 2026-05-13 (spec §2.2): the canonical-state pipeline
-        (`LiberoAdapter`, `statistics.yaml`) was removed when uamvla migrated
-        to UamVLAOFT (LeRobot computes stats automatically into
-        `meta/stats_gr00t.json`). This method raises NotImplementedError —
-        rewrite to emit LeRobot v2 stats if you need it.
-        """
-        raise NotImplementedError(
-            "LiberoPreprocessor.compute_statistics() depended on "
-            "starVLA.model.modules.uamvla.data.embodiment_adapter.LiberoAdapter "
-            "and statistics.yaml schema, both removed in 2026-05-13 cleanup "
-            "(spec §2.2). LeRobot now auto-computes stats into "
-            "meta/stats_gr00t.json on first dataset load. "
-            "Rewrite this method against LeRobot's pipeline if you need it."
+        return gaussian_heatmap_from_pixel(
+            pixel,
+            image_width=RENDER_W,
+            image_height=RENDER_H,
+            target_size=target_size,
         )
 
-        # Original implementation (preserved as reference for any rewrite):
-        import yaml
+    def _maybe_log_rgb_debug(self, demo_grp, payload: dict[str, Any], frame_idx: int) -> None:
+        if frame_idx >= self.job.debug_rgb_check_frames:
+            return
+        obs = demo_grp["obs"]
+        if "agentview_rgb" not in obs:
+            return
+        hdf5_rgb = np.asarray(obs["agentview_rgb"][frame_idx], dtype=np.uint8)
+        replay_rgb = payload["rgb_static"]
+        if hdf5_rgb.shape != replay_rgb.shape:
+            from PIL import Image
 
-        from starVLA.model.modules.uamvla.data.embodiment_adapter import LiberoAdapter
-
-        if len(samples) < 2:
-            logger.warning(
-                f"Computing statistics over only {len(samples)} sample(s); "
-                f"q01/q99/std will be degenerate. Consider preprocessing more episodes."
+            replay_small = np.asarray(
+                Image.fromarray(replay_rgb).resize(
+                    (hdf5_rgb.shape[1], hdf5_rgb.shape[0])
+                ),
+                dtype=np.uint8,
             )
-
-        actions_7d = np.array(
-            [s["action"][:FRANKA_ACTION_DIM] for s in samples]
+        else:
+            replay_small = replay_rgb
+        mae = float(
+            np.abs(
+                replay_small.astype(np.float32) - hdf5_rgb.astype(np.float32)
+            ).mean()
+        )
+        logger.info(
+            "RGB debug %s frame %d replay-vs-hdf5 MAE %.3f",
+            self.task_name,
+            frame_idx,
+            mae,
         )
 
-        # Canonical-space state stats: run adapter per sample, accumulate per field.
-        adapter = LiberoAdapter()
-        field_buffers: dict[str, list[np.ndarray]] = {
-            "arm_0.ee_pose": [],
-            "arm_0.joint_pos": [],
-            "gripper_0": [],
-        }
-        for s in samples:
-            canonical = adapter.to_canonical(s)
-            field_buffers["arm_0.ee_pose"].append(
-                canonical["arm_0"]["ee_pose"].numpy()
-            )
-            field_buffers["arm_0.joint_pos"].append(
-                canonical["arm_0"]["joint_pos"].numpy()
-            )
-            field_buffers["gripper_0"].append(canonical["gripper_0"].numpy())
 
-        franka_state_stats: dict[str, dict] = {}
-        for field_path, vals in field_buffers.items():
-            arr = np.stack(vals).astype(np.float64)  # (N, D)
-            franka_state_stats[field_path] = {
-                "q01":  np.quantile(arr, 0.01, axis=0).tolist(),
-                "q99":  np.quantile(arr, 0.99, axis=0).tolist(),
-                "min":  arr.min(axis=0).tolist(),
-                "max":  arr.max(axis=0).tolist(),
-                "mean": arr.mean(axis=0).tolist(),
-                "std":  arr.std(axis=0).tolist(),
-            }
-
-        stats = {
-            "view_names": ["static", "wrist"],
-            "max_action_dim": MAX_ACTION_DIM,
-            "embodiment_stats": {
-                "franka_libero": {
-                    "action_dim": FRANKA_ACTION_DIM,
-                    "action_min_bound": actions_7d.min(axis=0).tolist(),
-                    "action_max_bound": actions_7d.max(axis=0).tolist(),
-                },
-            },
-            "state_stats": {"franka_libero": franka_state_stats},
-            "cameras": {
-                "static": {"intrinsic": camera_intrinsics[STATIC_CAM]},
-                "wrist":  {"intrinsic": camera_intrinsics[WRIST_CAM]},
-            },
-            "point_cloud": {
-                "num_points": NUM_POINTS,
-                "frame": "world",
-            },
-        }
-
-        with open(output_path / "statistics.yaml", "w") as f:
-            yaml.dump(stats, f, default_flow_style=False, sort_keys=False)
-
-        logger.info(f"Wrote statistics.yaml ({len(samples)} samples)")
+def _sum_coverage(tasks: dict[str, dict[str, dict[str, int]]]) -> dict[str, dict[str, int]]:
+    totals: dict[str, dict[str, int]] = {}
+    for task_coverage in tasks.values():
+        for name, counts in task_coverage.items():
+            if name not in totals:
+                totals[name] = {"valid": 0, "total": 0}
+            totals[name]["valid"] += int(counts.get("valid", 0))
+            totals[name]["total"] += int(counts.get("total", 0))
+    return totals
