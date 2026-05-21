@@ -107,6 +107,28 @@ def stack_optional_tensor_fields(
     return out
 
 
+def stack_optional_string_fields(
+    samples: Sequence[dict], field_names: Iterable[str]
+) -> dict:
+    """Stack optional string metadata fields as lists plus boolean masks."""
+    out: dict = {}
+    for field in field_names:
+        if not any(field in s for s in samples):
+            continue
+        values = []
+        mask = []
+        for sample in samples:
+            if field in sample:
+                values.append(str(sample[field]))
+                mask.append(True)
+            else:
+                values.append("")
+                mask.append(False)
+        out[field] = values
+        out[f"{field}_mask"] = torch.tensor(mask, dtype=torch.bool)
+    return out
+
+
 def stack_pose_gt(samples: Sequence[dict]) -> Optional[dict]:
     """Stack ``pose_gt={"rotation","translation"}`` across samples.
 

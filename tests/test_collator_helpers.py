@@ -9,6 +9,7 @@ import torch
 from starVLA.model.modules.uamvla.collator_helpers import (
     stack_canonical,
     stack_optional_tensor_fields,
+    stack_optional_string_fields,
     stack_pose_gt,
     stack_static_cam_extrinsic,
 )
@@ -88,6 +89,45 @@ def test_stack_optional_tensor_fields_mixed_presence():
     assert torch.equal(
         out["point_cloud_mask"], torch.tensor([True, True, False])
     )
+
+
+def test_stack_optional_tensor_fields_new_aux_maps():
+    depth = torch.ones(1, 6, 6)
+    grounding = torch.full((1, 20, 20), 0.25)
+    affordance = torch.full((1, 20, 20), 0.75)
+    action_future = torch.zeros(3, 64, 64)
+    samples = [
+        {
+            "depth_target": depth,
+            "grounding_mask": grounding,
+            "affordance_heatmap": affordance,
+            "image_action_future": action_future,
+        },
+        {"grounding_mask": grounding * 2},
+    ]
+
+    out = stack_optional_tensor_fields(
+        samples,
+        ["depth_target", "grounding_mask", "affordance_heatmap", "image_action_future"],
+    )
+
+    assert out["depth_target"].shape == (2, 1, 6, 6)
+    assert torch.equal(out["depth_target_mask"], torch.tensor([True, False]))
+    assert out["grounding_mask"].shape == (2, 1, 20, 20)
+    assert torch.equal(out["grounding_mask_mask"], torch.tensor([True, True]))
+    assert out["affordance_heatmap"].shape == (2, 1, 20, 20)
+    assert torch.equal(out["affordance_heatmap_mask"], torch.tensor([True, False]))
+    assert out["image_action_future"].shape == (2, 3, 64, 64)
+    assert torch.equal(out["image_action_future_mask"], torch.tensor([True, False]))
+
+
+def test_stack_optional_string_fields_for_grounding_level():
+    out = stack_optional_string_fields(
+        [{"grounding_level": "part"}, {}, {"grounding_level": "object"}],
+        ["grounding_level"],
+    )
+    assert out["grounding_level"] == ["part", "", "object"]
+    assert torch.equal(out["grounding_level_mask"], torch.tensor([True, False, True]))
 
 
 def test_stack_pose_gt_mixed_and_absent():
