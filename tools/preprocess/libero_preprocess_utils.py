@@ -91,12 +91,18 @@ def pack_robot_obs(
     joint_states: np.ndarray,
     gripper_states: np.ndarray,
 ) -> np.ndarray:
+    gripper = np.asarray(gripper_states, dtype=np.float32).reshape(-1)
+    primary_gripper = gripper[:1] if gripper.size else np.zeros(1, dtype=np.float32)
+    secondary_gripper = (
+        gripper[1:2] if gripper.size > 1 else np.zeros(1, dtype=np.float32)
+    )
     obs = np.concatenate(
         [
             np.asarray(ee_pos, dtype=np.float32).reshape(3),
             np.asarray(ee_ori, dtype=np.float32).reshape(3),
+            primary_gripper,
             np.asarray(joint_states, dtype=np.float32).reshape(7),
-            np.asarray(gripper_states, dtype=np.float32).reshape(2),
+            secondary_gripper,
         ]
     )
     return obs.astype(np.float32)

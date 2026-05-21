@@ -74,8 +74,10 @@ def test_pack_robot_obs_is_15d_float32():
     assert obs.shape == (15,)
     assert obs.dtype == np.float32
     assert np.allclose(
-        obs[:7], np.array([1, 2, 3, 4, 5, 6, 0], dtype=np.float32)
+        obs[:7], np.array([1, 2, 3, 4, 5, 6, 0.1], dtype=np.float32)
     )
+    assert np.allclose(obs[7:14], np.arange(7, dtype=np.float32))
+    assert np.isclose(obs[14], np.float32(0.2))
 
 
 def test_compute_episode_plan_assigns_contiguous_indices():
