@@ -51,6 +51,16 @@ class AuxDenoisingSuite(nn.Module):
             return value.detach().to(device=device, dtype=dtype)
         return torch.tensor(float(value), device=device, dtype=dtype)
 
+    @staticmethod
+    def _head_metric_key(head_name: str, metric_name: str) -> str:
+        prefix = f"{head_name}_"
+        metric_core = (
+            metric_name[len(prefix):]
+            if metric_name.startswith(prefix)
+            else metric_name
+        )
+        return f"{head_name}_{metric_core}_raw"
+
     def forward(
         self,
         action_loss: torch.Tensor,
@@ -73,13 +83,21 @@ class AuxDenoisingSuite(nn.Module):
             if out.loss is None:
                 continue
             losses[name] = out.loss
+            raw_value = out.metrics.get("loss_raw", out.metrics.get(f"{name}_loss", 0.0))
             metrics[f"{name}_loss_raw"] = self._metric_tensor(
-                out.metrics.get("loss_raw", 0.0), device, dtype
+                raw_value, device, dtype
             )
             metrics[f"{name}_valid_ratio"] = float(
                 out.metrics.get("valid_ratio", mask.float().mean().item())
             )
             metrics[f"{name}_loss_weighted_pre_budget"] = out.loss.detach()
+            metrics[f"{name}_loss_weighted"] = out.loss.detach()
+            for metric_name, metric_value in out.metrics.items():
+                if metric_name in {"loss_raw", f"{name}_loss", "valid_ratio"}:
+                    continue
+                metrics[self._head_metric_key(name, metric_name)] = (
+                    metric_value.detach() if torch.is_tensor(metric_value) else metric_value
+                )
 
         if not losses:
             return action_loss.new_zeros(()), metrics

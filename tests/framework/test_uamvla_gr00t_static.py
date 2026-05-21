@@ -192,6 +192,51 @@ def test_uamvla_gr00t_forward_repeats_extracted_calvin_robot_obs_state(monkeypat
     np.testing.assert_allclose(state[1].numpy(), packed_state[:, :7])
 
 
+def test_uamvla_gr00t_forward_uses_aux_suite_when_present(monkeypatch):
+    module = _load_uamvla_gr00t_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeQwenInterface:
+        image_token_id = 99
+
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.full((len(images), 400), 99, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones((kwargs["input_ids"].shape[0], 400, 16), dtype=torch.float32)
+            return types.SimpleNamespace(hidden_states=[hidden])
+
+    class _FakeActionModel:
+        def __call__(self, vl_embs, actions, state):
+            return torch.tensor(2.0)
+
+    class _FakeSuite:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, action_loss, hidden_states, batch, masks, global_step=0):
+            self.calls.append((action_loss, hidden_states, batch, masks, global_step))
+            return torch.tensor(0.25), {"aux_total_post_budget": torch.tensor(0.25)}
+
+    model = object.__new__(module.UamVLAGR00T)
+    model.qwen_vl_interface = _FakeQwenInterface()
+    model.action_model = _FakeActionModel()
+    model.action_horizon = 8
+    model.aux_heads = {}
+    model.aux_suite = _FakeSuite()
+    model.config = _AttrDict(framework=_AttrDict(action_model=_AttrDict(repeated_diffusion_steps=1)))
+
+    sample = {
+        "image": [object()],
+        "lang": "open",
+        "action": np.zeros((8, 7), dtype=np.float32),
+    }
+    out = module.UamVLAGR00T.forward(model, [sample], global_step=3)
+    assert out["action_loss"].item() == 2.25
+    assert out["aux_total_post_budget"].item() == 0.25
+    assert model.aux_suite.calls[0][4] == 3
+
+
 def test_uamvla_gr00t_init_does_not_walk_into_uamvla_oft_init(monkeypatch):
     module = _load_uamvla_gr00t_module(monkeypatch)
     init_calls = []

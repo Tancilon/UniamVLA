@@ -125,6 +125,7 @@ class UamVLAOFT(Qwenvl_OFT):
         # `_maybe_build_aux_heads`.
         self.aux_heads = nn.ModuleDict()
         self._maybe_build_aux_heads()
+        self._maybe_build_aux_loss_control()
 
     # ──────────────────────────────────────────────────────────────────
     #  Aux heads (no-op in PR 4)
@@ -321,6 +322,32 @@ class UamVLAOFT(Qwenvl_OFT):
                 action_horizon=action_horizon,
                 **{**vision_extra, **action_future_cfg},
             )
+
+    def _maybe_build_aux_loss_control(self) -> None:
+        """Construct the global aux-loss controller when configured."""
+        cfg = getattr(self.config.framework, "aux_loss_control", None)
+        if cfg is None:
+            return
+
+        from starVLA.model.modules.uamvla.aux_loss_control import AuxDenoisingSuite
+
+        allowed = {
+            "enabled",
+            "aux_budget",
+            "warmup_steps",
+            "aux_ratio_cap",
+            "action_loss_ema_beta",
+            "eps",
+        }
+        suite_kwargs = {
+            key: value
+            for key, value in cfg.items()
+            if key in allowed
+        }
+        self.aux_suite = AuxDenoisingSuite(
+            heads=self.aux_heads,
+            **suite_kwargs,
+        )
 
     # ──────────────────────────────────────────────────────────────────
     #  Image resize — shared between training and inference
@@ -952,6 +979,51 @@ class UamVLAOFT(Qwenvl_OFT):
         )
         return f"{head_name}_{metric_core}_raw"
 
+    @staticmethod
+    def _global_step_from_kwargs(kwargs: dict) -> int:
+        value = kwargs.get("global_step", 0)
+        if torch.is_tensor(value):
+            return int(value.detach().item())
+        return int(value or 0)
+
+    def _compute_aux_training_losses(
+        self,
+        total: torch.Tensor,
+        hidden: torch.Tensor,
+        batch_dict: dict,
+        global_step: int = 0,
+    ) -> tuple[torch.Tensor, dict]:
+        """Run aux heads through the budget suite, falling back to legacy direct sums."""
+        log_metrics: dict = {}
+        aux_heads = getattr(self, "aux_heads", {})
+
+        if hasattr(self, "aux_suite"):
+            masks = {
+                name: self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
+                for name in aux_heads
+            }
+            aux_loss, aux_metrics = self.aux_suite(
+                action_loss=total,
+                hidden_states=hidden,
+                batch=batch_dict,
+                masks=masks,
+                global_step=global_step,
+            )
+            return total + aux_loss, aux_metrics
+
+        for name, head in aux_heads.items():
+            mask = self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
+            out = head.compute_loss(hidden, batch_dict, mask=mask)
+            if out.loss is not None:
+                total = total + out.loss
+                log_metrics[f"{name}_loss_weighted"] = out.loss.detach()
+            for metric_name, metric_value in out.metrics.items():
+                log_metrics[
+                    self._aux_metric_log_key(name, metric_name)
+                ] = metric_value
+
+        return total, log_metrics
+
     def _collate_aux(self, examples: List[dict], qwen_inputs: dict) -> dict:
         """Stack per-sample optional fields into batch tensors.
 
@@ -1079,19 +1151,16 @@ class UamVLAOFT(Qwenvl_OFT):
             total = self.l1_loss(pred_actions, gt_actions_t)
         log_metrics = {"action_loss_l1": total.detach()}
 
-        # ⑤ Aux head losses (no-op in PR 4 — self.aux_heads is empty)
+        # ⑤ Aux head losses (no-op when no aux heads are enabled)
         batch_dict = self._collate_aux(examples, qwen_inputs)
         assert "input_ids" in batch_dict, "future/recon heads require input_ids"
-        for name, head in self.aux_heads.items():
-            mask = self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
-            out = head.compute_loss(hidden, batch_dict, mask=mask)
-            if out.loss is not None:
-                total = total + out.loss
-                log_metrics[f"{name}_loss_weighted"] = out.loss.detach()
-            for metric_name, metric_value in out.metrics.items():
-                log_metrics[
-                    self._aux_metric_log_key(name, metric_name)
-                ] = metric_value
+        total, aux_metrics = self._compute_aux_training_losses(
+            total,
+            hidden,
+            batch_dict,
+            global_step=self._global_step_from_kwargs(kwargs),
+        )
+        log_metrics.update(aux_metrics)
 
         return {"action_loss": total, **log_metrics}
 

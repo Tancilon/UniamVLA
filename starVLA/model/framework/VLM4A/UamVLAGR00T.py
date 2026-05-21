@@ -42,6 +42,8 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
         self._init_uamvla_sidecars()
         self.aux_heads = nn.ModuleDict()
         self._maybe_build_aux_heads()
+        if hasattr(self, "_maybe_build_aux_loss_control"):
+            self._maybe_build_aux_loss_control()
 
     def _init_gr00t_components(self, config) -> None:
         """Initialize Qwen-VL and the GR00T flow-matching action head.
@@ -215,14 +217,37 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
 
         batch_dict = self._collate_aux(examples, qwen_inputs)
         assert "input_ids" in batch_dict, "future/recon heads require input_ids"
-        for name, head in self.aux_heads.items():
-            mask = self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
-            out = head.compute_loss(hidden, batch_dict, mask=mask)
-            if out.loss is not None:
-                total = total + out.loss
-                log_metrics[f"{name}_loss_weighted"] = out.loss.detach()
-            for metric_name, metric_value in out.metrics.items():
-                log_metrics[self._aux_metric_log_key(name, metric_name)] = metric_value
+        if hasattr(self, "_compute_aux_training_losses"):
+            total, aux_metrics = self._compute_aux_training_losses(
+                total,
+                hidden,
+                batch_dict,
+                global_step=UamVLAOFT._global_step_from_kwargs(kwargs),
+            )
+            log_metrics.update(aux_metrics)
+        elif hasattr(self, "aux_suite"):
+            masks = {
+                name: self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
+                for name in self.aux_heads
+            }
+            aux_loss, aux_metrics = self.aux_suite(
+                action_loss=total,
+                hidden_states=hidden,
+                batch=batch_dict,
+                masks=masks,
+                global_step=int(kwargs.get("global_step", 0) or 0),
+            )
+            total = total + aux_loss
+            log_metrics.update(aux_metrics)
+        else:
+            for name, head in self.aux_heads.items():
+                mask = self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
+                out = head.compute_loss(hidden, batch_dict, mask=mask)
+                if out.loss is not None:
+                    total = total + out.loss
+                    log_metrics[f"{name}_loss_weighted"] = out.loss.detach()
+                for metric_name, metric_value in out.metrics.items():
+                    log_metrics[self._aux_metric_log_key(name, metric_name)] = metric_value
 
         return {"action_loss": total, **log_metrics}
 
