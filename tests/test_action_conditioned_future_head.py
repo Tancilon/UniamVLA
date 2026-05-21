@@ -1,5 +1,8 @@
+import sys
+
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from starVLA.model.modules.uamvla.aux_heads.action_conditioned_future_head import (
     ActionConditionedFutureHead,
@@ -114,3 +117,40 @@ def test_action_conditioned_future_empty_mask_returns_dummy_loss():
     assert out.loss.item() == 0.0
     assert out.metrics["loss_raw"] == 0.0
     assert out.metrics["valid_ratio"] == 0.0
+
+
+def test_action_conditioned_future_visualizes_gt_vs_pred(monkeypatch):
+    monkeypatch.setitem(sys.modules, "wandb", None)
+    head = ActionConditionedFutureHead(
+        hidden_size=4,
+        vae=_FakeVAE(),
+        image_mean=[0.5, 0.5, 0.5],
+        image_std=[0.5, 0.5, 0.5],
+        image_token_id=99,
+        patches_per_view=4,
+        action_dim=7,
+        action_horizon=8,
+        target_resize=32,
+        action_encoder_layers=1,
+        action_embed_dim=8,
+        action_encoder_heads=2,
+        action_dropout=0.0,
+        denoiser=_FakeDenoiser(),
+    )
+    hidden = torch.zeros(2, 4, 4)
+    batch = {
+        "input_ids": torch.full((2, 4), 99, dtype=torch.long),
+        "action": torch.zeros(2, 8, 7),
+        "image_action_future": torch.rand(2, 3, 32, 32),
+        "instruction": ["open", "close"],
+    }
+
+    images = head.visualize(
+        hidden,
+        batch,
+        mask=torch.tensor([True, False]),
+        num_samples=1,
+    )
+
+    assert len(images) == 1
+    assert isinstance(images[0], Image.Image)

@@ -206,3 +206,75 @@ class ActionConditionedFutureHead(AuxHead):
         pixels = self.vae.decode(sampled)
         pixels = (pixels / 2 + 0.5).clamp(0, 1)
         return pixels
+
+    @staticmethod
+    def _tensor_image_to_pil(image: torch.Tensor):
+        from starVLA.utils.vis_draw import tensor_to_pil
+
+        image = image.detach().float()
+        if image.amin().item() < 0.0:
+            return tensor_to_pil(image, mean=0.5, std=0.5)
+        return tensor_to_pil(image, mean=0.0, std=1.0)
+
+    @staticmethod
+    def _maybe_wandb_image(image, caption: str):
+        try:
+            import wandb
+        except Exception:
+            return image
+        return wandb.Image(image, caption=caption)
+
+    def visualize(
+        self,
+        hidden_states: torch.Tensor,
+        batch: dict,
+        mask: torch.Tensor,
+        num_samples: int = 1,
+        **kwargs,
+    ) -> list:
+        """Side-by-side GT and predicted local future frames for valid samples."""
+        mask = mask.to(device=hidden_states.device, dtype=torch.bool)
+        if num_samples <= 0 or not mask.any():
+            return []
+
+        from starVLA.utils.vis_draw import concat_images_h
+
+        n = min(int(num_samples), int(mask.sum().item()))
+        valid_indices = mask.nonzero(as_tuple=True)[0][:n]
+        batch_subset = {
+            "input_ids": batch["input_ids"][valid_indices],
+            "action": batch["action"][valid_indices],
+        }
+
+        was_training = bool(self.training)
+        self.eval()
+        try:
+            with torch.no_grad():
+                output = self.predict(hidden_states[valid_indices], batch_subset)
+        finally:
+            if was_training:
+                self.train()
+
+        pred_images = output.predictions["action_conditioned_future_images"].detach()
+        gt_images = batch["image_action_future"][valid_indices]
+        if pred_images.shape[-2:] != gt_images.shape[-2:]:
+            pred_images = F.interpolate(
+                pred_images,
+                size=gt_images.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        instructions = batch.get("instruction", [])
+
+        results = []
+        for i, idx in enumerate(valid_indices):
+            gt_img = self._tensor_image_to_pil(gt_images[i])
+            pred_img = self._tensor_image_to_pil(pred_images[i])
+            combined = concat_images_h([gt_img, pred_img])
+            idx_int = int(idx.item())
+            instruction = instructions[idx_int] if idx_int < len(instructions) else ""
+            caption = "action_conditioned_future: GT vs Pred"
+            if instruction:
+                caption = f"{caption} | {instruction}"
+            results.append(self._maybe_wandb_image(combined, caption=caption))
+        return results

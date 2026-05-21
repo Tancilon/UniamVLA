@@ -1,5 +1,8 @@
+import sys
+
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from starVLA.model.modules.uamvla.aux_heads.spatial_map_denoising_head import (
     SpatialMapDenoisingHead,
@@ -78,3 +81,32 @@ def test_spatial_map_head_empty_mask_returns_dummy_loss():
     assert out.loss.item() == 0.0
     assert out.metrics["loss_raw"] == 0.0
     assert out.metrics["valid_ratio"] == 0.0
+
+
+def test_spatial_map_head_visualizes_gt_vs_pred(monkeypatch):
+    monkeypatch.setitem(sys.modules, "wandb", None)
+    head = SpatialMapDenoisingHead(
+        hidden_size=4,
+        image_token_id=99,
+        patches_per_view=4,
+        target_key="depth_target",
+        mask_key="depth_mask",
+        metric_prefix="depth",
+        denoiser=_FakeDenoiser(),
+    )
+    hidden = torch.zeros(2, 4, 4)
+    batch = {
+        "input_ids": torch.full((2, 4), 99, dtype=torch.long),
+        "depth_target": torch.rand(2, 1, 2, 2),
+        "instruction": ["open", "close"],
+    }
+
+    images = head.visualize(
+        hidden,
+        batch,
+        mask=torch.tensor([False, True]),
+        num_samples=1,
+    )
+
+    assert len(images) == 1
+    assert isinstance(images[0], Image.Image)

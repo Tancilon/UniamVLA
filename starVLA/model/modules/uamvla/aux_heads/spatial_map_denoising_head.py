@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from PIL import Image
 
 from starVLA.model.modules.uamvla.aux_heads.base import AuxHead, HeadOutput
 from starVLA.model.modules.uamvla.components.denoiser.scheduler import ReconDenoiser
@@ -160,3 +161,75 @@ class SpatialMapDenoisingHead(AuxHead):
             metrics={},
             predictions={f"{self.metric_prefix}_maps": maps},
         )
+
+    @staticmethod
+    def _map_to_pil(map_01: torch.Tensor, size: int = 160) -> Image.Image:
+        if map_01.ndim == 3:
+            map_01 = map_01.squeeze(0)
+        if map_01.ndim != 2:
+            raise ValueError(f"Expected 2-D map for visualization, got {tuple(map_01.shape)}")
+        image = (
+            map_01.detach()
+            .float()
+            .clamp(0.0, 1.0)
+            .mul(255.0)
+            .round()
+            .to(torch.uint8)
+            .cpu()
+            .numpy()
+        )
+        pil = Image.fromarray(image, mode="L").convert("RGB")
+        return pil.resize((size, size), Image.NEAREST)
+
+    @staticmethod
+    def _maybe_wandb_image(image: Image.Image, caption: str):
+        try:
+            import wandb
+        except Exception:
+            return image
+        return wandb.Image(image, caption=caption)
+
+    def visualize(
+        self,
+        hidden_states: torch.Tensor,
+        batch: dict,
+        mask: torch.Tensor,
+        num_samples: int = 1,
+        **kwargs,
+    ) -> list:
+        """Side-by-side GT and predicted spatial maps for valid samples."""
+        mask = mask.to(device=hidden_states.device, dtype=torch.bool)
+        if num_samples <= 0 or not mask.any():
+            return []
+
+        from starVLA.utils.vis_draw import concat_images_h
+
+        n = min(int(num_samples), int(mask.sum().item()))
+        valid_indices = mask.nonzero(as_tuple=True)[0][:n]
+        batch_subset = {"input_ids": batch["input_ids"][valid_indices]}
+
+        was_training = bool(self.training)
+        self.eval()
+        try:
+            with torch.no_grad():
+                output = self.predict(hidden_states[valid_indices], batch_subset)
+        finally:
+            if was_training:
+                self.train()
+
+        pred_maps = output.predictions[f"{self.metric_prefix}_maps"].detach()
+        gt_maps = self._prepare_target_01(batch[self.target_key][valid_indices])
+        instructions = batch.get("instruction", [])
+
+        results = []
+        for i, idx in enumerate(valid_indices):
+            gt_img = self._map_to_pil(gt_maps[i, 0])
+            pred_img = self._map_to_pil(pred_maps[i, 0])
+            combined = concat_images_h([gt_img, pred_img])
+            idx_int = int(idx.item())
+            instruction = instructions[idx_int] if idx_int < len(instructions) else ""
+            caption = f"{self.metric_prefix}: GT vs Pred"
+            if instruction:
+                caption = f"{caption} | {instruction}"
+            results.append(self._maybe_wandb_image(combined, caption=caption))
+        return results
