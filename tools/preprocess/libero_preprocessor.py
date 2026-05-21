@@ -87,6 +87,9 @@ class LiberoPreprocessor(BasePreprocessor):
             "point_clouds",
             "depth/static",
             "depth/wrist",
+            "depths/static",
+            "grounding_masks/static",
+            "affordance_heatmaps/static",
         ]:
             (output_path / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -174,6 +177,7 @@ class LiberoPreprocessor(BasePreprocessor):
                                 env,
                                 states[t],
                                 camera_intrinsics,
+                                future_tcp_positions=ee_pos[t:],
                             )
 
                             # Save rendered RGB images
@@ -251,6 +255,27 @@ class LiberoPreprocessor(BasePreprocessor):
                             )
                             sample["depth_static"] = depth_static_path
                             sample["depth_wrist"] = depth_wrist_path
+                            self._emit_aux_denoising_sidecars(
+                                output_dir=output_path,
+                                trajectory_id=episode_id,
+                                base_index=t,
+                                depth_static=extracted["depth_static"],
+                                grounding_mask=extracted.get("grounding_mask"),
+                                affordance_heatmap=extracted.get("affordance_heatmap"),
+                                grounding_level="object",
+                            )
+                            sample["depth_target"] = (
+                                f"depths/static/{episode_id}/{t}.npy"
+                            )
+                            if extracted.get("grounding_mask") is not None:
+                                sample["grounding_mask"] = (
+                                    f"grounding_masks/static/{episode_id}/{t}.npy"
+                                )
+                                sample["grounding_level"] = "object"
+                            if extracted.get("affordance_heatmap") is not None:
+                                sample["affordance_heatmap"] = (
+                                    f"affordance_heatmaps/static/{episode_id}/{t}.npy"
+                                )
 
                             # Wrist camera extrinsic
                             sample["wrist_cam_extrinsic"] = {
@@ -382,6 +407,43 @@ class LiberoPreprocessor(BasePreprocessor):
                 f"This indicates a duplicate sample ID collision."
             )
         write_fn(path)
+
+    @staticmethod
+    def _emit_aux_denoising_sidecars(
+        output_dir: Path,
+        trajectory_id: int | str,
+        base_index: int,
+        depth_static: np.ndarray | None = None,
+        grounding_mask: np.ndarray | None = None,
+        affordance_heatmap: np.ndarray | None = None,
+        grounding_level: str = "object",
+    ) -> None:
+        output_dir = Path(output_dir)
+        trajectory = str(trajectory_id)
+        base = f"{int(base_index)}.npy"
+
+        if depth_static is not None:
+            depth_dir = output_dir / "depths" / "static" / trajectory
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            np.save(depth_dir / base, np.asarray(depth_static, dtype=np.float32))
+
+        if grounding_mask is not None:
+            grounding_dir = output_dir / "grounding_masks" / "static" / trajectory
+            grounding_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                grounding_dir / base,
+                np.asarray(grounding_mask, dtype=np.float32),
+            )
+            with open(grounding_dir / f"{int(base_index)}.json", "w") as f:
+                json.dump({"grounding_level": str(grounding_level)}, f)
+
+        if affordance_heatmap is not None:
+            affordance_dir = output_dir / "affordance_heatmaps" / "static" / trajectory
+            affordance_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                affordance_dir / base,
+                np.asarray(affordance_heatmap, dtype=np.float32),
+            )
 
     def _create_env(self, hdf5_file: Path):
         """Create LIBERO OffScreenRenderEnv from HDF5 env_args.
@@ -534,6 +596,7 @@ class LiberoPreprocessor(BasePreprocessor):
         env,
         state: np.ndarray,
         camera_intrinsics: dict,
+        future_tcp_positions: np.ndarray | None = None,
     ) -> dict:
         """Replay MuJoCo state and extract depth, seg, pose, camera, point cloud."""
         env.sim.set_state_from_flattened(state)
@@ -600,6 +663,7 @@ class LiberoPreprocessor(BasePreprocessor):
         seg_geom = seg_static[:, :, 1] if seg_static.ndim == 3 else seg_static
         # Binary mask: 1 where target object, 0 elsewhere
         target_mask = np.isin(seg_geom, target_geom_ids).astype(np.int32)
+        grounding_mask = self._mask_to_token_grid(target_mask)
 
         # Static camera extrinsic for point cloud transform
         static_cam_id = env.sim.model.camera_name2id(STATIC_CAM)
@@ -618,6 +682,15 @@ class LiberoPreprocessor(BasePreprocessor):
             target_id=1,
             num_points=NUM_POINTS,
         )
+        affordance_heatmap = None
+        if point_cloud is not None and future_tcp_positions is not None:
+            affordance_heatmap = self._target_point_affordance_heatmap(
+                point_cloud=point_cloud,
+                tcp_positions=future_tcp_positions,
+                intrinsic=camera_intrinsics[STATIC_CAM],
+                cam_R=static_cam_mat,
+                cam_t=static_cam_pos,
+            )
 
         # Image target (seg crop from MuJoCo-rendered RGB, pixel-aligned with seg)
         image_target = crop_target_from_seg(
@@ -637,7 +710,65 @@ class LiberoPreprocessor(BasePreprocessor):
             "depth_wrist": depth_wrist.astype(np.float32),
             "point_cloud": point_cloud,
             "image_target": image_target,
+            "grounding_mask": grounding_mask,
+            "affordance_heatmap": affordance_heatmap,
         }
+
+    @staticmethod
+    def _mask_to_token_grid(mask: np.ndarray, target_size: int = 20) -> np.ndarray:
+        mask_arr = (np.asarray(mask) > 0).astype(np.float32)
+        img = Image.fromarray((mask_arr * 255.0).astype(np.uint8), mode="L")
+        img = img.resize((target_size, target_size), Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        return arr[None, ...].astype(np.float32)
+
+    @staticmethod
+    def _gaussian_heatmap_from_pixel(
+        pixel_xy: np.ndarray,
+        image_width: int = RENDER_W,
+        image_height: int = RENDER_H,
+        target_size: int = 20,
+        sigma: float = 1.5,
+    ) -> np.ndarray:
+        x, y = float(pixel_xy[0]), float(pixel_xy[1])
+        if not np.isfinite(x) or not np.isfinite(y):
+            return np.zeros((1, target_size, target_size), dtype=np.float32)
+
+        cx = (x + 0.5) * target_size / max(1, image_width) - 0.5
+        cy = (y + 0.5) * target_size / max(1, image_height) - 0.5
+        yy, xx = np.mgrid[0:target_size, 0:target_size].astype(np.float32)
+        heatmap = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
+        max_value = float(heatmap.max())
+        if max_value > 0.0:
+            heatmap = heatmap / max_value
+        return heatmap[None, ...].astype(np.float32)
+
+    @classmethod
+    def _target_point_affordance_heatmap(
+        cls,
+        point_cloud: np.ndarray,
+        tcp_positions: np.ndarray,
+        intrinsic: dict,
+        cam_R: np.ndarray,
+        cam_t: np.ndarray,
+        target_size: int = 20,
+    ) -> np.ndarray:
+        points = np.asarray(point_cloud, dtype=np.float32).reshape(-1, 3)
+        tcp = np.asarray(tcp_positions, dtype=np.float32).reshape(-1, 3)
+        if points.size == 0 or tcp.size == 0:
+            return np.zeros((1, target_size, target_size), dtype=np.float32)
+
+        distances = np.linalg.norm(points[:, None, :] - tcp[None, :, :], axis=-1)
+        target_point = points[np.argmin(distances.min(axis=1))]
+        from starVLA.utils.vis_draw import world_to_pixel
+
+        pixel = world_to_pixel(
+            target_point[None, :],
+            intrinsic=intrinsic,
+            cam_R=np.asarray(cam_R, dtype=np.float32),
+            cam_t=np.asarray(cam_t, dtype=np.float32),
+        )[0]
+        return cls._gaussian_heatmap_from_pixel(target_size=target_size, pixel_xy=pixel)
 
     @staticmethod
     def _render_rgb(env, camera_name: str) -> np.ndarray:

@@ -238,6 +238,9 @@ class _EpisodeBuffers:
     wrist_frames: list[np.ndarray]     # uint8 (H, W, 3)
     point_clouds: list[np.ndarray]     # (1024, 3) float32 after cleaning
     image_targets: list[np.ndarray]    # one uint8 (h, w, 3) target crop per frame
+    depth_targets: list[np.ndarray]    # raw static metric depth per frame
+    grounding_masks: list[np.ndarray]  # [1, 20, 20] object/part mask per frame
+    affordance_heatmaps: list[np.ndarray]  # [1, 20, 20] future TCP affordance
     instruction: str
 
 
@@ -409,8 +412,13 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     output_dir, episode_index, fps=FPS,
                 )
                 self._emit_episode_sidecars(
-                    buffers.image_targets, buffers.point_clouds,
-                    output_dir, episode_index,
+                    buffers.image_targets,
+                    buffers.point_clouds,
+                    output_dir,
+                    episode_index,
+                    depth_targets=buffers.depth_targets,
+                    grounding_masks=buffers.grounding_masks,
+                    affordance_heatmaps=buffers.affordance_heatmaps,
                 )
                 # Commit the global counter and episode slot.
                 global_index += len(buffers.samples)
@@ -519,6 +527,10 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         wrist_frames: list[np.ndarray] = []
         point_clouds: list[np.ndarray] = []
         image_targets: list[np.ndarray] = []
+        depth_targets: list[np.ndarray] = []
+        grounding_masks: list[np.ndarray] = []
+        tcp_positions: list[np.ndarray] = []
+        affordance_contexts: list[dict] = []
         # Dataset-global row counter; advances 1-per-sample and is written
         # to the `index` column (LeRobot v2 invariant).
         global_index = global_index_start
@@ -534,6 +546,14 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 width=RENDER_W, height=RENDER_H,
             )
             obj_pos, obj_mat = worker.env.get_object_pose(target_object_id)
+            depth_targets.append(
+                np.asarray(rendered["depth_static"], dtype=np.float32)
+            )
+            grounding_masks.append(
+                self._segmentation_to_token_grid_mask(
+                    rendered["seg_static"], target_seg_id,
+                )
+            )
 
             # Always keep the rendered images (parquet has VideoBackend
             # entries that reference these mp4 frames by index).
@@ -564,6 +584,15 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                         f"({NUM_POINTS}, 3) — clean_point_cloud invariant"
                     )
                 point_clouds.append(pc_clean)
+                tcp_positions.append(
+                    np.asarray(robot_obs[:3], dtype=np.float32)
+                )
+                affordance_contexts.append({
+                    "point_cloud": pc_clean,
+                    "intrinsic": rendered["static_intrinsic"],
+                    "cam_R": np.asarray(rendered["static_cam_R"], dtype=np.float32),
+                    "cam_t": np.asarray(rendered["static_cam_t"], dtype=np.float32),
+                })
             elif self.on_missing_target == "abort":
                 raise RuntimeError(
                     f"Target {target_object_id!r} not visible in frame {t} "
@@ -665,12 +694,27 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         if not samples:
             return None
 
+        tcp_trajectory = np.stack(tcp_positions).astype(np.float32)
+        affordance_heatmaps = [
+            self._target_point_affordance_heatmap(
+                point_cloud=ctx["point_cloud"],
+                tcp_positions=tcp_trajectory[i:],
+                intrinsic=ctx["intrinsic"],
+                cam_R=ctx["cam_R"],
+                cam_t=ctx["cam_t"],
+            )
+            for i, ctx in enumerate(affordance_contexts)
+        ]
+
         return _EpisodeBuffers(
             samples=samples,
             primary_frames=primary_frames,
             wrist_frames=wrist_frames,
             point_clouds=point_clouds,
             image_targets=image_targets,
+            depth_targets=depth_targets,
+            grounding_masks=grounding_masks,
+            affordance_heatmaps=affordance_heatmaps,
             instruction=window.instruction,
         )
 
@@ -711,12 +755,25 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
     def _emit_episode_sidecars(
         self, image_targets: list[np.ndarray], point_clouds: list,
         output_dir: Path, episode_index: int,
+        depth_targets: list[np.ndarray] | None = None,
+        grounding_masks: list[np.ndarray] | None = None,
+        affordance_heatmaps: list[np.ndarray] | None = None,
     ) -> None:
         if len(image_targets) != len(point_clouds):
             raise RuntimeError(
                 f"image_targets length {len(image_targets)} != "
                 f"point_clouds length {len(point_clouds)}"
             )
+        for name, values in [
+            ("depth_targets", depth_targets),
+            ("grounding_masks", grounding_masks),
+            ("affordance_heatmaps", affordance_heatmaps),
+        ]:
+            if values is not None and len(values) != len(point_clouds):
+                raise RuntimeError(
+                    f"{name} length {len(values)} != point_clouds length "
+                    f"{len(point_clouds)}"
+                )
         img_target_dir = output_dir / "image_targets" / str(episode_index)
         img_target_dir.mkdir(parents=True, exist_ok=True)
         for base_index, image_target in enumerate(image_targets):
@@ -735,6 +792,132 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     f"point cloud shape {arr.shape} != ({NUM_POINTS}, 3)"
                 )
             np.save(pc_episode_dir / f"{base_index}.npy", arr)
+            if (
+                depth_targets is not None
+                or grounding_masks is not None
+                or affordance_heatmaps is not None
+            ):
+                self._emit_aux_denoising_sidecars(
+                    output_dir=output_dir,
+                    trajectory_id=episode_index,
+                    base_index=base_index,
+                    depth_static=(
+                        depth_targets[base_index]
+                        if depth_targets is not None
+                        else None
+                    ),
+                    grounding_mask=(
+                        grounding_masks[base_index]
+                        if grounding_masks is not None
+                        else None
+                    ),
+                    affordance_heatmap=(
+                        affordance_heatmaps[base_index]
+                        if affordance_heatmaps is not None
+                        else None
+                    ),
+                    grounding_level="object",
+                )
+
+    @staticmethod
+    def _emit_aux_denoising_sidecars(
+        output_dir: Path,
+        trajectory_id: int | str,
+        base_index: int,
+        depth_static: np.ndarray | None = None,
+        grounding_mask: np.ndarray | None = None,
+        affordance_heatmap: np.ndarray | None = None,
+        grounding_level: str = "object",
+    ) -> None:
+        output_dir = Path(output_dir)
+        trajectory = str(trajectory_id)
+        base = f"{int(base_index)}.npy"
+
+        if depth_static is not None:
+            depth_dir = output_dir / "depths" / "static" / trajectory
+            depth_dir.mkdir(parents=True, exist_ok=True)
+            np.save(depth_dir / base, np.asarray(depth_static, dtype=np.float32))
+
+        if grounding_mask is not None:
+            grounding_dir = output_dir / "grounding_masks" / "static" / trajectory
+            grounding_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                grounding_dir / base,
+                np.asarray(grounding_mask, dtype=np.float32),
+            )
+            with open(grounding_dir / f"{int(base_index)}.json", "w") as f:
+                json.dump({"grounding_level": str(grounding_level)}, f)
+
+        if affordance_heatmap is not None:
+            affordance_dir = output_dir / "affordance_heatmaps" / "static" / trajectory
+            affordance_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                affordance_dir / base,
+                np.asarray(affordance_heatmap, dtype=np.float32),
+            )
+
+    @staticmethod
+    def _segmentation_to_token_grid_mask(
+        seg_mask: np.ndarray,
+        target_id: int,
+        target_size: int = 20,
+    ) -> np.ndarray:
+        seg = np.asarray(seg_mask)
+        if seg.ndim == 3:
+            seg = seg[..., -1]
+        mask = (seg == target_id).astype(np.float32)
+        img = Image.fromarray((mask * 255.0).astype(np.uint8), mode="L")
+        img = img.resize((target_size, target_size), Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        return arr[None, ...].astype(np.float32)
+
+    @staticmethod
+    def _gaussian_heatmap_from_pixel(
+        pixel_xy: np.ndarray,
+        image_width: int = RENDER_W,
+        image_height: int = RENDER_H,
+        target_size: int = 20,
+        sigma: float = 1.5,
+    ) -> np.ndarray:
+        x, y = float(pixel_xy[0]), float(pixel_xy[1])
+        if not np.isfinite(x) or not np.isfinite(y):
+            return np.zeros((1, target_size, target_size), dtype=np.float32)
+
+        cx = (x + 0.5) * target_size / max(1, image_width) - 0.5
+        cy = (y + 0.5) * target_size / max(1, image_height) - 0.5
+        yy, xx = np.mgrid[0:target_size, 0:target_size].astype(np.float32)
+        heatmap = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2.0 * sigma ** 2))
+        max_value = float(heatmap.max())
+        if max_value > 0.0:
+            heatmap = heatmap / max_value
+        return heatmap[None, ...].astype(np.float32)
+
+    @classmethod
+    def _target_point_affordance_heatmap(
+        cls,
+        point_cloud: np.ndarray,
+        tcp_positions: np.ndarray,
+        intrinsic: dict,
+        cam_R: np.ndarray,
+        cam_t: np.ndarray,
+        target_size: int = 20,
+    ) -> np.ndarray:
+        points = np.asarray(point_cloud, dtype=np.float32).reshape(-1, 3)
+        tcp = np.asarray(tcp_positions, dtype=np.float32).reshape(-1, 3)
+        if points.size == 0 or tcp.size == 0:
+            return np.zeros((1, target_size, target_size), dtype=np.float32)
+
+        distances = np.linalg.norm(points[:, None, :] - tcp[None, :, :], axis=-1)
+        target_point = points[np.argmin(distances.min(axis=1))]
+        from starVLA.utils.vis_draw import world_to_pixel
+
+        pixel = world_to_pixel(
+            target_point[None, :],
+            intrinsic=intrinsic,
+            cam_R=np.asarray(cam_R, dtype=np.float32),
+            cam_t=np.asarray(cam_t, dtype=np.float32),
+        )[0]
+        return cls._gaussian_heatmap_from_pixel(target_size=target_size, pixel_xy=pixel)
 
     def _emit_camera_params(
         self, fx, fy, cx, cy, output_dir: Path,
