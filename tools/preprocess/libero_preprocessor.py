@@ -750,18 +750,10 @@ class _TaskReplayWorker:
         )
         if isinstance(rgb, tuple):
             rgb = rgb[0]
-        return np.asarray(rgb[::-1, ::-1].copy(), dtype=np.uint8)
+        return np.asarray(rgb[::-1].copy(), dtype=np.uint8)
 
     def _render_rgb_aligned(self, camera_name: str) -> np.ndarray:
-        rgb = self.env.sim.render(
-            camera_name=camera_name,
-            width=RENDER_W,
-            height=RENDER_H,
-            depth=False,
-        )
-        if isinstance(rgb, tuple):
-            rgb = rgb[0]
-        return np.asarray(rgb[::-1].copy(), dtype=np.uint8)
+        return self._render_rgb(camera_name)
 
     def _render_depth(self, camera_name: str) -> np.ndarray:
         extent = self.env.sim.model.stat.extent
