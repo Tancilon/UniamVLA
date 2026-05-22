@@ -392,3 +392,179 @@ def test_run_scene_preprocessor_with_retries_returns_failure_after_exhaustion(
     assert result.attempt_count == 2
     assert result.retry_count == 1
     assert result.exception_type == "CalledProcessError"
+
+
+def test_runner_resume_skips_done_scene_and_merges_all_requested_scenes(
+    tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    work_dir = tmp_path / "work"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (work_dir / "split" / "A").mkdir(parents=True)
+    (work_dir / "split" / "B").mkdir(parents=True)
+    (work_dir / "preprocessed" / "A").mkdir(parents=True)
+
+    from tools.preprocess.calvin_multiscene_resume import (
+        SceneDoneMarker,
+        write_scene_done_marker,
+    )
+
+    write_scene_done_marker(
+        work_dir,
+        SceneDoneMarker(
+            scene="A",
+            scene_input_dir=str(work_dir / "split" / "A"),
+            scene_output_dir=str(work_dir / "preprocessed" / "A"),
+            command=["python", "runner.py", "A"],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            output_summary={},
+        ),
+    )
+
+    preprocess_calls = []
+    merge_calls = []
+
+    def fake_split(*, input_dir, output_dir, scenes, scene_config_dir=None):
+        return {scene: output_dir / scene for scene in scenes}
+
+    def fake_run_with_retries(scene, scene_input_dir, scene_output_dir, args):
+        preprocess_calls.append(scene)
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+        return runner.SceneRunResult(
+            scene=scene,
+            scene_input_dir=str(scene_input_dir),
+            scene_output_dir=str(scene_output_dir),
+            command=["python", "runner.py", scene],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            status="done",
+            output_summary={},
+        )
+
+    def fake_merge(scene_dirs, output_dir, *, overwrite, skip_stats, robot_type, action_mode):
+        merge_calls.append((list(scene_dirs), output_dir, overwrite))
+
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
+    monkeypatch.setattr(
+        runner,
+        "_run_scene_preprocessor_with_retries",
+        fake_run_with_retries,
+    )
+    monkeypatch.setattr(runner, "merge_lerobot_scene_outputs", fake_merge, raising=False)
+
+    runner.main(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_dir",
+            str(output_dir),
+            "--work_dir",
+            str(work_dir),
+            "--scenes",
+            "A,B",
+            "--resume",
+            "--skip_stats",
+        ]
+    )
+
+    assert preprocess_calls == ["B"]
+    assert merge_calls == [
+        (
+            [work_dir / "preprocessed" / "A", work_dir / "preprocessed" / "B"],
+            output_dir,
+            True,
+        )
+    ]
+
+
+def test_runner_force_scene_reruns_done_scene(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    work_dir = tmp_path / "work"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    (work_dir / "split" / "A").mkdir(parents=True)
+    stale_scene_output = work_dir / "preprocessed" / "A"
+    stale_scene_output.mkdir(parents=True)
+    (stale_scene_output / "stale.txt").write_text("stale")
+
+    from tools.preprocess.calvin_multiscene_resume import (
+        SceneDoneMarker,
+        write_scene_done_marker,
+    )
+
+    write_scene_done_marker(
+        work_dir,
+        SceneDoneMarker(
+            scene="A",
+            scene_input_dir=str(work_dir / "split" / "A"),
+            scene_output_dir=str(stale_scene_output),
+            command=["python", "runner.py", "A"],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            output_summary={},
+        ),
+    )
+
+    preprocess_calls = []
+
+    def fake_split(*, input_dir, output_dir, scenes, scene_config_dir=None):
+        return {"A": output_dir / "A"}
+
+    def fake_run_with_retries(scene, scene_input_dir, scene_output_dir, args):
+        assert not (scene_output_dir / "stale.txt").exists()
+        preprocess_calls.append(scene)
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+        return runner.SceneRunResult(
+            scene=scene,
+            scene_input_dir=str(scene_input_dir),
+            scene_output_dir=str(scene_output_dir),
+            command=["python", "runner.py", scene],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            status="done",
+            output_summary={},
+        )
+
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
+    monkeypatch.setattr(
+        runner,
+        "_run_scene_preprocessor_with_retries",
+        fake_run_with_retries,
+    )
+    monkeypatch.setattr(
+        runner,
+        "merge_lerobot_scene_outputs",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+
+    runner.main(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_dir",
+            str(output_dir),
+            "--work_dir",
+            str(work_dir),
+            "--scenes",
+            "A",
+            "--resume",
+            "--force-scene",
+            "A",
+            "--skip_stats",
+        ]
+    )
+
+    assert preprocess_calls == ["A"]

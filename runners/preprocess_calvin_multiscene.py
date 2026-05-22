@@ -44,8 +44,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.preprocess.calvin_scene_splitter import split_calvin_by_scene
 from tools.preprocess.calvin_lerobot_merger import merge_lerobot_scene_outputs
 from tools.preprocess.calvin_multiscene_resume import (
+    SceneFailureRecord,
     SceneRunResult,
+    failed_scenes_path,
+    load_scene_done_markers,
+    remove_scene_done_marker,
+    scene_marker_dir,
     summarize_scene_output,
+    write_failed_scenes,
+    write_scene_done_marker,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,15 +274,30 @@ def _guard_output_path(
         )
 
 
+def _parse_scene_list(raw: str) -> list[str]:
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+def _normalise_force_scenes(values: list[str]) -> set[str]:
+    scenes: set[str] = set()
+    for value in values:
+        for scene in _parse_scene_list(value):
+            scenes.add(scene)
+    return scenes
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     args = parse_args(argv)
-    scenes = [s.strip().upper() for s in args.scenes.split(",") if s.strip()]
+    scenes = _parse_scene_list(args.scenes)
+    force_scenes = _normalise_force_scenes(args.force_scene)
     split_root = args.work_dir / "split"
     preprocessed_root = args.work_dir / "preprocessed"
+    marker_root = scene_marker_dir(args.work_dir)
+    failed_report_path = failed_scenes_path(args.work_dir)
 
     _guard_output_path(
         output_dir=args.output_dir,
@@ -285,15 +307,22 @@ def main(argv: list[str] | None = None) -> None:
         clean_work=args.clean_work,
     )
 
-    if args.output_dir.exists() and not args.overwrite:
+    if args.output_dir.exists() and not (args.overwrite or args.resume):
         raise SystemExit(
             f"Output directory already exists: {args.output_dir}. "
             "Pass --overwrite to replace it."
         )
 
-    if split_root.exists():
+    if args.overwrite:
+        for stale_path in (split_root, preprocessed_root, marker_root):
+            if stale_path.exists():
+                logger.info("Cleaning stale work dir: %s", stale_path)
+                shutil.rmtree(stale_path)
+        failed_report_path.unlink(missing_ok=True)
+    elif not args.resume and split_root.exists():
         logger.info("Cleaning stale split work dir: %s", split_root)
         shutil.rmtree(split_root)
+
     split_root.mkdir(parents=True, exist_ok=True)
     preprocessed_root.mkdir(parents=True, exist_ok=True)
 
@@ -306,27 +335,64 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # 2) preprocess each
+    done_markers = load_scene_done_markers(args.work_dir) if args.resume else {}
     scene_output_dirs = []
+    results: list[SceneRunResult] = []
+    failures: list[SceneFailureRecord] = []
+
     for scene in scenes:
         if scene not in scene_inputs:
+            failures.append(
+                SceneFailureRecord(
+                    scene=scene,
+                    command=[],
+                    return_code=None,
+                    exception_type="MissingSceneInput",
+                    message=f"splitter did not return scene {scene}",
+                    elapsed_sec=0.0,
+                    attempt_count=0,
+                    retry_count=0,
+                )
+            )
             continue
+
         scene_output_dir = preprocessed_root / scene
+        scene_output_dirs.append(scene_output_dir)
+        if args.resume and scene in done_markers and scene not in force_scenes:
+            logger.info("Skipping scene %s because done marker exists", scene)
+            continue
+
         if scene_output_dir.exists():
-            logger.info("Cleaning stale per-scene preprocessed dir: %s", scene_output_dir)
+            logger.info("Cleaning per-scene preprocessed dir: %s", scene_output_dir)
             shutil.rmtree(scene_output_dir)
-        _run_preprocessor(
+        remove_scene_done_marker(args.work_dir, scene)
+
+        result = _run_scene_preprocessor_with_retries(
             scene,
             scene_inputs[scene],
             scene_output_dir,
             args,
         )
-        scene_output_dirs.append(scene_output_dir)
+        results.append(result)
+        if result.status == "done":
+            write_scene_done_marker(args.work_dir, result.to_done_marker())
+        else:
+            failures.append(result.to_failure_record())
+            if args.fail_fast:
+                break
+
+    write_failed_scenes(args.work_dir, failures)
+    if failures:
+        raise SystemExit(
+            f"CALVIN multiscene preprocessing incomplete: "
+            f"{len(failures)} scene(s) failed. See {failed_report_path}"
+        )
 
     # 3) merge
     merge_lerobot_scene_outputs(
         scene_output_dirs,
         args.output_dir,
-        overwrite=args.overwrite,
+        overwrite=args.overwrite or args.resume,
         skip_stats=args.skip_stats,
         robot_type=args.robot_type,
         action_mode=args.action_mode,
