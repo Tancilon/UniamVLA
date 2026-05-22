@@ -47,6 +47,35 @@ def test_calvin_aux_sidecar_writer_uses_strict_layout(tmp_path, monkeypatch):
         assert json.load(f)["grounding_level"] == "object"
 
 
+def test_calvin_grounding_level_is_derived_from_target_id(monkeypatch):
+    from tests.test_calvin_lerobot_chunking import _stub_imageio_if_needed
+
+    _stub_imageio_if_needed(monkeypatch)
+
+    from tools.preprocess.calvin_preprocessor_lerobot import (
+        CalvinPreprocessorLeRobot,
+    )
+
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "table__drawer_link"
+    ) == "part"
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "table__slide_link"
+    ) == "part"
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "table__switch_link"
+    ) == "part"
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "table__button_link"
+    ) == "part"
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "block_red"
+    ) == "object"
+    assert CalvinPreprocessorLeRobot._grounding_level_for_target_id(
+        "block_blue"
+    ) == "object"
+
+
 def test_libero_aux_sidecar_writer_uses_strict_layout(tmp_path):
     from tools.preprocess.libero_preprocessor import LiberoPreprocessor
 
