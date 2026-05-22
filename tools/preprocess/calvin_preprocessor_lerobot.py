@@ -37,6 +37,7 @@ from PIL import Image
 from tools.preprocess.base_preprocessor import BasePreprocessor
 from tools.preprocess.calvin_task_map import (
     STACK_TASKS,
+    SCENE_BLOCK_ORDER,
     infer_stack_block,
     resolve_target_object,
 )
@@ -164,6 +165,14 @@ RENDER_W = 256
 RENDER_H = 256
 NUM_POINTS = 1024
 EMBODIMENT = "franka_calvin"
+PLACEMENT_RECEPTACLE_TASKS = frozenset({
+    "place_in_slider",
+    "place_in_drawer",
+    "push_into_drawer",
+})
+PLACEMENT_GOAL_TAIL_FRAMES = 4
+_SCENE_OBS_PREFIX_DIMS = 6
+_SCENE_OBS_PER_BLOCK_DIMS = 6
 
 
 class CalvinWorker:
@@ -512,10 +521,10 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         episode-level writers can emit one parquet + two mp4 + one
         point_cloud dir + one image_target PNG per frame.
         """
+        scene_letter = worker.scene_resolver.resolve_for_window(window)
         # Target object resolution (mirrors CalvinWorker.process_window
         # lines 222-240).
         if window.task_label in STACK_TASKS:
-            scene_letter = worker.scene_resolver.resolve_for_window(window)
             start_so = _load_scene_obs(input_dir, window.ep_start)
             end_so = _load_scene_obs(input_dir, window.ep_end)
             target_object_id = infer_stack_block(
@@ -548,6 +557,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         grounding_levels: list[str] = []
         tcp_positions: list[np.ndarray] = []
         affordance_contexts: list[dict] = []
+        scene_obs_frames: list[np.ndarray] = []
         # Dataset-global row counter; advances 1-per-sample and is written
         # to the `index` column (LeRobot v2 invariant).
         global_index = global_index_start
@@ -557,6 +567,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 rel_actions = np.asarray(npz["rel_actions"], dtype=np.float32)
                 robot_obs = np.asarray(npz["robot_obs"], dtype=np.float32)
                 scene_obs = np.asarray(npz["scene_obs"], dtype=np.float32)
+            scene_obs_frames.append(scene_obs)
 
             worker.env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
             rendered = worker.env.render_cameras(
@@ -712,17 +723,25 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         if not samples:
             return None
 
-        tcp_trajectory = np.stack(tcp_positions).astype(np.float32)
-        affordance_heatmaps = [
-            self._target_point_affordance_heatmap(
-                point_cloud=ctx["point_cloud"],
-                tcp_positions=tcp_trajectory[i:],
-                intrinsic=ctx["intrinsic"],
-                cam_R=ctx["cam_R"],
-                cam_t=ctx["cam_t"],
+        if self._is_placement_receptacle_task(window.task_label):
+            affordance_heatmaps = self._placement_goal_affordance_heatmaps(
+                task_label=window.task_label,
+                scene_letter=scene_letter,
+                scene_obs_frames=scene_obs_frames,
+                affordance_contexts=affordance_contexts,
             )
-            for i, ctx in enumerate(affordance_contexts)
-        ]
+        else:
+            tcp_trajectory = np.stack(tcp_positions).astype(np.float32)
+            affordance_heatmaps = [
+                self._target_point_affordance_heatmap(
+                    point_cloud=ctx["point_cloud"],
+                    tcp_positions=tcp_trajectory[i:],
+                    intrinsic=ctx["intrinsic"],
+                    cam_R=ctx["cam_R"],
+                    cam_t=ctx["cam_t"],
+                )
+                for i, ctx in enumerate(affordance_contexts)
+            ]
 
         return _EpisodeBuffers(
             samples=samples,
@@ -961,6 +980,26 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             heatmap = heatmap / max_value
         return heatmap[None, ...].astype(np.float32)
 
+    @staticmethod
+    def _world_to_pixel(
+        points: np.ndarray,
+        intrinsic: dict,
+        cam_R: np.ndarray,
+        cam_t: np.ndarray,
+    ) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        cam_R = np.asarray(cam_R, dtype=np.float32).reshape(3, 3)
+        cam_t = np.asarray(cam_t, dtype=np.float32).reshape(3)
+        p_cam = (cam_R.T @ (points - cam_t).T).T
+
+        neg_z = -p_cam[:, 2]
+        behind = neg_z <= 0.0
+        fx, fy = float(intrinsic["fx"]), float(intrinsic["fy"])
+        cx, cy = float(intrinsic["cx"]), float(intrinsic["cy"])
+        u = np.where(behind, np.nan, fx * p_cam[:, 0] / neg_z + cx)
+        v = np.where(behind, np.nan, fy * (-p_cam[:, 1]) / neg_z + cy)
+        return np.stack([u, v], axis=-1)
+
     @classmethod
     def _target_point_affordance_heatmap(
         cls,
@@ -978,15 +1017,102 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
 
         distances = np.linalg.norm(points[:, None, :] - tcp[None, :, :], axis=-1)
         target_point = points[np.argmin(distances.min(axis=1))]
-        from starVLA.utils.vis_draw import world_to_pixel
-
-        pixel = world_to_pixel(
+        pixel = cls._world_to_pixel(
             target_point[None, :],
             intrinsic=intrinsic,
             cam_R=np.asarray(cam_R, dtype=np.float32),
             cam_t=np.asarray(cam_t, dtype=np.float32),
         )[0]
         return cls._gaussian_heatmap_from_pixel(target_size=target_size, pixel_xy=pixel)
+
+    @staticmethod
+    def _is_placement_receptacle_task(task_label: str) -> bool:
+        return task_label in PLACEMENT_RECEPTACLE_TASKS
+
+    @staticmethod
+    def _block_positions_from_scene_obs(
+        scene_obs: np.ndarray,
+        scene_letter: str,
+    ) -> dict[str, np.ndarray]:
+        obs = np.asarray(scene_obs, dtype=np.float32).reshape(-1)
+        if obs.shape != (24,):
+            raise ValueError(
+                f"CALVIN scene_obs must have shape (24,), got {obs.shape}"
+            )
+        order = SCENE_BLOCK_ORDER[scene_letter.upper()]
+        positions: dict[str, np.ndarray] = {}
+        for i, block_name in enumerate(order):
+            start = _SCENE_OBS_PREFIX_DIMS + i * _SCENE_OBS_PER_BLOCK_DIMS
+            positions[block_name] = obs[start:start + 3].astype(np.float32)
+        return positions
+
+    @classmethod
+    def _placement_goal_position_from_scene_obs(
+        cls,
+        scene_letter: str,
+        scene_obs_frames: list[np.ndarray],
+        tail_frames: int = PLACEMENT_GOAL_TAIL_FRAMES,
+    ) -> np.ndarray:
+        if not scene_obs_frames:
+            raise ValueError("scene_obs_frames must be non-empty")
+
+        first_positions = cls._block_positions_from_scene_obs(
+            scene_obs_frames[0], scene_letter,
+        )
+        last_positions = cls._block_positions_from_scene_obs(
+            scene_obs_frames[-1], scene_letter,
+        )
+        moved_block = max(
+            first_positions,
+            key=lambda name: float(
+                np.linalg.norm(last_positions[name] - first_positions[name])
+            ),
+        )
+
+        tail = scene_obs_frames[-max(1, min(tail_frames, len(scene_obs_frames))):]
+        tail_positions = [
+            cls._block_positions_from_scene_obs(obs, scene_letter)[moved_block]
+            for obs in tail
+        ]
+        return np.mean(np.stack(tail_positions, axis=0), axis=0).astype(np.float32)
+
+    @classmethod
+    def _placement_goal_affordance_heatmaps(
+        cls,
+        task_label: str,
+        scene_letter: str,
+        scene_obs_frames: list[np.ndarray],
+        affordance_contexts: list[dict],
+        target_size: int = 20,
+    ) -> list[np.ndarray]:
+        if not cls._is_placement_receptacle_task(task_label):
+            raise ValueError(
+                f"{task_label!r} is not a placement/receptacle task"
+            )
+        goal_position = cls._placement_goal_position_from_scene_obs(
+            scene_letter=scene_letter,
+            scene_obs_frames=scene_obs_frames,
+        )
+
+        heatmaps = []
+        for ctx in affordance_contexts:
+            pixel = cls._world_to_pixel(
+                goal_position[None, :],
+                intrinsic=ctx["intrinsic"],
+                cam_R=np.asarray(ctx["cam_R"], dtype=np.float32),
+                cam_t=np.asarray(ctx["cam_t"], dtype=np.float32),
+            )[0]
+            width = int(ctx["intrinsic"].get("width", RENDER_W))
+            height = int(ctx["intrinsic"].get("height", RENDER_H))
+            heatmaps.append(
+                cls._gaussian_heatmap_from_pixel(
+                    pixel_xy=pixel,
+                    image_width=width,
+                    image_height=height,
+                    target_size=target_size,
+                )
+            )
+        return heatmaps
 
     def _emit_camera_params(
         self, fx, fy, cx, cy, output_dir: Path,

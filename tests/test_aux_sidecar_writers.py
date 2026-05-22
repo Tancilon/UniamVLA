@@ -76,6 +76,55 @@ def test_calvin_grounding_level_is_derived_from_target_id(monkeypatch):
     ) == "object"
 
 
+def test_calvin_receptacle_affordance_uses_tail_moved_block_position(monkeypatch):
+    from tests.test_calvin_lerobot_chunking import _stub_imageio_if_needed
+
+    _stub_imageio_if_needed(monkeypatch)
+
+    from tools.preprocess.calvin_preprocessor_lerobot import (
+        CalvinPreprocessorLeRobot,
+    )
+
+    preprocessor = CalvinPreprocessorLeRobot(default_scene="B")
+
+    # Scene B block order is red, blue, pink. The red block is the only one
+    # that moves; the tail average should project to pixel (10, 10).
+    scene_obs_frames = []
+    for i in range(6):
+        obs = np.zeros(24, dtype=np.float32)
+        obs[6:9] = [0.0, 0.0, -1.0] if i >= 2 else [-0.4, 0.0, -1.0]
+        obs[12:15] = [0.3, 0.1, -1.0]
+        obs[18:21] = [-0.2, 0.1, -1.0]
+        scene_obs_frames.append(obs)
+
+    heatmaps = preprocessor._placement_goal_affordance_heatmaps(
+        task_label="place_in_drawer",
+        scene_letter="B",
+        scene_obs_frames=scene_obs_frames,
+        affordance_contexts=[
+            {
+                "intrinsic": {
+                    "fx": 20.0,
+                    "fy": 20.0,
+                    "cx": 10.0,
+                    "cy": 10.0,
+                    "width": 20,
+                    "height": 20,
+                },
+                "cam_R": np.eye(3, dtype=np.float32),
+                "cam_t": np.zeros(3, dtype=np.float32),
+            }
+        ],
+    )
+
+    assert len(heatmaps) == 1
+    assert heatmaps[0].shape == (1, 20, 20)
+    peak_y, peak_x = np.unravel_index(
+        int(np.argmax(heatmaps[0][0])), heatmaps[0][0].shape,
+    )
+    assert (peak_x, peak_y) == (10, 10)
+
+
 def test_libero_aux_sidecar_writer_uses_strict_layout(tmp_path):
     from tools.preprocess.libero_preprocessor import LiberoPreprocessor
 
