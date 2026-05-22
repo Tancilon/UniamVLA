@@ -83,6 +83,34 @@ def _write_scene_dataset(
         for offset in range(length):
             np.save(point_cloud_dir / f"{offset}.npy", np.zeros((1, 3)))
 
+        depth_dir = scene_root / "depths" / "static" / str(local_episode_id)
+        grounding_dir = (
+            scene_root / "grounding_masks" / "static" / str(local_episode_id)
+        )
+        affordance_dir = (
+            scene_root / "affordance_heatmaps" / "static" / str(local_episode_id)
+        )
+        depth_dir.mkdir(parents=True, exist_ok=True)
+        grounding_dir.mkdir(parents=True, exist_ok=True)
+        affordance_dir.mkdir(parents=True, exist_ok=True)
+        for offset in range(length):
+            np.save(
+                depth_dir / f"{offset}.npy",
+                np.full((2, 2), float(local_episode_id + offset), dtype=np.float32),
+            )
+            np.save(
+                grounding_dir / f"{offset}.npy",
+                np.full((1, 20, 20), float(offset), dtype=np.float32),
+            )
+            _write_json(
+                grounding_dir / f"{offset}.json",
+                {"grounding_level": "part" if offset == 0 else "object"},
+            )
+            np.save(
+                affordance_dir / f"{offset}.npy",
+                np.full((1, 20, 20), 0.5, dtype=np.float32),
+            )
+
         frame_cursor += length
 
     for video_key in ("video.primary_image", "video.wrist_image"):
@@ -129,6 +157,29 @@ def _write_scene_dataset(
     )
     _write_json(scene_root / "meta" / "modality.json", {"state": {}, "action": {}})
     _write_json(scene_root / "camera_params.json", camera_params or {"static": 1})
+    metric_counts = {
+        "image_target": {"valid": total_frames, "total": total_frames},
+        "point_cloud": {"valid": total_frames, "total": total_frames},
+        "depth": {"valid": total_frames, "total": total_frames},
+        "grounding": {"valid": total_frames, "total": total_frames},
+        "affordance": {"valid": total_frames, "total": total_frames},
+    }
+    coverage_tasks = {
+        name: {
+            key: {"valid": 0, "total": 0}
+            for key in metric_counts
+        }
+        for name in task_names
+    }
+    for row in episode_rows:
+        task_name = row["tasks"][0]
+        for key in metric_counts:
+            coverage_tasks[task_name][key]["valid"] += int(row["length"])
+            coverage_tasks[task_name][key]["total"] += int(row["length"])
+    _write_json(
+        scene_root / "meta" / "uamvla_aux_coverage.json",
+        {"tasks": coverage_tasks, "totals": metric_counts},
+    )
     return scene_root
 
 
@@ -266,7 +317,85 @@ def test_merge_renumbers_parquet_rows_meta_and_videos(tmp_path: Path) -> None:
         ["0.npy", "1.npy"],
     ]
 
+    depth_dirs = sorted((out_dir / "depths" / "static").iterdir())
+    assert [path.name for path in depth_dirs] == ["0", "1", "2", "3"]
+    grounding_dirs = sorted((out_dir / "grounding_masks" / "static").iterdir())
+    assert [path.name for path in grounding_dirs] == ["0", "1", "2", "3"]
+    affordance_dirs = sorted(
+        (out_dir / "affordance_heatmaps" / "static").iterdir()
+    )
+    assert [path.name for path in affordance_dirs] == ["0", "1", "2", "3"]
+
+    assert (out_dir / "depths" / "static" / "0" / "0.npy").exists()
+    assert (out_dir / "grounding_masks" / "static" / "0" / "0.npy").exists()
+    assert (out_dir / "grounding_masks" / "static" / "0" / "0.json").exists()
+    assert (
+        out_dir / "affordance_heatmaps" / "static" / "0" / "0.npy"
+    ).exists()
+    with open(out_dir / "grounding_masks" / "static" / "0" / "0.json") as f:
+        assert json.load(f)["grounding_level"] == "part"
+
     assert json.loads((out_dir / "camera_params.json").read_text()) == {"static": 1}
+
+
+def test_merge_combines_uamvla_aux_coverage(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=10,
+        task_names=["open drawer"],
+        episode_lengths=[2],
+    )
+    scene_b = _write_scene_dataset(
+        tmp_path,
+        "B",
+        episode_start=50,
+        task_names=["open drawer", "push block"],
+        episode_lengths=[3, 1],
+    )
+    out_dir = tmp_path / "merged"
+
+    merge_lerobot_scene_outputs(
+        [scene_a, scene_b],
+        out_dir,
+        overwrite=False,
+        skip_stats=True,
+    )
+
+    coverage = json.loads(
+        (out_dir / "meta" / "uamvla_aux_coverage.json").read_text()
+    )
+    assert coverage["totals"]["depth"] == {"valid": 6, "total": 6}
+    assert coverage["totals"]["grounding"] == {"valid": 6, "total": 6}
+    assert coverage["tasks"]["open drawer"]["affordance"] == {
+        "valid": 5,
+        "total": 5,
+    }
+    assert coverage["tasks"]["push block"]["point_cloud"] == {
+        "valid": 1,
+        "total": 1,
+    }
+
+
+def test_merge_rejects_missing_aux_sidecar(tmp_path: Path) -> None:
+    scene_a = _write_scene_dataset(
+        tmp_path,
+        "A",
+        episode_start=10,
+        task_names=["open drawer"],
+        episode_lengths=[2],
+    )
+    missing = scene_a / "depths" / "static" / "10" / "1.npy"
+    missing.unlink()
+    out_dir = tmp_path / "merged"
+
+    with pytest.raises(CalvinLeRobotMergeError, match="Missing aux sidecar"):
+        merge_lerobot_scene_outputs(
+            [scene_a],
+            out_dir,
+            overwrite=False,
+            skip_stats=True,
+        )
 
 
 def test_merged_dataset_uses_lerobot_parquet_layout(tmp_path: Path) -> None:
