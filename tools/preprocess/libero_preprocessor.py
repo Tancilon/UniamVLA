@@ -537,6 +537,9 @@ class _TaskReplayWorker:
         self._intrinsics = self._extract_camera_intrinsics()
         self._candidate_bodies = self._resolve_candidate_bodies()
         self._fallback_body = self._resolve_fallback_body()
+        self._body_id_cache: dict[str, int] = {}
+        self._geom_ids_cache: dict[str, list[int]] = {}
+        self._instance_id_cache: dict[str, int | None] = {}
 
     def run(self) -> dict[str, Any]:
         results = {
@@ -774,7 +777,7 @@ class _TaskReplayWorker:
         self.env.sim.forward()
 
         rgb_static = self._render_rgb(STATIC_CAM)
-        rgb_static_aligned = self._render_rgb_aligned(STATIC_CAM)
+        rgb_static_aligned = rgb_static
         rgb_wrist = self._render_rgb(WRIST_CAM)
         depth_static = self._render_depth(STATIC_CAM)
         seg_instance = self._render_segmentation_instance(STATIC_CAM)
@@ -832,7 +835,7 @@ class _TaskReplayWorker:
         static_cam_pos: np.ndarray,
         future_tcp_positions: np.ndarray,
     ) -> dict[str, Any]:
-        body_id = self.env.sim.model.body_name2id(body_name)
+        body_id = self._body_id(body_name)
         body_pos = self.env.sim.data.body_xpos[body_id].copy()
         body_mat = self.env.sim.data.body_xmat[body_id].reshape(3, 3).copy()
         geom_ids = self._geom_ids_for_body(body_name)
@@ -921,6 +924,15 @@ class _TaskReplayWorker:
             return None
         return np.isin(seg_geom, geom_ids).astype(np.uint8)
 
+    def _body_id(self, body_name: str) -> int:
+        if not hasattr(self, "_body_id_cache"):
+            self._body_id_cache = {}
+        if body_name not in self._body_id_cache:
+            self._body_id_cache[body_name] = int(
+                self.env.sim.model.body_name2id(body_name)
+            )
+        return self._body_id_cache[body_name]
+
     def _resolve_candidate_bodies(self) -> list[str]:
         bodies: list[str] = []
         for target in self.policy.candidate_targets:
@@ -950,16 +962,29 @@ class _TaskReplayWorker:
         return main_matches or matches
 
     def _geom_ids_for_body(self, body_name: str) -> list[int]:
-        body_id = self.env.sim.model.body_name2id(body_name)
+        if not hasattr(self, "_geom_ids_cache"):
+            self._geom_ids_cache = {}
+        if body_name in self._geom_ids_cache:
+            return self._geom_ids_cache[body_name]
+        body_id = self._body_id(body_name)
         geom_bodyids = self.env.sim.model.geom_bodyid
-        return [i for i in range(len(geom_bodyids)) if int(geom_bodyids[i]) == body_id]
+        ids = [i for i in range(len(geom_bodyids)) if int(geom_bodyids[i]) == body_id]
+        self._geom_ids_cache[body_name] = ids
+        return ids
 
     def _instance_id_for_body(self, body_name: str) -> int | None:
+        if not hasattr(self, "_instance_id_cache"):
+            self._instance_id_cache = {}
+        if body_name in self._instance_id_cache:
+            return self._instance_id_cache[body_name]
         instance_name = self._instance_name_for_body(body_name)
         if instance_name is None:
+            self._instance_id_cache[body_name] = None
             return None
         instance_names = list(self.env.env.model.instances_to_ids.keys())
-        return instance_names.index(instance_name) + 1
+        value = instance_names.index(instance_name) + 1
+        self._instance_id_cache[body_name] = value
+        return value
 
     def _instance_name_for_body(self, body_name: str) -> str | None:
         instance_names = list(self.env.env.model.instances_to_ids.keys())

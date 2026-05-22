@@ -194,6 +194,56 @@ def test_run_task_job_with_retries_reports_failure(monkeypatch):
     assert "bad target" in result["message"]
 
 
+def test_extract_frame_payload_reuses_static_rgb_render():
+    worker = object.__new__(_TaskReplayWorker)
+    worker._candidate_bodies = []
+    worker._fallback_body = "target"
+    worker._intrinsics = {"agentview": {"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0}}
+
+    class SimData:
+        cam_xpos = [np.zeros(3)]
+        cam_xmat = [np.eye(3).reshape(-1)]
+
+    class SimModel:
+        def camera_name2id(self, _name):
+            return 0
+
+    class Sim:
+        model = SimModel()
+        data = SimData()
+
+        def set_state_from_flattened(self, _state):
+            return None
+
+        def forward(self):
+            return None
+
+    worker.env = SimpleNamespace(sim=Sim())
+    calls = []
+
+    def fake_render_rgb(camera_name):
+        calls.append(camera_name)
+        return np.zeros((4, 4, 3), dtype=np.uint8)
+
+    worker._render_rgb = fake_render_rgb
+    worker._render_depth = lambda _camera: np.ones((4, 4), dtype=np.float32)
+    worker._render_segmentation_instance = lambda _camera: np.zeros(
+        (4, 4), dtype=np.int32
+    )
+    worker._render_segmentation_geom = lambda _camera: np.zeros(
+        (4, 4), dtype=np.int32
+    )
+
+    payload = worker._extract_frame_payload(
+        state=np.zeros(4, dtype=np.float32),
+        future_tcp_positions=np.zeros((1, 3), dtype=np.float32),
+    )
+
+    assert calls.count("agentview") == 1
+    assert calls.count("robot0_eye_in_hand") == 1
+    assert payload["rgb_static"] is payload["rgb_static_aligned"]
+
+
 def test_replay_worker_maps_main_body_to_instance_id():
     worker = object.__new__(_TaskReplayWorker)
 
