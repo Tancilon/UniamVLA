@@ -240,6 +240,7 @@ class _EpisodeBuffers:
     image_targets: list[np.ndarray]    # one uint8 (h, w, 3) target crop per frame
     depth_targets: list[np.ndarray]    # raw static metric depth per frame
     grounding_masks: list[np.ndarray]  # [1, 20, 20] object/part mask per frame
+    grounding_levels: list[str]        # "part" or "object" per frame
     affordance_heatmaps: list[np.ndarray]  # [1, 20, 20] future TCP affordance
     instruction: str
 
@@ -346,6 +347,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             # advanced ONLY when an episode is actually emitted (so dropped
             # episodes do not leave gaps).
             global_index = 0
+            aux_coverage = self._empty_aux_coverage()
 
             for window in windows:
                 logger.info(
@@ -418,7 +420,19 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     episode_index,
                     depth_targets=buffers.depth_targets,
                     grounding_masks=buffers.grounding_masks,
+                    grounding_levels=buffers.grounding_levels,
                     affordance_heatmaps=buffers.affordance_heatmaps,
+                )
+                self._merge_aux_coverage(
+                    aux_coverage,
+                    task_name=instr,
+                    lengths={
+                        "image_target": len(buffers.image_targets),
+                        "point_cloud": len(buffers.point_clouds),
+                        "depth": len(buffers.depth_targets),
+                        "grounding": len(buffers.grounding_masks),
+                        "affordance": len(buffers.affordance_heatmaps),
+                    },
                 )
                 # Commit the global counter and episode slot.
                 global_index += len(buffers.samples)
@@ -448,6 +462,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             episode_lengths=episode_lengths,
             fps=FPS,
         )
+        self._emit_aux_coverage(output_dir, aux_coverage)
         logger.info(
             "Done. %d episodes, %d frames → %s",
             kept_episodes, n_total_frames, output_dir,
@@ -517,6 +532,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     )
                     return None
                 raise
+        grounding_level = self._grounding_level_for_target_id(target_object_id)
         target_seg_id = worker.env.get_target_seg_id(target_object_id)
 
         frames = list(range(window.ep_start, window.ep_end + 1))
@@ -529,6 +545,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         image_targets: list[np.ndarray] = []
         depth_targets: list[np.ndarray] = []
         grounding_masks: list[np.ndarray] = []
+        grounding_levels: list[str] = []
         tcp_positions: list[np.ndarray] = []
         affordance_contexts: list[dict] = []
         # Dataset-global row counter; advances 1-per-sample and is written
@@ -554,6 +571,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                     rendered["seg_static"], target_seg_id,
                 )
             )
+            grounding_levels.append(grounding_level)
 
             # Always keep the rendered images (parquet has VideoBackend
             # entries that reference these mp4 frames by index).
@@ -714,6 +732,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
             image_targets=image_targets,
             depth_targets=depth_targets,
             grounding_masks=grounding_masks,
+            grounding_levels=grounding_levels,
             affordance_heatmaps=affordance_heatmaps,
             instruction=window.instruction,
         )
@@ -757,6 +776,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         output_dir: Path, episode_index: int,
         depth_targets: list[np.ndarray] | None = None,
         grounding_masks: list[np.ndarray] | None = None,
+        grounding_levels: list[str] | None = None,
         affordance_heatmaps: list[np.ndarray] | None = None,
     ) -> None:
         if len(image_targets) != len(point_clouds):
@@ -767,6 +787,7 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
         for name, values in [
             ("depth_targets", depth_targets),
             ("grounding_masks", grounding_masks),
+            ("grounding_levels", grounding_levels),
             ("affordance_heatmaps", affordance_heatmaps),
         ]:
             if values is not None and len(values) != len(point_clouds):
@@ -816,7 +837,11 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                         if affordance_heatmaps is not None
                         else None
                     ),
-                    grounding_level="object",
+                    grounding_level=(
+                        grounding_levels[base_index]
+                        if grounding_levels is not None
+                        else "object"
+                    ),
                 )
 
     @staticmethod
@@ -855,6 +880,50 @@ class CalvinPreprocessorLeRobot(BasePreprocessor):
                 affordance_dir / base,
                 np.asarray(affordance_heatmap, dtype=np.float32),
             )
+
+    @staticmethod
+    def _grounding_level_for_target_id(target_id: str) -> str:
+        return "part" if str(target_id).startswith("table__") else "object"
+
+    @staticmethod
+    def _empty_aux_coverage() -> dict[str, dict]:
+        metrics = ("image_target", "point_cloud", "depth", "grounding", "affordance")
+        return {
+            "tasks": {},
+            "totals": {
+                name: {"valid": 0, "total": 0}
+                for name in metrics
+            },
+        }
+
+    @classmethod
+    def _merge_aux_coverage(
+        cls,
+        coverage: dict[str, dict],
+        task_name: str,
+        lengths: dict[str, int],
+    ) -> None:
+        metrics = ("image_target", "point_cloud", "depth", "grounding", "affordance")
+        task_bucket = coverage["tasks"].setdefault(
+            task_name,
+            {
+                name: {"valid": 0, "total": 0}
+                for name in metrics
+            },
+        )
+        for name in metrics:
+            count = int(lengths.get(name, 0))
+            task_bucket[name]["valid"] += count
+            task_bucket[name]["total"] += count
+            coverage["totals"][name]["valid"] += count
+            coverage["totals"][name]["total"] += count
+
+    @staticmethod
+    def _emit_aux_coverage(output_dir: Path, coverage: dict[str, dict]) -> None:
+        meta_dir = Path(output_dir) / "meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        with open(meta_dir / "uamvla_aux_coverage.json", "w") as f:
+            json.dump(coverage, f, indent=2, sort_keys=True)
 
     @staticmethod
     def _segmentation_to_token_grid_mask(
