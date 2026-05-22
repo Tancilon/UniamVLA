@@ -13,6 +13,7 @@ but `--input_dir` actually invoking the worker will fail at make_calvin_env_adap
 """
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -107,5 +108,16 @@ def main():
     preprocessor.process(args.input_dir, args.output_dir)
 
 
+def _exit_without_native_teardown_if_requested() -> None:
+    """Bypass PyBullet/EGL native atexit teardown after successful CLI runs."""
+    if os.environ.get("UAMVLA_CALVIN_NATIVE_SAFE_EXIT") != "1":
+        return
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 if __name__ == "__main__":
     main()
+    _exit_without_native_teardown_if_requested()

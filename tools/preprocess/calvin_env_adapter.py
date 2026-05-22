@@ -22,6 +22,7 @@ module stays importable on macOS (the development platform).
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 
@@ -213,14 +214,34 @@ class CalvinEnvAdapter:
         if self._closed:
             return
         self._closed = True
+        if getattr(self._env, "use_egl", False):
+            # CALVIN's EGL close path can abort in PyBullet's native
+            # teardown after all outputs have already been written. Each
+            # preprocessor worker owns exactly one env, so letting the OS
+            # reclaim the process-local EGL client is safer than an
+            # explicit disconnect here.
+            os.environ["UAMVLA_CALVIN_NATIVE_SAFE_EXIT"] = "1"
+            self._mark_env_disconnected()
+            return
         try:
             self._env.close()
         except RuntimeError as e:
             logger.debug("Ignoring RuntimeError on env.close(): %s", e)
+        finally:
+            self._mark_env_disconnected()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _mark_env_disconnected(self) -> None:
+        # Upstream PlayTableSimEnv.close() disconnects the PyBullet
+        # client but leaves ownership fields unchanged, so __del__ can
+        # try to disconnect the same client again.
+        if hasattr(self._env, "cid"):
+            self._env.cid = -1
+        if hasattr(self._env, "ownsPhysicsClient"):
+            self._env.ownsPhysicsClient = False
 
     def _resolve(self, object_id: str) -> tuple[int, int]:
         try:
