@@ -730,3 +730,43 @@ def test_runner_records_failed_scene_and_skips_merge(tmp_path, monkeypatch):
         )
 
     assert merge_calls == []
+
+
+def test_runner_skips_merge_when_requested_scene_is_missing_from_split(
+    tmp_path, monkeypatch
+):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    work_dir = tmp_path / "work"
+    input_dir.mkdir()
+    work_dir.mkdir()
+    merge_calls = []
+
+    def fake_split(*, input_dir, output_dir, scenes, scene_config_dir=None):
+        return {"A": output_dir / "A"}
+
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
+    monkeypatch.setattr(
+        runner,
+        "merge_lerobot_scene_outputs",
+        lambda *args, **kwargs: merge_calls.append(args),
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit, match="incomplete"):
+        runner.main(
+            [
+                "--input_dir",
+                str(input_dir),
+                "--output_dir",
+                str(output_dir),
+                "--work_dir",
+                str(work_dir),
+                "--scenes",
+                "A,B",
+                "--overwrite",
+                "--skip_stats",
+            ]
+        )
+
+    assert merge_calls == []

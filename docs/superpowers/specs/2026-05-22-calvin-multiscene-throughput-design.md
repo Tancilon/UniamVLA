@@ -1,7 +1,8 @@
 # CALVIN Multiscene Preprocessing Throughput Optimization
 
 Date: 2026-05-22
-Status: approved design, awaiting implementation plan
+Status: implemented locally
+Implementation: `runners/preprocess_calvin_multiscene.py` and `tools/preprocess/calvin_multiscene_resume.py`
 Related design: `docs/superpowers/specs/2026-05-22-calvin-aux-sidecars-abcd-design.md`
 
 ## 1. Purpose
