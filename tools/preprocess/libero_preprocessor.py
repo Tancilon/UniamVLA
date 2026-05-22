@@ -30,6 +30,7 @@ from tools.preprocess.libero_preprocess_utils import (
     mask_to_token_grid,
     pack_robot_obs,
     pointcloud_to_tcp_distance,
+    select_active_target_score_tcp,
     select_segment_aware_future_tcp,
     select_render_gpus,
     smooth_active_targets,
@@ -70,6 +71,7 @@ class TaskJob:
     demo_row_starts: dict[int, int]
     gpu_id: str
     min_segment_len: int
+    active_target_score_window: int
     debug_rgb_check_frames: int
     max_demos_per_task: int | None = None
     max_frames_per_demo: int | None = None
@@ -82,6 +84,7 @@ class LiberoPreprocessor(BasePreprocessor):
         num_workers: int | None = None,
         render_gpus: str | None = None,
         min_segment_len: int = 3,
+        active_target_score_window: int = 8,
         debug_rgb_check_frames: int = 3,
         max_tasks: int | None = None,
         max_demos_per_task: int | None = None,
@@ -91,6 +94,7 @@ class LiberoPreprocessor(BasePreprocessor):
         self.num_workers = num_workers
         self.render_gpus = render_gpus
         self.min_segment_len = int(min_segment_len)
+        self.active_target_score_window = int(active_target_score_window)
         self.debug_rgb_check_frames = int(debug_rgb_check_frames)
         self.max_tasks = max_tasks
         self.max_demos_per_task = max_demos_per_task
@@ -200,6 +204,7 @@ class LiberoPreprocessor(BasePreprocessor):
                     demo_row_starts=demo_row_starts,
                     gpu_id=render_gpus[task_idx % len(render_gpus)],
                     min_segment_len=self.min_segment_len,
+                    active_target_score_window=self.active_target_score_window,
                     debug_rgb_check_frames=self.debug_rgb_check_frames,
                     max_demos_per_task=self.max_demos_per_task,
                     max_frames_per_demo=self.max_frames_per_demo,
@@ -417,9 +422,14 @@ class _TaskReplayWorker:
         frame_payloads = []
         active_raw: list[str | None] = []
         for t in range(length):
+            score_tcp = select_active_target_score_tcp(
+                ee_pos[:length],
+                frame_idx=t,
+                window_size=self.job.active_target_score_window,
+            )
             payload = self._extract_frame_payload(
                 states[t],
-                future_tcp_positions=ee_pos[t:length],
+                future_tcp_positions=score_tcp,
             )
             frame_payloads.append(payload)
             active_raw.append(payload["active_body"])
@@ -672,7 +682,7 @@ class _TaskReplayWorker:
         object_mask: np.ndarray,
     ) -> tuple[np.ndarray | None, str | None]:
         part = self.policy.part_grounding
-        if part.enabled:
+        if part.enabled and self._part_grounding_matches_active_body(part, active_body):
             part_mask = self._part_mask(payload["seg_geom"], active_body)
             if part_mask is not None and np.any(part_mask):
                 return mask_to_token_grid(part_mask, target_size=20), part.grounding_level
@@ -680,8 +690,16 @@ class _TaskReplayWorker:
             return mask_to_token_grid(object_mask, target_size=20), "object"
         return None, None
 
+    @staticmethod
+    def _part_grounding_matches_active_body(part, active_body: str) -> bool:
+        return not part.body_patterns or any(
+            pattern in active_body for pattern in part.body_patterns
+        )
+
     def _part_mask(self, seg_geom: np.ndarray, active_body: str) -> np.ndarray | None:
         part = self.policy.part_grounding
+        if not self._part_grounding_matches_active_body(part, active_body):
+            return None
         body_patterns = part.body_patterns or (active_body,)
         geom_ids = []
         for geom_id, geom_name in enumerate(self.env.sim.model.geom_names):

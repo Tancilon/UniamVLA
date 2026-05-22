@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from pathlib import Path
+
+import numpy as np
 
 from runners.preprocess_libero import build_suite_jobs, default_output_name, parse_args
 from tools.preprocess.libero_preprocessor import _TaskReplayWorker
+from tools.preprocess.libero_target_mapping import PartGroundingSpec
 
 
 def test_default_output_name():
@@ -44,6 +48,8 @@ def test_parse_args_accepts_parallel_options():
             "2",
             "--max-frames-per-demo",
             "3",
+            "--active-target-score-window",
+            "6",
             "--overwrite",
         ]
     )
@@ -55,6 +61,7 @@ def test_parse_args_accepts_parallel_options():
     assert args.max_tasks == 1
     assert args.max_demos_per_task == 2
     assert args.max_frames_per_demo == 3
+    assert args.active_target_score_window == 6
     assert args.overwrite is True
 
 
@@ -77,3 +84,53 @@ def test_replay_worker_maps_main_body_to_instance_id():
     worker.env = Env()
     assert worker._instance_name_for_body("akita_black_bowl_1_main") == "akita_black_bowl_1"
     assert worker._instance_id_for_body("akita_black_bowl_1_main") == 2
+
+
+def test_grounding_falls_back_to_object_mask_when_active_body_is_not_part_body():
+    worker = object.__new__(_TaskReplayWorker)
+    worker.policy = SimpleNamespace(
+        part_grounding=PartGroundingSpec(
+            enabled=True,
+            body_patterns=("wooden_cabinet",),
+            geom_patterns=("drawer",),
+            grounding_level="part",
+        )
+    )
+    worker._part_mask = lambda seg_geom, active_body: np.ones((8, 8), dtype=np.uint8)
+    object_mask = np.zeros((8, 8), dtype=np.uint8)
+    object_mask[2:4, 2:4] = 1
+
+    mask, level = worker._grounding_mask_for_frame(
+        {"seg_geom": np.zeros((8, 8), dtype=np.int32)},
+        active_body="akita_black_bowl_1_main",
+        object_mask=object_mask,
+    )
+
+    assert level == "object"
+    assert mask.shape == (1, 20, 20)
+    assert float(mask.mean()) < 1.0
+
+
+def test_grounding_uses_part_mask_when_active_body_matches_part_body():
+    worker = object.__new__(_TaskReplayWorker)
+    worker.policy = SimpleNamespace(
+        part_grounding=PartGroundingSpec(
+            enabled=True,
+            body_patterns=("wooden_cabinet",),
+            geom_patterns=("drawer",),
+            grounding_level="part",
+        )
+    )
+    worker._part_mask = lambda seg_geom, active_body: np.ones((8, 8), dtype=np.uint8)
+    object_mask = np.zeros((8, 8), dtype=np.uint8)
+    object_mask[2:4, 2:4] = 1
+
+    mask, level = worker._grounding_mask_for_frame(
+        {"seg_geom": np.zeros((8, 8), dtype=np.int32)},
+        active_body="wooden_cabinet_1_main",
+        object_mask=object_mask,
+    )
+
+    assert level == "part"
+    assert mask.shape == (1, 20, 20)
+    assert np.isclose(float(mask.mean()), 1.0)

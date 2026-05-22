@@ -85,6 +85,18 @@ def pointcloud_to_tcp_distance(
     return float(distances.min())
 
 
+def select_active_target_score_tcp(
+    tcp_positions: np.ndarray,
+    frame_idx: int,
+    window_size: int = 8,
+) -> np.ndarray:
+    tcp = np.asarray(tcp_positions, dtype=np.float32).reshape(-1, 3)
+    if frame_idx < 0 or frame_idx >= len(tcp):
+        raise IndexError(f"frame_idx {frame_idx} outside episode length {len(tcp)}")
+    horizon = max(1, int(window_size))
+    return tcp[frame_idx : min(len(tcp), frame_idx + horizon)]
+
+
 def select_segment_aware_future_tcp(
     tcp_positions: np.ndarray,
     active_targets: Sequence[str | None],

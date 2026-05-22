@@ -9,6 +9,7 @@ from tools.preprocess.libero_preprocess_utils import (
     mask_to_token_grid,
     pack_robot_obs,
     pointcloud_to_tcp_distance,
+    select_active_target_score_tcp,
     select_render_gpus,
     select_segment_aware_future_tcp,
     smooth_active_targets,
@@ -63,6 +64,33 @@ def test_pointcloud_to_tcp_distance():
     assert np.isinf(
         pointcloud_to_tcp_distance(np.zeros((0, 3), dtype=np.float32), tcp)
     )
+
+
+def test_select_active_target_score_tcp_uses_local_future_window():
+    tcp = np.arange(30, dtype=np.float32).reshape(10, 3)
+
+    out = select_active_target_score_tcp(tcp, frame_idx=2, window_size=3)
+
+    assert np.array_equal(out, tcp[2:5])
+
+
+def test_select_active_target_score_tcp_prevents_late_contact_from_winning_early():
+    tcp = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.1, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    local_tcp = select_active_target_score_tcp(tcp, frame_idx=0, window_size=2)
+    current_object = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    later_object = np.array([[10.0, 0.0, 0.0]], dtype=np.float32)
+
+    assert pointcloud_to_tcp_distance(
+        current_object,
+        local_tcp,
+    ) < pointcloud_to_tcp_distance(later_object, local_tcp)
 
 
 def test_select_segment_aware_future_tcp_uses_full_active_segment():

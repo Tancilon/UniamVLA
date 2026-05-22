@@ -85,6 +85,12 @@ def parse_args(argv: list[str] | None = None):
         help="Minimum active-target segment length for smoothing.",
     )
     parser.add_argument(
+        "--active-target-score-window",
+        type=int,
+        default=8,
+        help="Local future TCP window used only for active-target scoring.",
+    )
+    parser.add_argument(
         "--debug-rgb-check-frames",
         type=int,
         default=3,
@@ -133,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
             num_workers=args.num_workers,
             render_gpus=args.render_gpus,
             min_segment_len=args.min_segment_len,
+            active_target_score_window=args.active_target_score_window,
             debug_rgb_check_frames=args.debug_rgb_check_frames,
             max_tasks=args.max_tasks,
             max_demos_per_task=args.max_demos_per_task,
