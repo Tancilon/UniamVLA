@@ -62,6 +62,12 @@ DRAWER_PART = PartGroundingSpec(
     geom_patterns=("handle", "drawer", "cabinet"),
     grounding_level="part",
 )
+WHITE_CABINET_DRAWER_PART = PartGroundingSpec(
+    enabled=True,
+    body_patterns=("white_cabinet",),
+    geom_patterns=("handle", "drawer", "cabinet"),
+    grounding_level="part",
+)
 STOVE_PART = PartGroundingSpec(
     enabled=True,
     body_patterns=("stove",),
@@ -108,14 +114,14 @@ _POLICIES = [
     _policy("libero_goal", "put_the_wine_bottle_on_top_of_the_cabinet", ("wine_bottle",), "wine_bottle"),
     _policy("libero_goal", "turn_on_the_stove", ("stove",), "stove", STOVE_PART),
     _policy("libero_10", "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it", ("stove", "moka_pot"), "moka_pot", STOVE_PART),
-    _policy("libero_10", "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it", ("black_bowl", "wooden_cabinet"), "black_bowl", DRAWER_PART),
-    _policy("libero_10", "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it", ("yellow_and_white_mug", "microwave"), "yellow_and_white_mug", MICROWAVE_PART),
+    _policy("libero_10", "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it", ("black_bowl", "white_cabinet"), "black_bowl", WHITE_CABINET_DRAWER_PART),
+    _policy("libero_10", "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it", ("white_yellow_mug", "microwave"), "white_yellow_mug", MICROWAVE_PART),
     _policy("libero_10", "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove", ("moka_pot",), "moka_pot"),
     _policy("libero_10", "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket", ("alphabet_soup", "cream_cheese"), "alphabet_soup"),
     _policy("libero_10", "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket", ("alphabet_soup", "tomato_sauce"), "alphabet_soup"),
     _policy("libero_10", "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket", ("cream_cheese", "butter"), "cream_cheese"),
-    _policy("libero_10", "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate", ("white_mug", "yellow_and_white_mug"), "white_mug"),
-    _policy("libero_10", "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate", ("white_mug", "chocolate_pudding"), "white_mug"),
+    _policy("libero_10", "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate", ("porcelain_mug", "white_yellow_mug"), "porcelain_mug"),
+    _policy("libero_10", "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate", ("porcelain_mug", "chocolate_pudding"), "porcelain_mug"),
     _policy("libero_10", "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy", ("book",), "book"),
 ]
 

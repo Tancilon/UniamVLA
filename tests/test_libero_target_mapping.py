@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -83,3 +84,64 @@ def test_policy_table_validates_against_local_hdf5_names_when_available():
         pytest.skip("official LIBERO HDF5 root is not present")
     missing = validate_policy_table(root)
     assert missing == []
+
+
+def _bddl_section(text: str, section_name: str) -> str:
+    match = re.search(rf"\(:{re.escape(section_name)}\b", text)
+    if match is None:
+        return ""
+    depth = 0
+    start = match.start()
+    for index, char in enumerate(text[start:], start):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return text[start:]
+
+
+def _bddl_symbols(section: str) -> list[str]:
+    symbols: list[str] = []
+    for raw_line in section.splitlines()[1:-1]:
+        line = raw_line.split(";", 1)[0].strip()
+        if not line or line.startswith("("):
+            continue
+        symbols.extend(line.split("-", 1)[0].split())
+    return symbols
+
+
+def test_curated_body_patterns_match_official_bddl_symbols_when_available():
+    bddl_root = Path("third_party/LIBERO/libero/libero/bddl_files")
+    if not bddl_root.exists():
+        pytest.skip("official LIBERO BDDL files are not present")
+
+    unresolved: list[str] = []
+    for key, policy in TASK_TARGET_POLICIES.items():
+        suite, task_name = key.split("/", 1)
+        bddl_path = bddl_root / suite / f"{task_name}.bddl"
+        assert bddl_path.exists(), f"missing BDDL for curated policy {key}"
+
+        text = bddl_path.read_text()
+        symbols = (
+            _bddl_symbols(_bddl_section(text, "objects"))
+            + _bddl_symbols(_bddl_section(text, "fixtures"))
+        )
+
+        patterns = [
+            ("candidate", target.body_pattern)
+            for target in policy.candidate_targets
+        ]
+        patterns.append(("fallback", policy.fallback_target_pattern))
+        patterns.extend(
+            ("part_body", pattern)
+            for pattern in policy.part_grounding.body_patterns
+        )
+        for kind, pattern in patterns:
+            if not any(pattern in symbol for symbol in symbols):
+                unresolved.append(
+                    f"{key} {kind}={pattern!r} not in BDDL symbols {symbols}"
+                )
+
+    assert unresolved == []
