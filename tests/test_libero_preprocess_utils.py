@@ -10,6 +10,7 @@ from tools.preprocess.libero_preprocess_utils import (
     pack_robot_obs,
     pointcloud_to_tcp_distance,
     select_render_gpus,
+    select_segment_aware_future_tcp,
     smooth_active_targets,
 )
 
@@ -62,6 +63,36 @@ def test_pointcloud_to_tcp_distance():
     assert np.isinf(
         pointcloud_to_tcp_distance(np.zeros((0, 3), dtype=np.float32), tcp)
     )
+
+
+def test_select_segment_aware_future_tcp_bounds_segment_by_action_horizon():
+    tcp = np.arange(30, dtype=np.float32).reshape(10, 3)
+    active = ["drawer"] * 8 + ["bowl"] * 2
+
+    out = select_segment_aware_future_tcp(
+        tcp,
+        active_targets=active,
+        frame_idx=1,
+        local_window_size=4,
+        action_chunk_horizon=3,
+    )
+
+    assert np.array_equal(out, tcp[1:4])
+
+
+def test_select_segment_aware_future_tcp_fills_short_segment_with_local_window():
+    tcp = np.arange(21, dtype=np.float32).reshape(7, 3)
+    active = ["drawer", "drawer", "bowl", "bowl", "bowl", "bowl", "bowl"]
+
+    out = select_segment_aware_future_tcp(
+        tcp,
+        active_targets=active,
+        frame_idx=0,
+        local_window_size=4,
+        action_chunk_horizon=8,
+    )
+
+    assert np.array_equal(out, tcp[0:4])
 
 
 def test_pack_robot_obs_is_15d_float32():
