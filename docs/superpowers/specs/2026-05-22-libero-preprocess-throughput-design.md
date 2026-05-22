@@ -1,7 +1,7 @@
 # LIBERO Preprocessing Throughput Optimization
 
 Date: 2026-05-22
-Status: approved design, awaiting implementation plan
+Status: implemented locally
 Related design: `docs/superpowers/specs/2026-05-21-uamvla-libero-aux-preprocessing-design.md`
 
 ## 1. Purpose
@@ -389,3 +389,38 @@ The implementation is complete when:
 - all relevant unit tests pass;
 - a smoke preprocessing run produces the same sidecar paths as the current
   writer.
+
+## 16. Implementation Notes
+
+Implemented locally on branch `starVLA_dev`.
+
+Primary verification:
+
+```bash
+/home/user01/miniconda3/envs/uamvla/bin/python -m pytest \
+  tests/test_libero_resume.py \
+  tests/test_libero_target_mapping.py \
+  tests/test_libero_preprocessor_planning.py \
+  tests/test_libero_preprocess_utils.py \
+  tests/test_libero_lerobot_writer.py -q
+```
+
+CLI smoke verification:
+
+```bash
+/home/user01/miniconda3/envs/uamvla/bin/python - <<'PY'
+from runners.preprocess_libero import parse_args
+args = parse_args([
+    "--input-root", "datasets/libero",
+    "--output-root", "datasets/libero2uam",
+    "--suite", "libero_10",
+    "--resume",
+    "--profile",
+    "--max-retries", "1",
+])
+assert args.resume is True
+assert args.profile is True
+assert args.max_retries == 1
+print("preprocess_libero cli smoke ok")
+PY
+```
