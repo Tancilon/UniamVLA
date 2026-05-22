@@ -46,18 +46,13 @@ from tools.preprocess.calvin_lerobot_merger import merge_lerobot_scene_outputs
 logger = logging.getLogger(__name__)
 
 
-def _run_preprocessor(
+def _build_preprocessor_cmd(
     scene: str,
     scene_input_dir: Path,
     scene_output_dir: Path,
     args: argparse.Namespace,
-) -> None:
-    """Invoke runners/preprocess_calvin.py as a subprocess.
-
-    Subprocess (rather than in-process) so each scene gets a fresh
-    PyBullet/EGL state — avoids any cross-scene env handle leaks.
-    """
-    cmd = [
+) -> list[str]:
+    return [
         sys.executable,
         str(Path(__file__).resolve().parent / "preprocess_calvin.py"),
         "--input_dir", str(scene_input_dir),
@@ -68,8 +63,23 @@ def _run_preprocessor(
         "--on_resolve_failure", args.on_resolve_failure,
         "--on_missing_target", args.on_missing_target,
     ]
+
+
+def _run_preprocessor(
+    scene: str,
+    scene_input_dir: Path,
+    scene_output_dir: Path,
+    args: argparse.Namespace,
+) -> list[str]:
+    """Invoke runners/preprocess_calvin.py as a subprocess.
+
+    Subprocess (rather than in-process) so each scene gets a fresh
+    PyBullet/EGL state — avoids any cross-scene env handle leaks.
+    """
+    cmd = _build_preprocessor_cmd(scene, scene_input_dir, scene_output_dir, args)
     logger.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
+    return cmd
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

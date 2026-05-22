@@ -203,7 +203,7 @@ def test_run_preprocessor_passes_scene_specific_dataset_source(tmp_path, monkeyp
         on_missing_target="abort",
     )
 
-    runner._run_preprocessor(
+    returned_cmd = runner._run_preprocessor(
         "A",
         tmp_path / "input_scene",
         tmp_path / "output_scene",
@@ -212,12 +212,36 @@ def test_run_preprocessor_passes_scene_specific_dataset_source(tmp_path, monkeyp
 
     assert len(calls) == 1
     cmd, check = calls[0]
+    assert returned_cmd == cmd
     assert check is True
     assert cmd[cmd.index("--dataset_source") + 1] == "calvin_scene_A"
     assert cmd[cmd.index("--input_dir") + 1] == str(tmp_path / "input_scene")
     assert cmd[cmd.index("--output_dir") + 1] == str(tmp_path / "output_scene")
     assert cmd[cmd.index("--num_workers") + 1] == "3"
     assert cmd[cmd.index("--default_scene") + 1] == "A"
+    assert cmd[cmd.index("--on_resolve_failure") + 1] == "skip"
+    assert cmd[cmd.index("--on_missing_target") + 1] == "abort"
+
+
+def test_build_preprocessor_cmd_contains_scene_specific_arguments(tmp_path):
+    args = argparse.Namespace(
+        num_workers=4,
+        on_resolve_failure="skip",
+        on_missing_target="abort",
+    )
+
+    cmd = runner._build_preprocessor_cmd(
+        "C",
+        tmp_path / "split" / "C",
+        tmp_path / "preprocessed" / "C",
+        args,
+    )
+
+    assert cmd[cmd.index("--dataset_source") + 1] == "calvin_scene_C"
+    assert cmd[cmd.index("--input_dir") + 1] == str(tmp_path / "split" / "C")
+    assert cmd[cmd.index("--output_dir") + 1] == str(tmp_path / "preprocessed" / "C")
+    assert cmd[cmd.index("--num_workers") + 1] == "4"
+    assert cmd[cmd.index("--default_scene") + 1] == "C"
     assert cmd[cmd.index("--on_resolve_failure") + 1] == "skip"
     assert cmd[cmd.index("--on_missing_target") + 1] == "abort"
 
