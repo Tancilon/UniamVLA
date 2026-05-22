@@ -91,14 +91,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Forwarded to the splitter when calvin_env auto-discovery fails.")
     p.add_argument("--num_workers", "--num-workers", type=int, default=1,
                    dest="num_workers")
+    p.add_argument("--scene_workers", "--scene-workers", type=int, default=1,
+                   dest="scene_workers",
+                   help="Number of scene subprocesses to run concurrently.")
+    p.add_argument("--force_scene", "--force-scene", action="append", default=[],
+                   dest="force_scene",
+                   help="Scene letter to rerun even when a resume marker exists. Repeatable.")
+    p.add_argument("--max_retries", "--max-retries", type=int, default=0,
+                   dest="max_retries",
+                   help="Number of retries after the first failed scene subprocess attempt.")
+    p.add_argument("--profile", action="store_true",
+                   help="Log per-scene timing and output summary counts.")
+    p.add_argument("--fail_fast", "--fail-fast", action="store_true",
+                   dest="fail_fast",
+                   help="Stop submitting new scene jobs after the first failed scene.")
     p.add_argument("--on_resolve_failure", "--on-resolve-failure",
                    choices=("skip", "abort"), default="abort",
                    dest="on_resolve_failure")
     p.add_argument("--on_missing_target", "--on-missing-target",
                    choices=("skip", "abort"), default="skip",
                    dest="on_missing_target")
-    p.add_argument("--overwrite", action="store_true",
-                   help="Replace the final output directory if it already exists.")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--overwrite", action="store_true",
+                      help="Replace the final output directory if it already exists.")
+    mode.add_argument("--resume", action="store_true",
+                      help="Reuse split/preprocessed work dirs and skip scenes with done markers.")
     p.add_argument("--skip_stats", "--skip-stats", action="store_true",
                    dest="skip_stats",
                    help="Skip GR00T/LeRobot stats generation after merging.")
@@ -111,7 +128,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--clean_work", "--clean-work", action="store_true",
                    dest="clean_work",
                    help="Remove --work_dir at the end (after a successful merge).")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.scene_workers < 1:
+        p.error("--scene-workers must be >= 1")
+    if args.max_retries < 0:
+        p.error("--max-retries must be >= 0")
+    return args
 
 
 def _path_is_or_contains(parent: Path, candidate: Path) -> bool:

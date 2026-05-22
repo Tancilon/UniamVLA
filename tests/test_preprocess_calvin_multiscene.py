@@ -220,3 +220,52 @@ def test_run_preprocessor_passes_scene_specific_dataset_source(tmp_path, monkeyp
     assert cmd[cmd.index("--default_scene") + 1] == "A"
     assert cmd[cmd.index("--on_resolve_failure") + 1] == "skip"
     assert cmd[cmd.index("--on_missing_target") + 1] == "abort"
+
+
+def test_parse_args_accepts_scene_throughput_flags(tmp_path):
+    args = runner.parse_args(
+        [
+            "--input_dir",
+            str(tmp_path / "input"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--output_dir",
+            str(tmp_path / "output"),
+            "--scenes",
+            "A,B,C,D",
+            "--scene-workers",
+            "3",
+            "--resume",
+            "--force-scene",
+            "B",
+            "--force-scene",
+            "D",
+            "--max-retries",
+            "2",
+            "--profile",
+            "--fail-fast",
+        ]
+    )
+
+    assert args.scene_workers == 3
+    assert args.resume is True
+    assert args.force_scene == ["B", "D"]
+    assert args.max_retries == 2
+    assert args.profile is True
+    assert args.fail_fast is True
+
+
+def test_parse_args_rejects_overwrite_with_resume(tmp_path):
+    with pytest.raises(SystemExit):
+        runner.parse_args(
+            [
+                "--input_dir",
+                str(tmp_path / "input"),
+                "--work_dir",
+                str(tmp_path / "work"),
+                "--output_dir",
+                str(tmp_path / "output"),
+                "--overwrite",
+                "--resume",
+            ]
+        )
