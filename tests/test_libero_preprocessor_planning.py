@@ -172,6 +172,28 @@ def test_resume_filters_done_tasks(tmp_path: Path):
     assert [job.hdf5_path.name for job in remaining] == ["task_b.hdf5"]
 
 
+def test_run_task_job_with_retries_reports_failure(monkeypatch):
+    from tools.preprocess.libero_preprocessor import _run_task_job_with_retries
+
+    job = SimpleNamespace(
+        hdf5_path=Path("bad_task_demo.hdf5"),
+        gpu_id="0",
+    )
+
+    def boom(_job):
+        raise RuntimeError("bad target")
+
+    monkeypatch.setattr("tools.preprocess.libero_preprocessor._run_task_job", boom)
+
+    result = _run_task_job_with_retries(job, max_retries=1)
+
+    assert result["ok"] is False
+    assert result["retry_count"] == 1
+    assert result["task_filename"] == "bad_task_demo.hdf5"
+    assert result["exception_type"] == "RuntimeError"
+    assert "bad target" in result["message"]
+
+
 def test_replay_worker_maps_main_body_to_instance_id():
     worker = object.__new__(_TaskReplayWorker)
 

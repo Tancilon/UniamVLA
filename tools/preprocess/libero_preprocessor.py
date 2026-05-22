@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,16 @@ from tools.preprocess.libero_target_mapping import (
     TaskTargetPolicy,
     get_task_policy,
     validate_policy_table,
+)
+from tools.preprocess.libero_resume import (
+    DoneMarker,
+    PreprocessOptions,
+    TaskFailureRecord,
+    load_done_markers,
+    load_or_create_plan,
+    traceback_text,
+    write_done_marker,
+    write_failed_tasks,
 )
 from starVLA.utils.geometry import (
     crop_target_from_seg,
@@ -129,6 +140,21 @@ class LiberoPreprocessor(BasePreprocessor):
             raise FileNotFoundError(f"No .hdf5 files found in {input_path}")
 
         frame_counts = self._scan_frame_counts(hdf5_files)
+        options = PreprocessOptions(
+            suite=self.suite,
+            min_segment_len=self.min_segment_len,
+            active_target_score_window=self.active_target_score_window,
+            max_tasks=self.max_tasks,
+            max_demos_per_task=self.max_demos_per_task,
+            max_frames_per_demo=self.max_frames_per_demo,
+        )
+        load_or_create_plan(
+            output_path,
+            frame_counts,
+            options,
+            resume=self.resume,
+        )
+        done_markers = load_done_markers(output_path)
         episode_plan = compute_episode_plan(frame_counts)
         render_gpus = select_render_gpus(
             os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -137,19 +163,94 @@ class LiberoPreprocessor(BasePreprocessor):
         worker_count = self.num_workers if self.num_workers is not None else len(render_gpus)
         worker_count = max(1, int(worker_count))
         jobs = self._build_jobs(hdf5_files, output_path, episode_plan, render_gpus)
+        jobs_to_run = self._filter_resume_jobs(output_path, jobs, done_markers)
 
         logger.info(
-            "Processing %d LIBERO task files with %d worker(s) on render GPUs %s",
+            "Processing %d/%d LIBERO task files with %d worker(s) on render GPUs %s",
+            len(jobs_to_run),
             len(jobs),
             worker_count,
             render_gpus,
         )
         if worker_count == 1:
-            results = [_run_task_job(job) for job in jobs]
-        else:
+            results = [
+                _run_task_job_with_retries(job, self.max_retries)
+                for job in jobs_to_run
+            ]
+        elif jobs_to_run:
             ctx = mp.get_context("spawn")
             with ctx.Pool(processes=worker_count) as pool:
-                results = pool.map(_run_task_job, jobs)
+                async_results = [
+                    pool.apply_async(
+                        _run_task_job_with_retries,
+                        (job, self.max_retries),
+                    )
+                    for job in jobs_to_run
+                ]
+                results = [item.get() for item in async_results]
+        else:
+            results = []
+
+        successes = [result for result in results if result.get("ok")]
+        failures = [result for result in results if not result.get("ok")]
+        for result in successes:
+            marker = DoneMarker(
+                task_stem=str(result["task_stem"]),
+                task_filename=str(result["task_filename"]),
+                task_name=str(result["task_name"]),
+                task_index=int(result["task_index"]),
+                demo_indices=[int(v) for v in result["demo_indices"]],
+                episode_indices=sorted(
+                    int(k) for k in result["episode_lengths"].keys()
+                ),
+                episode_lengths={
+                    str(k): int(v) for k, v in result["episode_lengths"].items()
+                },
+                episode_to_task={
+                    str(k): int(v) for k, v in result["episode_to_task"].items()
+                },
+                frame_count=int(result["total_frames"]),
+                coverage=result["coverage"],
+                camera_params=result.get("camera_params"),
+                elapsed_sec=float(result.get("elapsed_sec", 0.0)),
+                frames_per_sec=float(result.get("frames_per_sec", 0.0)),
+                retry_count=int(result.get("retry_count", 0)),
+                options_hash=options.stable_hash(),
+            )
+            write_done_marker(output_path, marker)
+
+        failure_records = [
+            TaskFailureRecord(
+                task_stem=str(result["task_stem"]),
+                task_filename=str(result["task_filename"]),
+                task_name=str(result["task_name"]),
+                exception_type=str(result["exception_type"]),
+                message=str(result["message"]),
+                traceback=str(result["traceback"]),
+                retry_count=int(result["retry_count"]),
+                gpu_id=str(result["gpu_id"]),
+                worker_pid=result.get("worker_pid"),
+            )
+            for result in failures
+        ]
+        write_failed_tasks(output_path, failure_records)
+        if failures and self.fail_fast:
+            first = failures[0]
+            raise RuntimeError(
+                f"LIBERO task failed: {first['task_filename']}: {first['message']}"
+            )
+
+        latest_markers = load_done_markers(output_path)
+        current_filenames = {path.name for path in hdf5_files}
+        success_stems = {str(result["task_stem"]) for result in successes}
+        all_results = list(successes)
+        if self.resume:
+            for marker in latest_markers.values():
+                if marker.task_filename not in current_filenames:
+                    continue
+                if marker.task_stem in success_stems:
+                    continue
+                all_results.append(_result_from_done_marker(marker))
 
         writer = LiberoLerobotWriter(output_path, fps=FPS)
         tasks = [task_name_from_hdf5(p) for p in hdf5_files]
@@ -158,7 +259,7 @@ class LiberoPreprocessor(BasePreprocessor):
         total_frames = 0
         coverage: dict[str, Any] = {"tasks": {}, "totals": {}}
         camera_params = None
-        for result in results:
+        for result in all_results:
             total_frames += int(result["total_frames"])
             episode_lengths.update(
                 {int(k): int(v) for k, v in result["episode_lengths"].items()}
@@ -340,6 +441,75 @@ def _run_task_job(job: TaskJob) -> dict[str, Any]:
         return worker.run()
     finally:
         env.close()
+
+
+def _run_task_job_with_retries(job: TaskJob, max_retries: int = 0) -> dict[str, Any]:
+    started = time.perf_counter()
+    attempts = max(0, int(max_retries)) + 1
+    last_exc: BaseException | None = None
+    for attempt in range(attempts):
+        try:
+            result = _run_task_job(job)
+            elapsed = time.perf_counter() - started
+            result = dict(result)
+            result["ok"] = True
+            result["elapsed_sec"] = float(elapsed)
+            result["frames_per_sec"] = (
+                float(result.get("total_frames", 0)) / elapsed
+                if elapsed > 0
+                else 0.0
+            )
+            result["retry_count"] = attempt
+            result["task_filename"] = job.hdf5_path.name
+            result["task_stem"] = _task_stem(job.hdf5_path)
+            result["task_index"] = int(job.task_index)
+            result["demo_indices"] = sorted(int(k) for k in job.demo_episode_indices)
+            result["gpu_id"] = job.gpu_id
+            result["worker_pid"] = os.getpid()
+            return result
+        except BaseException as exc:
+            last_exc = exc
+            logger.exception(
+                "LIBERO task failed attempt %d/%d: %s",
+                attempt + 1,
+                attempts,
+                job.hdf5_path.name,
+            )
+    assert last_exc is not None
+    elapsed = time.perf_counter() - started
+    return {
+        "ok": False,
+        "task_name": task_name_from_hdf5(job.hdf5_path),
+        "task_filename": job.hdf5_path.name,
+        "task_stem": _task_stem(job.hdf5_path),
+        "task_index": int(getattr(job, "task_index", -1)),
+        "exception_type": type(last_exc).__name__,
+        "message": str(last_exc),
+        "traceback": traceback_text(last_exc),
+        "retry_count": attempts - 1,
+        "gpu_id": job.gpu_id,
+        "worker_pid": os.getpid(),
+        "elapsed_sec": float(elapsed),
+    }
+
+
+def _result_from_done_marker(marker: DoneMarker) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "task_name": marker.task_name,
+        "total_frames": marker.frame_count,
+        "episode_lengths": marker.episode_lengths,
+        "episode_to_task": marker.episode_to_task,
+        "coverage": marker.coverage,
+        "camera_params": marker.camera_params,
+        "task_filename": marker.task_filename,
+        "task_stem": marker.task_stem,
+        "task_index": marker.task_index,
+        "demo_indices": marker.demo_indices,
+        "elapsed_sec": marker.elapsed_sec,
+        "frames_per_sec": marker.frames_per_sec,
+        "retry_count": marker.retry_count,
+    }
 
 
 def _resolve_bddl_path(suite_name: str, hdf5_file: Path) -> str:
