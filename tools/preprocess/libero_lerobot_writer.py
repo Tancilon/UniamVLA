@@ -77,53 +77,60 @@ class LiberoLerobotWriter:
 
     def _write_sidecars(self, buffers: LiberoEpisodeBuffers) -> None:
         self._validate_optional_lengths(buffers)
+        episode = str(buffers.episode_index)
+        image_dir = self.output_dir / "image_targets" / episode
+        pc_dir = self.output_dir / "point_clouds" / episode
+        depth_dir = self.output_dir / "depths" / "static" / episode
+        grounding_dir = self.output_dir / "grounding_masks" / "static" / episode
+        affordance_dir = self.output_dir / "affordance_heatmaps" / "static" / episode
+
+        if any(target is not None for target in buffers.image_targets):
+            image_dir.mkdir(parents=True, exist_ok=True)
+        if any(pc is not None for pc in buffers.point_clouds):
+            pc_dir.mkdir(parents=True, exist_ok=True)
+        if any(depth is not None for depth in buffers.depth_targets):
+            depth_dir.mkdir(parents=True, exist_ok=True)
+        if any(mask is not None for mask in buffers.grounding_masks):
+            grounding_dir.mkdir(parents=True, exist_ok=True)
+        if any(heatmap is not None for heatmap in buffers.affordance_heatmaps):
+            affordance_dir.mkdir(parents=True, exist_ok=True)
+
         for frame_idx, target in enumerate(buffers.image_targets):
             if target is not None:
-                path = (
-                    self.output_dir
-                    / "image_targets"
-                    / str(buffers.episode_index)
-                    / f"{frame_idx}.png"
-                )
-                path.parent.mkdir(parents=True, exist_ok=True)
+                path = image_dir / f"{frame_idx}.png"
                 Image.fromarray(np.asarray(target, dtype=np.uint8)).save(path)
         for frame_idx, pc in enumerate(buffers.point_clouds):
             if pc is not None:
                 arr = np.asarray(pc, dtype=np.float32)
                 if arr.shape != (1024, 3):
                     raise RuntimeError(f"point cloud shape {arr.shape} != (1024, 3)")
-                path = (
-                    self.output_dir
-                    / "point_clouds"
-                    / str(buffers.episode_index)
-                    / f"{frame_idx}.npy"
-                )
-                path.parent.mkdir(parents=True, exist_ok=True)
-                np.save(path, arr)
+                np.save(pc_dir / f"{frame_idx}.npy", arr)
         for frame_idx, depth in enumerate(buffers.depth_targets):
             if depth is not None:
-                self.write_aux_denoising_sidecar(
-                    output_dir=self.output_dir,
-                    trajectory_id=buffers.episode_index,
-                    base_index=frame_idx,
-                    depth_static=depth,
+                np.save(
+                    depth_dir / f"{frame_idx}.npy",
+                    np.asarray(depth, dtype=np.float32),
                 )
         for frame_idx, mask in enumerate(buffers.grounding_masks):
             if mask is not None:
-                self.write_aux_denoising_sidecar(
-                    output_dir=self.output_dir,
-                    trajectory_id=buffers.episode_index,
-                    base_index=frame_idx,
-                    grounding_mask=mask,
-                    grounding_level=buffers.grounding_levels[frame_idx] or "object",
+                np.save(
+                    grounding_dir / f"{frame_idx}.npy",
+                    np.asarray(mask, dtype=np.float32),
                 )
+                with open(grounding_dir / f"{frame_idx}.json", "w") as f:
+                    json.dump(
+                        {
+                            "grounding_level": (
+                                buffers.grounding_levels[frame_idx] or "object"
+                            )
+                        },
+                        f,
+                    )
         for frame_idx, heatmap in enumerate(buffers.affordance_heatmaps):
             if heatmap is not None:
-                self.write_aux_denoising_sidecar(
-                    output_dir=self.output_dir,
-                    trajectory_id=buffers.episode_index,
-                    base_index=frame_idx,
-                    affordance_heatmap=heatmap,
+                np.save(
+                    affordance_dir / f"{frame_idx}.npy",
+                    np.asarray(heatmap, dtype=np.float32),
                 )
 
     @staticmethod

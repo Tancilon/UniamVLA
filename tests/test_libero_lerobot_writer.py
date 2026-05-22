@@ -109,3 +109,38 @@ def test_writer_emits_lerobot_episode_and_sidecars(tmp_path: Path, monkeypatch):
         info["video_path"]
         == "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
     )
+
+
+def test_writer_preserves_aux_sidecar_paths_after_directory_optimization(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _stub_imageio(monkeypatch)
+    module = importlib.import_module("tools.preprocess.libero_lerobot_writer")
+    LiberoEpisodeBuffers = module.LiberoEpisodeBuffers
+    LiberoLerobotWriter = module.LiberoLerobotWriter
+
+    writer = LiberoLerobotWriter(tmp_path, fps=10)
+    buffers = LiberoEpisodeBuffers(
+        episode_index=7,
+        task_index=0,
+        task_name="task",
+        rows=[_sample_row(7, 0, 0)],
+        primary_frames=[np.zeros((8, 8, 3), dtype=np.uint8)],
+        wrist_frames=[np.zeros((8, 8, 3), dtype=np.uint8)],
+        image_targets=[np.zeros((4, 4, 3), dtype=np.uint8)],
+        point_clouds=[np.zeros((1024, 3), dtype=np.float32)],
+        depth_targets=[np.ones((8, 8), dtype=np.float32)],
+        grounding_masks=[np.ones((1, 20, 20), dtype=np.float32)],
+        grounding_levels=["object"],
+        affordance_heatmaps=[np.ones((1, 20, 20), dtype=np.float32)],
+    )
+
+    writer.write_episode(buffers)
+
+    assert (tmp_path / "image_targets/7/0.png").exists()
+    assert (tmp_path / "point_clouds/7/0.npy").exists()
+    assert (tmp_path / "depths/static/7/0.npy").exists()
+    assert (tmp_path / "grounding_masks/static/7/0.npy").exists()
+    assert (tmp_path / "grounding_masks/static/7/0.json").exists()
+    assert (tmp_path / "affordance_heatmaps/static/7/0.npy").exists()
