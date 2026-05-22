@@ -293,3 +293,102 @@ def test_parse_args_rejects_overwrite_with_resume(tmp_path):
                 "--resume",
             ]
         )
+
+
+def test_run_scene_preprocessor_with_retries_records_success(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run_preprocessor(scene, scene_input_dir, scene_output_dir, args):
+        calls.append(scene)
+        scene_output_dir.mkdir(parents=True)
+        return ["python", "runner.py", scene]
+
+    monkeypatch.setattr(runner, "_run_preprocessor", fake_run_preprocessor)
+    args = argparse.Namespace(
+        max_retries=1,
+        profile=True,
+        num_workers=1,
+        on_resolve_failure="abort",
+        on_missing_target="skip",
+    )
+
+    result = runner._run_scene_preprocessor_with_retries(
+        "A",
+        tmp_path / "split" / "A",
+        tmp_path / "preprocessed" / "A",
+        args,
+    )
+
+    assert calls == ["A"]
+    assert result.status == "done"
+    assert result.return_code == 0
+    assert result.attempt_count == 1
+    assert result.retry_count == 0
+    assert result.command == ["python", "runner.py", "A"]
+
+
+def test_run_scene_preprocessor_with_retries_retries_called_process_error(tmp_path, monkeypatch):
+    calls = []
+
+    def flaky_run_preprocessor(scene, scene_input_dir, scene_output_dir, args):
+        calls.append(scene)
+        if len(calls) == 1:
+            raise runner.subprocess.CalledProcessError(
+                returncode=9,
+                cmd=["python", "runner.py", scene],
+            )
+        scene_output_dir.mkdir(parents=True)
+        return ["python", "runner.py", scene]
+
+    monkeypatch.setattr(runner, "_run_preprocessor", flaky_run_preprocessor)
+    args = argparse.Namespace(
+        max_retries=1,
+        profile=True,
+        num_workers=1,
+        on_resolve_failure="abort",
+        on_missing_target="skip",
+    )
+
+    result = runner._run_scene_preprocessor_with_retries(
+        "B",
+        tmp_path / "split" / "B",
+        tmp_path / "preprocessed" / "B",
+        args,
+    )
+
+    assert calls == ["B", "B"]
+    assert result.status == "done"
+    assert result.attempt_count == 2
+    assert result.retry_count == 1
+
+
+def test_run_scene_preprocessor_with_retries_returns_failure_after_exhaustion(
+    tmp_path, monkeypatch
+):
+    def failing_run_preprocessor(scene, scene_input_dir, scene_output_dir, args):
+        raise runner.subprocess.CalledProcessError(
+            returncode=11,
+            cmd=["python", "runner.py", scene],
+        )
+
+    monkeypatch.setattr(runner, "_run_preprocessor", failing_run_preprocessor)
+    args = argparse.Namespace(
+        max_retries=1,
+        profile=True,
+        num_workers=1,
+        on_resolve_failure="abort",
+        on_missing_target="skip",
+    )
+
+    result = runner._run_scene_preprocessor_with_retries(
+        "C",
+        tmp_path / "split" / "C",
+        tmp_path / "preprocessed" / "C",
+        args,
+    )
+
+    assert result.status == "failed"
+    assert result.return_code == 11
+    assert result.attempt_count == 2
+    assert result.retry_count == 1
+    assert result.exception_type == "CalledProcessError"

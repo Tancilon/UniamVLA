@@ -35,6 +35,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Make project root importable for direct module use.
@@ -42,6 +43,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.preprocess.calvin_scene_splitter import split_calvin_by_scene
 from tools.preprocess.calvin_lerobot_merger import merge_lerobot_scene_outputs
+from tools.preprocess.calvin_multiscene_resume import (
+    SceneRunResult,
+    summarize_scene_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,85 @@ def _run_preprocessor(
     logger.info("Running: %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
     return cmd
+
+
+def _run_scene_preprocessor_with_retries(
+    scene: str,
+    scene_input_dir: Path,
+    scene_output_dir: Path,
+    args: argparse.Namespace,
+) -> SceneRunResult:
+    command = _build_preprocessor_cmd(scene, scene_input_dir, scene_output_dir, args)
+    start = time.perf_counter()
+    max_attempts = int(args.max_retries) + 1
+    last_exc: BaseException | None = None
+    last_return_code: int | None = None
+
+    for attempt_idx in range(max_attempts):
+        attempt_count = attempt_idx + 1
+        try:
+            command = _run_preprocessor(scene, scene_input_dir, scene_output_dir, args)
+            elapsed = time.perf_counter() - start
+            summary = summarize_scene_output(scene_output_dir)
+            if args.profile:
+                logger.info(
+                    "Scene %s complete in %.2fs after %d attempt(s): %s",
+                    scene,
+                    elapsed,
+                    attempt_count,
+                    summary,
+                )
+            return SceneRunResult(
+                scene=scene,
+                scene_input_dir=str(scene_input_dir),
+                scene_output_dir=str(scene_output_dir),
+                command=command,
+                return_code=0,
+                elapsed_sec=elapsed,
+                attempt_count=attempt_count,
+                retry_count=attempt_idx,
+                status="done",
+                output_summary=summary,
+            )
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            last_return_code = int(exc.returncode)
+            command = list(exc.cmd) if isinstance(exc.cmd, list) else command
+            logger.warning(
+                "Scene %s attempt %d/%d failed with return code %s",
+                scene,
+                attempt_count,
+                max_attempts,
+                last_return_code,
+            )
+        except Exception as exc:
+            last_exc = exc
+            last_return_code = None
+            logger.warning(
+                "Scene %s attempt %d/%d failed before subprocess completion: %s",
+                scene,
+                attempt_count,
+                max_attempts,
+                exc,
+            )
+
+    elapsed = time.perf_counter() - start
+    message = str(last_exc) if last_exc is not None else f"scene {scene} failed"
+    exception_type = type(last_exc).__name__ if last_exc is not None else "RuntimeError"
+    return SceneRunResult(
+        scene=scene,
+        scene_input_dir=str(scene_input_dir),
+        scene_output_dir=str(scene_output_dir),
+        command=command,
+        return_code=last_return_code,
+        elapsed_sec=elapsed,
+        attempt_count=max_attempts,
+        retry_count=max_attempts - 1,
+        status="failed",
+        output_summary=summarize_scene_output(scene_output_dir),
+        exception_type=exception_type,
+        message=message,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
