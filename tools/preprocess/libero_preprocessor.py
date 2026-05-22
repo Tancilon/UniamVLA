@@ -71,8 +71,6 @@ class TaskJob:
     gpu_id: str
     min_segment_len: int
     debug_rgb_check_frames: int
-    affordance_local_window_size: int
-    affordance_action_chunk_horizon: int
     max_demos_per_task: int | None = None
     max_frames_per_demo: int | None = None
 
@@ -85,8 +83,6 @@ class LiberoPreprocessor(BasePreprocessor):
         render_gpus: str | None = None,
         min_segment_len: int = 3,
         debug_rgb_check_frames: int = 3,
-        affordance_local_window_size: int = 4,
-        affordance_action_chunk_horizon: int = 8,
         max_tasks: int | None = None,
         max_demos_per_task: int | None = None,
         max_frames_per_demo: int | None = None,
@@ -96,8 +92,6 @@ class LiberoPreprocessor(BasePreprocessor):
         self.render_gpus = render_gpus
         self.min_segment_len = int(min_segment_len)
         self.debug_rgb_check_frames = int(debug_rgb_check_frames)
-        self.affordance_local_window_size = int(affordance_local_window_size)
-        self.affordance_action_chunk_horizon = int(affordance_action_chunk_horizon)
         self.max_tasks = max_tasks
         self.max_demos_per_task = max_demos_per_task
         self.max_frames_per_demo = max_frames_per_demo
@@ -207,8 +201,6 @@ class LiberoPreprocessor(BasePreprocessor):
                     gpu_id=render_gpus[task_idx % len(render_gpus)],
                     min_segment_len=self.min_segment_len,
                     debug_rgb_check_frames=self.debug_rgb_check_frames,
-                    affordance_local_window_size=self.affordance_local_window_size,
-                    affordance_action_chunk_horizon=self.affordance_action_chunk_horizon,
                     max_demos_per_task=self.max_demos_per_task,
                     max_frames_per_demo=self.max_frames_per_demo,
                 )
@@ -466,8 +458,6 @@ class _TaskReplayWorker:
                     ee_pos[:length],
                     active_targets=active_for_affordance,
                     frame_idx=frame_idx,
-                    local_window_size=self.job.affordance_local_window_size,
-                    action_chunk_horizon=self.job.affordance_action_chunk_horizon,
                 )
                 heatmap = self._target_point_affordance_heatmap(
                     point_cloud=pc,

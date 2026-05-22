@@ -89,8 +89,6 @@ def select_segment_aware_future_tcp(
     tcp_positions: np.ndarray,
     active_targets: Sequence[str | None],
     frame_idx: int,
-    local_window_size: int = 4,
-    action_chunk_horizon: int = 8,
 ) -> np.ndarray:
     tcp = np.asarray(tcp_positions, dtype=np.float32).reshape(-1, 3)
     active = list(active_targets)
@@ -101,23 +99,12 @@ def select_segment_aware_future_tcp(
     if frame_idx < 0 or frame_idx >= len(tcp):
         raise IndexError(f"frame_idx {frame_idx} outside episode length {len(tcp)}")
 
-    local_window_size = max(1, int(local_window_size))
-    action_chunk_horizon = max(1, int(action_chunk_horizon))
-
     current_target = active[frame_idx]
     segment_end = frame_idx + 1
     while segment_end < len(active) and active[segment_end] == current_target:
         segment_end += 1
 
-    horizon_end = min(len(tcp), frame_idx + action_chunk_horizon)
-    preferred_end = min(segment_end, horizon_end)
-    if preferred_end - frame_idx >= local_window_size:
-        return tcp[frame_idx:preferred_end]
-
-    fallback_end = min(len(tcp), frame_idx + local_window_size, horizon_end)
-    if fallback_end <= frame_idx:
-        fallback_end = min(len(tcp), frame_idx + 1)
-    return tcp[frame_idx:fallback_end]
+    return tcp[frame_idx:segment_end]
 
 
 def pack_robot_obs(

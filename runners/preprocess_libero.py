@@ -91,18 +91,6 @@ def parse_args(argv: list[str] | None = None):
         help="Number of replay-vs-HDF5 debug frames per task.",
     )
     parser.add_argument(
-        "--affordance-local-window-size",
-        type=int,
-        default=4,
-        help="Minimum local future TCP window used when an active-target segment is shorter.",
-    )
-    parser.add_argument(
-        "--affordance-action-chunk-horizon",
-        type=int,
-        default=8,
-        help="Maximum future TCP horizon used for affordance target selection.",
-    )
-    parser.add_argument(
         "--max-tasks",
         type=int,
         default=None,
@@ -146,8 +134,6 @@ def main(argv: list[str] | None = None) -> None:
             render_gpus=args.render_gpus,
             min_segment_len=args.min_segment_len,
             debug_rgb_check_frames=args.debug_rgb_check_frames,
-            affordance_local_window_size=args.affordance_local_window_size,
-            affordance_action_chunk_horizon=args.affordance_action_chunk_horizon,
             max_tasks=args.max_tasks,
             max_demos_per_task=args.max_demos_per_task,
             max_frames_per_demo=args.max_frames_per_demo,

@@ -44,10 +44,6 @@ def test_parse_args_accepts_parallel_options():
             "2",
             "--max-frames-per-demo",
             "3",
-            "--affordance-local-window-size",
-            "4",
-            "--affordance-action-chunk-horizon",
-            "8",
             "--overwrite",
         ]
     )
@@ -59,8 +55,6 @@ def test_parse_args_accepts_parallel_options():
     assert args.max_tasks == 1
     assert args.max_demos_per_task == 2
     assert args.max_frames_per_demo == 3
-    assert args.affordance_local_window_size == 4
-    assert args.affordance_action_chunk_horizon == 8
     assert args.overwrite is True
 
 
