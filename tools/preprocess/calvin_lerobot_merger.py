@@ -11,6 +11,15 @@ from typing import Iterable, Sequence
 import pandas as pd
 
 
+AUX_METRICS = ("image_target", "point_cloud", "depth", "grounding", "affordance")
+AUX_SIDECAR_SPECS = (
+    ("depth", Path("depths") / "static", ".npy"),
+    ("grounding", Path("grounding_masks") / "static", ".npy"),
+    ("grounding", Path("grounding_masks") / "static", ".json"),
+    ("affordance", Path("affordance_heatmaps") / "static", ".npy"),
+)
+
+
 @dataclass(frozen=True)
 class MergeResult:
     output_dir: Path
@@ -69,6 +78,39 @@ def _write_jsonl(path: Path, rows: Iterable[dict]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _empty_aux_metric_counts() -> dict[str, dict[str, int]]:
+    return {name: {"valid": 0, "total": 0} for name in AUX_METRICS}
+
+
+def _add_aux_metric_counts(
+    target: dict[str, dict[str, int]],
+    source: dict[str, dict[str, int]],
+) -> None:
+    for name in AUX_METRICS:
+        source_bucket = source.get(name, {})
+        target[name]["valid"] += int(source_bucket.get("valid", 0))
+        target[name]["total"] += int(source_bucket.get("total", 0))
+
+
+def _merge_aux_coverage(scenes: Sequence[_SceneMeta]) -> dict[str, dict]:
+    merged = {"tasks": {}, "totals": _empty_aux_metric_counts()}
+    for scene in scenes:
+        path = scene.root / "meta" / "uamvla_aux_coverage.json"
+        if not path.exists():
+            raise CalvinLeRobotMergeError(
+                f"Missing aux coverage metadata for scene {scene.root}: {path}"
+            )
+        coverage = _read_json(path)
+        _add_aux_metric_counts(merged["totals"], coverage.get("totals", {}))
+        for task_name, task_counts in coverage.get("tasks", {}).items():
+            task_bucket = merged["tasks"].setdefault(
+                str(task_name),
+                _empty_aux_metric_counts(),
+            )
+            _add_aux_metric_counts(task_bucket, task_counts)
+    return merged
 
 
 def _prepare_output_dir(output_dir: Path, overwrite: bool) -> None:
@@ -334,6 +376,57 @@ def _copy_point_clouds(scene: _SceneMeta, output_dir: Path) -> None:
             shutil.copy2(src_path, dst_dir / src_path.name)
 
 
+def _required_aux_sidecar_paths(
+    root: Path,
+    episode_index: int,
+    base_index: int,
+) -> list[Path]:
+    return [
+        root / relative_dir / str(episode_index) / f"{base_index}{suffix}"
+        for _, relative_dir, suffix in AUX_SIDECAR_SPECS
+    ]
+
+
+def _validate_aux_sidecars(
+    scene: _SceneMeta,
+    local_episode: int,
+    base_index: int,
+) -> None:
+    for path in _required_aux_sidecar_paths(scene.root, local_episode, base_index):
+        if not path.exists():
+            raise CalvinLeRobotMergeError(
+                f"Missing aux sidecar for scene {scene.root}, "
+                f"episode {local_episode}, frame {base_index}: {path}"
+            )
+
+
+def _copy_aux_sidecars(scene: _SceneMeta, output_dir: Path) -> None:
+    for episode_row in scene.episodes:
+        local_episode = int(episode_row["episode_index"])
+        global_episode = scene.episode_index_to_global[local_episode]
+        for base_index in range(_episode_length(episode_row)):
+            for _, relative_dir, suffix in AUX_SIDECAR_SPECS:
+                src_path = (
+                    scene.root
+                    / relative_dir
+                    / str(local_episode)
+                    / f"{base_index}{suffix}"
+                )
+                if not src_path.exists():
+                    raise CalvinLeRobotMergeError(
+                        f"Missing aux sidecar for scene {scene.root}, "
+                        f"episode {local_episode}, frame {base_index}: {src_path}"
+                    )
+                dst_path = (
+                    output_dir
+                    / relative_dir
+                    / str(global_episode)
+                    / f"{base_index}{suffix}"
+                )
+                dst_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_path, dst_path)
+
+
 def _read_scene_frames(scene: _SceneMeta) -> dict[int, list[pd.DataFrame]]:
     frames_by_episode: dict[int, list[pd.DataFrame]] = {
         local_episode: []
@@ -395,6 +488,7 @@ def _validate_scene_assets(scenes: Sequence[_SceneMeta]) -> None:
                         f"Missing point cloud for episode {local_episode}, "
                         f"frame {base_index}: {point_cloud}"
                     )
+                _validate_aux_sidecars(scene, local_episode, base_index)
 
 
 def _map_task_index(value: object, task_index_to_global: dict[int, int]) -> int:
@@ -612,6 +706,7 @@ def merge_lerobot_scene_outputs(
         _copy_videos(scene, output_path, chunks_size)
         _copy_image_targets(scene, output_path)
         _copy_point_clouds(scene, output_path)
+        _copy_aux_sidecars(scene, output_path)
 
     total_episodes = sum(len(scene.episodes) for scene in scenes)
     total_tasks = len(global_tasks)
@@ -631,6 +726,10 @@ def merge_lerobot_scene_outputs(
             total_frames=total_frames,
             total_tasks=total_tasks,
         ),
+    )
+    _write_json(
+        output_path / "meta" / "uamvla_aux_coverage.json",
+        _merge_aux_coverage(scenes),
     )
 
     if not skip_stats:
