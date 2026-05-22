@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 
 # Make project root importable for direct module use.
@@ -286,6 +287,68 @@ def _normalise_force_scenes(values: list[str]) -> set[str]:
     return scenes
 
 
+def _run_scene_jobs(
+    jobs: list[tuple[str, Path, Path]],
+    args: argparse.Namespace,
+) -> list[SceneRunResult]:
+    if not jobs:
+        return []
+    if args.scene_workers == 1:
+        return [
+            _run_scene_preprocessor_with_retries(
+                scene,
+                scene_input_dir,
+                scene_output_dir,
+                args,
+            )
+            for scene, scene_input_dir, scene_output_dir in jobs
+        ]
+
+    max_workers = min(args.scene_workers, len(jobs))
+    results: list[SceneRunResult] = []
+    if not args.fail_fast:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    _run_scene_preprocessor_with_retries,
+                    scene,
+                    scene_input_dir,
+                    scene_output_dir,
+                    args,
+                )
+                for scene, scene_input_dir, scene_output_dir in jobs
+            ]
+            for future in as_completed(futures):
+                results.append(future.result())
+        return results
+
+    pending_jobs = list(jobs)
+    running: dict[Future[SceneRunResult], str] = {}
+    stop_submitting = False
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while pending_jobs or running:
+            while pending_jobs and not stop_submitting and len(running) < max_workers:
+                scene, scene_input_dir, scene_output_dir = pending_jobs.pop(0)
+                future = executor.submit(
+                    _run_scene_preprocessor_with_retries,
+                    scene,
+                    scene_input_dir,
+                    scene_output_dir,
+                    args,
+                )
+                running[future] = scene
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                running.pop(future)
+                result = future.result()
+                results.append(result)
+                if result.status != "done":
+                    stop_submitting = True
+            if stop_submitting and not running:
+                break
+    return results
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -337,7 +400,7 @@ def main(argv: list[str] | None = None) -> None:
     # 2) preprocess each
     done_markers = load_scene_done_markers(args.work_dir) if args.resume else {}
     scene_output_dirs = []
-    results: list[SceneRunResult] = []
+    jobs: list[tuple[str, Path, Path]] = []
     failures: list[SceneFailureRecord] = []
 
     for scene in scenes:
@@ -366,20 +429,14 @@ def main(argv: list[str] | None = None) -> None:
             logger.info("Cleaning per-scene preprocessed dir: %s", scene_output_dir)
             shutil.rmtree(scene_output_dir)
         remove_scene_done_marker(args.work_dir, scene)
+        jobs.append((scene, scene_inputs[scene], scene_output_dir))
 
-        result = _run_scene_preprocessor_with_retries(
-            scene,
-            scene_inputs[scene],
-            scene_output_dir,
-            args,
-        )
-        results.append(result)
+    results = _run_scene_jobs(jobs, args)
+    for result in sorted(results, key=lambda item: scenes.index(item.scene)):
         if result.status == "done":
             write_scene_done_marker(args.work_dir, result.to_done_marker())
         else:
             failures.append(result.to_failure_record())
-            if args.fail_fast:
-                break
 
     write_failed_scenes(args.work_dir, failures)
     if failures:

@@ -568,3 +568,165 @@ def test_runner_force_scene_reruns_done_scene(tmp_path, monkeypatch):
     )
 
     assert preprocess_calls == ["A"]
+
+
+def test_runner_uses_thread_pool_when_scene_workers_exceeds_one(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    work_dir = tmp_path / "work"
+    input_dir.mkdir()
+    work_dir.mkdir()
+    submitted = []
+    merge_calls = []
+
+    class FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, fn, scene, scene_input_dir, scene_output_dir, args):
+            submitted.append((self.max_workers, scene))
+            return FakeFuture(fn(scene, scene_input_dir, scene_output_dir, args))
+
+    def fake_as_completed(futures):
+        return list(futures)
+
+    def fake_split(*, input_dir, output_dir, scenes, scene_config_dir=None):
+        return {scene: output_dir / scene for scene in scenes}
+
+    def fake_run_with_retries(scene, scene_input_dir, scene_output_dir, args):
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+        return runner.SceneRunResult(
+            scene=scene,
+            scene_input_dir=str(scene_input_dir),
+            scene_output_dir=str(scene_output_dir),
+            command=["python", "runner.py", scene],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            status="done",
+            output_summary={},
+        )
+
+    monkeypatch.setattr(runner, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(runner, "as_completed", fake_as_completed)
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
+    monkeypatch.setattr(
+        runner,
+        "_run_scene_preprocessor_with_retries",
+        fake_run_with_retries,
+    )
+    monkeypatch.setattr(
+        runner,
+        "merge_lerobot_scene_outputs",
+        lambda *args, **kwargs: merge_calls.append(args),
+        raising=False,
+    )
+
+    runner.main(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_dir",
+            str(output_dir),
+            "--work_dir",
+            str(work_dir),
+            "--scenes",
+            "A,B,C",
+            "--overwrite",
+            "--scene-workers",
+            "2",
+            "--skip_stats",
+        ]
+    )
+
+    assert submitted == [(2, "A"), (2, "B"), (2, "C")]
+    assert len(merge_calls) == 1
+
+
+def test_runner_records_failed_scene_and_skips_merge(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    work_dir = tmp_path / "work"
+    input_dir.mkdir()
+    work_dir.mkdir()
+    merge_calls = []
+
+    def fake_split(*, input_dir, output_dir, scenes, scene_config_dir=None):
+        return {scene: output_dir / scene for scene in scenes}
+
+    def fake_run_with_retries(scene, scene_input_dir, scene_output_dir, args):
+        if scene == "B":
+            return runner.SceneRunResult(
+                scene=scene,
+                scene_input_dir=str(scene_input_dir),
+                scene_output_dir=str(scene_output_dir),
+                command=["python", "runner.py", scene],
+                return_code=5,
+                elapsed_sec=1.0,
+                attempt_count=1,
+                retry_count=0,
+                status="failed",
+                output_summary={},
+                exception_type="CalledProcessError",
+                message="exit status 5",
+            )
+        scene_output_dir.mkdir(parents=True, exist_ok=True)
+        return runner.SceneRunResult(
+            scene=scene,
+            scene_input_dir=str(scene_input_dir),
+            scene_output_dir=str(scene_output_dir),
+            command=["python", "runner.py", scene],
+            return_code=0,
+            elapsed_sec=1.0,
+            attempt_count=1,
+            retry_count=0,
+            status="done",
+            output_summary={},
+        )
+
+    monkeypatch.setattr(runner, "split_calvin_by_scene", fake_split)
+    monkeypatch.setattr(
+        runner,
+        "_run_scene_preprocessor_with_retries",
+        fake_run_with_retries,
+    )
+    monkeypatch.setattr(
+        runner,
+        "merge_lerobot_scene_outputs",
+        lambda *args, **kwargs: merge_calls.append(args),
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit, match="incomplete"):
+        runner.main(
+            [
+                "--input_dir",
+                str(input_dir),
+                "--output_dir",
+                str(output_dir),
+                "--work_dir",
+                str(work_dir),
+                "--scenes",
+                "A,B,C",
+                "--overwrite",
+                "--scene-workers",
+                "2",
+                "--skip_stats",
+            ]
+        )
+
+    assert merge_calls == []
