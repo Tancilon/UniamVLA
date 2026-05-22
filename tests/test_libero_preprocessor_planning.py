@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from runners.preprocess_libero import build_suite_jobs, default_output_name, parse_args
 from tools.preprocess.libero_preprocessor import _TaskReplayWorker
@@ -63,6 +64,53 @@ def test_parse_args_accepts_parallel_options():
     assert args.max_frames_per_demo == 3
     assert args.active_target_score_window == 6
     assert args.overwrite is True
+
+
+def test_parse_args_accepts_resume_throughput_options():
+    args = parse_args(
+        [
+            "--input-root",
+            "datasets/libero",
+            "--output-root",
+            "datasets/libero2uam",
+            "--suite",
+            "libero_10",
+            "--num-workers",
+            "4",
+            "--render-gpus",
+            "0",
+            "--resume",
+            "--force-task",
+            "task_a",
+            "--force-task",
+            "task_b",
+            "--fail-fast",
+            "--profile",
+            "--max-retries",
+            "1",
+        ]
+    )
+    assert args.resume is True
+    assert args.force_task == ["task_a", "task_b"]
+    assert args.fail_fast is True
+    assert args.profile is True
+    assert args.max_retries == 1
+
+
+def test_parse_args_rejects_overwrite_with_resume():
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--input-root",
+                "datasets/libero",
+                "--output-root",
+                "datasets/libero2uam",
+                "--suite",
+                "libero_goal",
+                "--overwrite",
+                "--resume",
+            ]
+        )
 
 
 def test_replay_worker_maps_main_body_to_instance_id():

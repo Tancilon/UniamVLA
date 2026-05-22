@@ -79,6 +79,33 @@ def parse_args(argv: list[str] | None = None):
         help="Remove existing suite output before preprocessing.",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an existing suite output by skipping completed task markers.",
+    )
+    parser.add_argument(
+        "--force-task",
+        action="append",
+        default=[],
+        help="Task stem to reprocess even when a done marker exists. Repeatable.",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Abort the suite on the first task failure instead of recording it.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Log and store task-level throughput metrics.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=0,
+        help="Number of task-level retries before reporting failure.",
+    )
+    parser.add_argument(
         "--min-segment-len",
         type=int,
         default=3,
@@ -114,7 +141,12 @@ def parse_args(argv: list[str] | None = None):
         default=None,
         help="Bound frames per demo for smoke runs.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.overwrite and args.resume:
+        parser.error("--overwrite and --resume are mutually exclusive")
+    if args.max_retries < 0:
+        parser.error("--max-retries must be >= 0")
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -144,6 +176,11 @@ def main(argv: list[str] | None = None) -> None:
             max_tasks=args.max_tasks,
             max_demos_per_task=args.max_demos_per_task,
             max_frames_per_demo=args.max_frames_per_demo,
+            resume=args.resume,
+            force_tasks=tuple(args.force_task),
+            fail_fast=args.fail_fast,
+            profile=args.profile,
+            max_retries=args.max_retries,
         )
         preprocessor.process(str(job.input_dir), str(job.output_dir))
 
