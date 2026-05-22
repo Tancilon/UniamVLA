@@ -89,6 +89,11 @@ class LiberoPreprocessor(BasePreprocessor):
         max_tasks: int | None = None,
         max_demos_per_task: int | None = None,
         max_frames_per_demo: int | None = None,
+        resume: bool = False,
+        force_tasks: tuple[str, ...] = (),
+        fail_fast: bool = False,
+        profile: bool = False,
+        max_retries: int = 0,
     ):
         self.suite = suite
         self.num_workers = num_workers
@@ -99,6 +104,11 @@ class LiberoPreprocessor(BasePreprocessor):
         self.max_tasks = max_tasks
         self.max_demos_per_task = max_demos_per_task
         self.max_frames_per_demo = max_frames_per_demo
+        self.resume = bool(resume)
+        self.force_tasks = {str(task) for task in force_tasks}
+        self.fail_fast = bool(fail_fast)
+        self.profile = bool(profile)
+        self.max_retries = max(0, int(max_retries))
 
     def process(self, input_dir: str, output_dir: str):
         input_path = Path(input_dir)
@@ -212,6 +222,29 @@ class LiberoPreprocessor(BasePreprocessor):
             )
         return jobs
 
+    def _filter_resume_jobs(
+        self,
+        output_path: Path,
+        jobs: list[TaskJob],
+        done_markers: dict[str, Any],
+    ) -> list[TaskJob]:
+        if not self.resume:
+            return jobs
+        remaining = []
+        for job in jobs:
+            task_stem = _task_stem(job.hdf5_path)
+            if task_stem in self.force_tasks:
+                remaining.append(job)
+                continue
+            if task_stem in done_markers:
+                logger.info(
+                    "Skipping completed LIBERO task under --resume: %s",
+                    task_stem,
+                )
+                continue
+            remaining.append(job)
+        return remaining
+
     @staticmethod
     def _emit_aux_denoising_sidecars(
         output_dir: Path,
@@ -278,6 +311,11 @@ def _configure_worker_env(gpu_id: str) -> None:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     # Editable robosuite installs may fail while creating numba cache locators.
     os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+
+
+def _task_stem(path: Path) -> str:
+    stem = Path(path).stem
+    return stem[: -len("_demo")] if stem.endswith("_demo") else stem
 
 
 def _run_task_job(job: TaskJob) -> dict[str, Any]:

@@ -113,6 +113,65 @@ def test_parse_args_rejects_overwrite_with_resume():
         )
 
 
+def test_libero_preprocessor_stores_resume_options():
+    from tools.preprocess.libero_preprocessor import LiberoPreprocessor
+
+    pre = LiberoPreprocessor(
+        suite="libero_10",
+        resume=True,
+        force_tasks=("task_a",),
+        fail_fast=True,
+        profile=True,
+        max_retries=2,
+    )
+
+    assert pre.resume is True
+    assert pre.force_tasks == {"task_a"}
+    assert pre.fail_fast is True
+    assert pre.profile is True
+    assert pre.max_retries == 2
+
+
+def test_resume_filters_done_tasks(tmp_path: Path):
+    from tools.preprocess.libero_preprocessor import LiberoPreprocessor
+    from tools.preprocess.libero_resume import DoneMarker, write_done_marker
+
+    input_dir = tmp_path / "raw" / "libero_goal"
+    output_dir = tmp_path / "out" / "lerobot_libero_goal"
+    input_dir.mkdir(parents=True)
+    for name in ["task_a.hdf5", "task_b.hdf5"]:
+        (input_dir / name).write_bytes(b"hdf5 test bytes")
+
+    marker = DoneMarker(
+        task_stem="task_a",
+        task_filename="task_a.hdf5",
+        task_name="task a",
+        task_index=0,
+        demo_indices=[0],
+        episode_indices=[0],
+        episode_lengths={"0": 3},
+        episode_to_task={"0": 0},
+        frame_count=3,
+        coverage={},
+        camera_params=None,
+        elapsed_sec=1.0,
+        frames_per_sec=3.0,
+        retry_count=0,
+        options_hash="abc",
+    )
+    write_done_marker(output_dir, marker)
+
+    pre = LiberoPreprocessor(suite="libero_goal", resume=True)
+    jobs = [
+        SimpleNamespace(hdf5_path=input_dir / "task_a.hdf5"),
+        SimpleNamespace(hdf5_path=input_dir / "task_b.hdf5"),
+    ]
+
+    remaining = pre._filter_resume_jobs(output_dir, jobs, {"task_a": marker})
+
+    assert [job.hdf5_path.name for job in remaining] == ["task_b.hdf5"]
+
+
 def test_replay_worker_maps_main_body_to_instance_id():
     worker = object.__new__(_TaskReplayWorker)
 
