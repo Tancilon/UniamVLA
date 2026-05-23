@@ -26,6 +26,22 @@ def test_action_chunk_encoder_outputs_hidden_size():
     assert torch.isfinite(out).all()
 
 
+def test_action_chunk_encoder_matches_parameter_dtype():
+    encoder = ActionChunkEncoder(
+        action_dim=7,
+        hidden_size=16,
+        action_embed_dim=8,
+        num_layers=1,
+        num_heads=2,
+        max_horizon=8,
+    ).to(torch.bfloat16)
+    actions = torch.randn(3, 8, 7, dtype=torch.float32)
+    out = encoder(actions)
+    assert out.shape == (3, 16)
+    assert out.dtype == torch.bfloat16
+    assert torch.isfinite(out.float()).all()
+
+
 def test_action_chunk_encoder_uses_learnable_sincos_position_init():
     encoder = ActionChunkEncoder(
         action_dim=7,

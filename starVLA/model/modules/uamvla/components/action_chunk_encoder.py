@@ -57,7 +57,8 @@ class ActionChunkEncoder(nn.Module):
             raise ValueError(
                 f"action horizon {horizon} exceeds max_horizon {self.pos_embed.shape[1]}"
             )
-        x = self.input_proj(action_chunk.float())
+        param_dtype = self.input_proj.weight.dtype
+        x = self.input_proj(action_chunk.to(dtype=param_dtype))
         x = x + self.pos_embed[:, :horizon, :].to(dtype=x.dtype, device=x.device)
         x = self.encoder(x)
         pooled = x.mean(dim=1)
