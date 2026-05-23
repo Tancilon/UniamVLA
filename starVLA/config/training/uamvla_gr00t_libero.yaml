@@ -47,11 +47,11 @@ framework:
     path: ckpt/pretrained_vae
   aux_loss_control:
     enabled: true
-    aux_budget: 1.0
+    aux_budget: 0.8
   aux_heads:
     pose:
       enabled: false
-      loss_weight: 0.5
+      loss_weight: 0.25
       pose_mode: rot_matrix
       sde_mode: ve
       num_queries: 4
@@ -59,15 +59,15 @@ framework:
       sampling_steps: 500
     future:
       enabled: false
-      loss_weight: 1.0
+      loss_weight: 0.5
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
     recon:
-      enabled: true
-      loss_weight: 1.0
+      enabled: false
+      loss_weight: 0.5
       view_idx: 0
       target_resize: 320
       denoiser_depth: 3
@@ -75,7 +75,7 @@ framework:
       repeat_factor: 4
     depth:
       enabled: false
-      loss_weight: 0.1
+      loss_weight: 0.25
       view_idx: 0
       target_kind: relative_inverse_depth_per_frame
       target_size: 20
@@ -97,14 +97,14 @@ framework:
       target_frame_offset: future_action_window_size
     grounding:
       enabled: false
-      loss_weight: 0.1
+      loss_weight: 0.25
       view_idx: 0
       target_size: 20
       denoiser_depth: 3
       denoiser_embed_dim: 512
     affordance:
       enabled: false
-      loss_weight: 0.1
+      loss_weight: 0.5
       view_idx: 0
       target_size: 20
       heatmap_sigma: 2.0
@@ -129,7 +129,7 @@ datasets:
 
 trainer:
   epochs: 5
-  max_train_steps: 50000
+  max_train_steps: 200000
   num_warmup_steps: 2000
   save_interval: 5000
   eval_interval: 1000
@@ -149,7 +149,7 @@ trainer:
 
   freeze_modules: null
   max_grad_norm: 1.0
-  logging_frequency: 10
+  logging_frequency: 100
   gradient_clipping: 1.0
   gradient_accumulation_steps: 8
   gradient_checkpointing: true

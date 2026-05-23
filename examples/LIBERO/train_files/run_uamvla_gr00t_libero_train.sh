@@ -39,10 +39,7 @@ fi
 CONFIG_YAML="${CONFIG_YAML:-./starVLA/config/training/uamvla_gr00t_libero.yaml}"
 NUM_GPUS="${NUM_GPUS:-8}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
-ZERO_STAGE="${ZERO_STAGE:-3}"
-ACCEL_CONFIG_DIR="${ACCEL_CONFIG_DIR:-/tmp/uamvla_accel}"
-ACCEL_CONFIG_SCRIPT="${ACCEL_CONFIG_SCRIPT:-examples/Gemma4/_make_accelerate_config.py}"
-DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-}"
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-starVLA/config/deepseeds/uamvla_gr00t_zero3.yaml}"
 
 BASE_VLM="${BASE_VLM:-ckpt/Qwen3-VL-8B-Instruct}"
 DATA_ROOT_DIR="${DATA_ROOT_DIR:-datasets/libero2uam}"
@@ -50,20 +47,6 @@ DATA_MIX="${DATA_MIX:-uamvla_libero_all_h8}"
 PER_DEVICE_BATCH_SIZE="${PER_DEVICE_BATCH_SIZE:-1}"
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-./playground/Checkpoints}"
 RUN_ID="${RUN_ID:-uamvla_gr00t_libero_all_8b_h8}"
-
-if [[ -z "${DEEPSPEED_CONFIG}" ]]; then
-  if [[ "${ZERO_STAGE}" != "2" && "${ZERO_STAGE}" != "3" ]]; then
-    echo "ZERO_STAGE must be 2 or 3, got: ${ZERO_STAGE}" >&2
-    exit 2
-  fi
-  DEEPSPEED_CONFIG="$(
-    python "${ACCEL_CONFIG_SCRIPT}" \
-      --grad-accum "${GRAD_ACCUM}" \
-      --num-processes "${NUM_GPUS}" \
-      --zero-stage "${ZERO_STAGE}" \
-      --out-dir "${ACCEL_CONFIG_DIR}"
-  )"
-fi
 
 output_dir="${RUN_ROOT_DIR}/${RUN_ID}"
 mkdir -p "${output_dir}"

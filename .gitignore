@@ -185,6 +185,8 @@ data_processed
 llavavla/conf/qwenvla_lmdb_3Lpretrain.yaml
 extracted_frames
 starVLA/config/deepseeds/*
+!starVLA/config/deepseeds/uamvla_gr00t_zero3.yaml
+!starVLA/config/deepseeds/uamvla_gr00t_zero3_ds.json
 **/bar
 llavavla/model/openvla_temp
 real_deployment/upload/push_model_to_hf.py
