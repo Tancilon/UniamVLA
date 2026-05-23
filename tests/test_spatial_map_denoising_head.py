@@ -61,6 +61,7 @@ def test_spatial_map_head_scales_target_and_reports_metrics():
 
 
 def test_spatial_map_head_empty_mask_returns_dummy_loss():
+    denoiser = _FakeDenoiser()
     head = SpatialMapDenoisingHead(
         hidden_size=4,
         image_token_id=99,
@@ -69,7 +70,7 @@ def test_spatial_map_head_empty_mask_returns_dummy_loss():
         mask_key="grounding_mask_mask",
         metric_prefix="grounding",
         loss_weight=0.1,
-        denoiser=_FakeDenoiser(),
+        denoiser=denoiser,
     )
     hidden = torch.zeros(2, 4, 4)
     batch = {
@@ -81,6 +82,8 @@ def test_spatial_map_head_empty_mask_returns_dummy_loss():
     assert out.loss.item() == 0.0
     assert out.metrics["loss_raw"] == 0.0
     assert out.metrics["valid_ratio"] == 0.0
+    assert denoiser.last_z_shape == (1, 4, 2, 2)
+    assert denoiser.last_target is not None
 
 
 def test_spatial_map_head_visualizes_gt_vs_pred(monkeypatch):

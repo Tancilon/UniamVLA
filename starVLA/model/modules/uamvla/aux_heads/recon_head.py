@@ -109,7 +109,9 @@ class ReconHead(AuxHead):
     ) -> HeadOutput:
         if not mask.any():
             return HeadOutput(
-                loss=self.get_dummy_loss(), metrics={"recon_loss": 0.0}, predictions=None,
+                loss=self._zero_aligned_loss(hidden_states, batch),
+                metrics={"recon_loss": 0.0},
+                predictions=None,
             )
 
         # Mask-filter first to avoid wasted work on dropped samples.
@@ -141,6 +143,29 @@ class ReconHead(AuxHead):
             metrics={"recon_loss": raw_loss.detach().item()},
             predictions=None,
         )
+
+    def _zero_aligned_loss(self, hidden_states: torch.Tensor, batch: dict) -> torch.Tensor:
+        """Run a zero-weight dummy path so ZeRO-3 collectives stay aligned."""
+        if hidden_states.shape[0] == 0:
+            return self.get_dummy_loss()
+
+        spatial_cond = self._spatial_condition(hidden_states[:1], batch["input_ids"][:1])
+        dummy_images = torch.zeros(
+            1,
+            3,
+            self.target_resize,
+            self.target_resize,
+            device=spatial_cond.device,
+            dtype=spatial_cond.dtype,
+        )
+        with torch.no_grad():
+            z_q = self._encode_to_latent(self._normalize_for_vae(dummy_images))
+
+        loss = self.denoiser(
+            z=spatial_cond.contiguous().float(),
+            target=z_q.contiguous().float(),
+        )
+        return loss.mean() * 0.0
 
     def predict(
         self, hidden_states: torch.Tensor, batch: dict,
