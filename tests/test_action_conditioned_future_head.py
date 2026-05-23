@@ -140,6 +140,7 @@ def test_action_conditioned_future_rejects_grid_mismatch():
 
 
 def test_action_conditioned_future_empty_mask_returns_dummy_loss():
+    denoiser = _FakeDenoiser()
     head = ActionConditionedFutureHead(
         hidden_size=4,
         vae=_FakeVAE(),
@@ -153,7 +154,7 @@ def test_action_conditioned_future_empty_mask_returns_dummy_loss():
         action_encoder_layers=1,
         action_embed_dim=8,
         action_encoder_heads=2,
-        denoiser=_FakeDenoiser(),
+        denoiser=denoiser,
     )
     out = head.compute_loss(
         torch.zeros(2, 4, 4),
@@ -168,6 +169,8 @@ def test_action_conditioned_future_empty_mask_returns_dummy_loss():
     assert out.loss.item() == 0.0
     assert out.metrics["loss_raw"] == 0.0
     assert out.metrics["valid_ratio"] == 0.0
+    assert denoiser.last_z is not None
+    assert denoiser.last_z.shape == (1, 4, 2, 2)
 
 
 def test_action_conditioned_future_visualizes_gt_vs_pred(monkeypatch):

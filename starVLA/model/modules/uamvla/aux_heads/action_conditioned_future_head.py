@@ -125,8 +125,9 @@ class ActionConditionedFutureHead(AuxHead):
     ) -> HeadOutput:
         valid_ratio = float(mask.float().mean().item()) if mask.numel() else 0.0
         if not mask.any():
+            dummy_loss = self._zero_aligned_loss(hidden_states, batch)
             return HeadOutput(
-                loss=self.get_dummy_loss(),
+                loss=dummy_loss,
                 metrics={"loss_raw": 0.0, "valid_ratio": 0.0},
                 predictions=None,
             )
@@ -167,6 +168,54 @@ class ActionConditionedFutureHead(AuxHead):
             metrics={"loss_raw": raw_loss.detach().item(), "valid_ratio": valid_ratio},
             predictions=None,
         )
+
+    def _zero_aligned_loss(
+        self,
+        hidden_states: torch.Tensor,
+        batch: dict,
+    ) -> torch.Tensor:
+        """Run a zero-weight dummy path so ZeRO-3 collectives stay aligned.
+
+        With per-rank batch size 1, ``image_action_future`` can be missing on
+        some ranks near episode boundaries while present on others. Returning
+        ``0 * params.sum()`` skips the module forwards on those ranks, which
+        can deadlock ZeRO-3 parameter all-gathers when other ranks enter the
+        trainable ACF modules. This dummy path executes the same trainable
+        modules and contributes exactly zero loss.
+        """
+        if hidden_states.shape[0] == 0:
+            return self.get_dummy_loss()
+
+        dummy_hidden = hidden_states[:1]
+        dummy_ids = batch["input_ids"][:1]
+        spatial_cond = self._spatial_condition(dummy_hidden, dummy_ids)
+        fused_cond = self._condition_with_action(spatial_cond, batch["action"][:1])
+
+        dummy_images = torch.zeros(
+            1,
+            3,
+            self.target_resize,
+            self.target_resize,
+            device=fused_cond.device,
+            dtype=fused_cond.dtype,
+        )
+        with torch.no_grad():
+            z_q = self._encode_to_latent(dummy_images)
+
+        if fused_cond.shape[-2:] != z_q.shape[-2:]:
+            raise RuntimeError(
+                "ActionConditionedFutureHead condition/target grid mismatch: "
+                f"condition grid={tuple(fused_cond.shape[-2:])}, "
+                f"target latent grid={tuple(z_q.shape[-2:])}. "
+                "The current UamVLA aux design expects a unified 20x20 grid; "
+                "with the bundled Flux VAE this corresponds to target_resize=320."
+            )
+
+        loss = self.denoiser(
+            z=fused_cond.contiguous().float(),
+            target=z_q.contiguous().float(),
+        )
+        return loss.mean() * 0.0
 
     def predict(
         self,
