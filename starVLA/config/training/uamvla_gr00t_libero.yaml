@@ -47,7 +47,7 @@ framework:
     path: ckpt/pretrained_vae
   aux_loss_control:
     enabled: true
-    aux_budget: 0.8
+    aux_budget: 0.5
   aux_heads:
     pose:
       enabled: false

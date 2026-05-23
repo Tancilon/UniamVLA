@@ -4,6 +4,8 @@
 #     ADM:   https://github.com/openai/guided-diffusion/blob/main/guided_diffusion
 #     IDDPM: https://github.com/openai/improved-diffusion/blob/main/improved_diffusion/gaussian_diffusion.py
 
+import numbers
+
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 
@@ -27,6 +29,8 @@ def create_diffusion(
         loss_type = gd.LossType.MSE
     if timestep_respacing is None or timestep_respacing == "":
         timestep_respacing = [diffusion_steps]
+    elif isinstance(timestep_respacing, numbers.Integral):
+        timestep_respacing = [int(timestep_respacing)]
     return SpacedDiffusion(
         use_timesteps=space_timesteps(diffusion_steps, timestep_respacing),
         betas=betas,
