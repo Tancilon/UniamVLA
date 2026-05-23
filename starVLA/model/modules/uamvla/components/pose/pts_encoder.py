@@ -88,7 +88,22 @@ class PointNet2Wrapper(nn.Module):
             logger.info("CUDA not available. Using PointNet2Simple fallback.")
             self.encoder = PointNet2Simple(input_channels=input_channels, output_dim=output_dim)
 
+    @staticmethod
+    def _sync_buffers_to_device(module: nn.Module, device: torch.device) -> None:
+        """Move module buffers to the input device without touching parameters.
+
+        DeepSpeed ZeRO-3 owns parameter placement, but non-parameter buffers
+        such as BatchNorm running statistics can remain on CPU for small aux
+        modules.  PointNet2 receives CUDA point clouds, so stale CPU buffers
+        trigger a device mismatch inside ``torch.batch_norm``.
+        """
+        for child in module.modules():
+            for name, buffer in child._buffers.items():
+                if buffer is not None and buffer.device != device:
+                    child._buffers[name] = buffer.to(device)
+
     def forward(self, pointcloud: torch.Tensor) -> torch.Tensor:
+        self._sync_buffers_to_device(self.encoder, pointcloud.device)
         if self.use_cuda_backend:
             input_dtype = pointcloud.dtype
             return self.encoder(pointcloud.float()).to(input_dtype)
