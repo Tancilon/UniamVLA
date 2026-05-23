@@ -275,11 +275,10 @@ class VLATrainer(TrainerUtils):
 
     def _save_checkpoint(self):
         """Save current training state."""
+        save_format = getattr(self.config.trainer, "save_format", "pt")
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
+        state_dict = self.accelerator.get_state_dict(self.model)
         if self.accelerator.is_main_process:
-            save_format = getattr(self.config.trainer, "save_format", "pt")
-            checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
-
-            state_dict = self.accelerator.get_state_dict(self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
@@ -300,6 +299,7 @@ class VLATrainer(TrainerUtils):
                 self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
                 logger.info("✅ Configuration files saved")
 
+        del state_dict
         self.accelerator.wait_for_everyone()
 
     def _log_metrics(self, metrics):
@@ -313,6 +313,68 @@ class VLATrainer(TrainerUtils):
     def _create_data_iterators(self):
         """Create data iterators."""
         self.vla_iter = iter(self.vla_train_dataloader)
+
+    def _deepspeed_visualization_needs_all_ranks(self) -> bool:
+        """ZeRO-3 sharded params require all ranks to enter model forwards."""
+        if self.accelerator.num_processes <= 1:
+            return False
+        dist_type = str(getattr(self.accelerator.state, "distributed_type", "")).lower()
+        return "deepspeed" in dist_type
+
+    def _maybe_visualize_training_batch(self, batch_vla):
+        """Run training visualizations without deadlocking DeepSpeed ZeRO-3."""
+        viz_cfg = getattr(self.config.trainer, "visualization", None) or {}
+        if not viz_cfg.get("enabled", False):
+            return
+
+        every = int(viz_cfg.get("train_every_n_steps", 1000))
+        if self.completed_steps % every != 0:
+            return
+
+        run_all_ranks = self._deepspeed_visualization_needs_all_ranks()
+        if not (self.accelerator.is_main_process or run_all_ranks):
+            return
+
+        profile = os.environ.get("UAMVLA_TRAIN_STEP_PROFILE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0") or 0)
+        if profile:
+            print(
+                f"[uamvla-train-profile][rank{rank}] "
+                f"step={self.completed_steps} visualization:start",
+                flush=True,
+            )
+            t_start = time.perf_counter()
+        else:
+            t_start = None
+
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        if hasattr(unwrapped, "visualize_batch"):
+            try:
+                viz_imgs = unwrapped.visualize_batch(
+                    batch_vla,
+                    n_samples=int(viz_cfg.get("num_samples", 1)),
+                    distributed_all_ranks=run_all_ranks,
+                )
+                if self.accelerator.is_main_process and viz_imgs:
+                    wandb.log(viz_imgs, step=self.completed_steps)
+            except Exception as e:
+                logger.warning(f"visualize_batch failed at step {self.completed_steps}: {e}")
+
+        if run_all_ranks:
+            self.accelerator.wait_for_everyone()
+
+        if profile:
+            elapsed = time.perf_counter() - t_start
+            print(
+                f"[uamvla-train-profile][rank{rank}] "
+                f"step={self.completed_steps} visualization:done elapsed={elapsed:.3f}s",
+                flush=True,
+            )
 
     def _get_next_batch(self):
         """Get next batch (automatically handle data loop)."""
@@ -348,20 +410,7 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
-                viz_cfg = getattr(self.config.trainer, "visualization", None) or {}
-                if viz_cfg.get("enabled", False):
-                    every = int(viz_cfg.get("train_every_n_steps", 1000))
-                    if self.completed_steps % every == 0 and self.accelerator.is_main_process:
-                        unwrapped = self.accelerator.unwrap_model(self.model)
-                        if hasattr(unwrapped, "visualize_batch"):
-                            try:
-                                viz_imgs = unwrapped.visualize_batch(
-                                    batch_vla, n_samples=int(viz_cfg.get("num_samples", 1)),
-                                )
-                                if viz_imgs:
-                                    wandb.log(viz_imgs, step=self.completed_steps)
-                            except Exception as e:
-                                logger.warning(f"visualize_batch failed at step {self.completed_steps}: {e}")
+                self._maybe_visualize_training_batch(batch_vla)
 
             if self.accelerator.is_local_main_process:
                 progress_bar.set_postfix(
@@ -484,11 +533,11 @@ class VLATrainer(TrainerUtils):
 
     def _finalize_training(self):
         """Training end processing."""
+        save_format = getattr(self.config.trainer, "save_format", "pt")
+        state_dict = self.accelerator.get_state_dict(self.model)
         if self.accelerator.is_main_process:
-            save_format = getattr(self.config.trainer, "save_format", "pt")
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
-            state_dict = self.accelerator.get_state_dict(self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
@@ -499,6 +548,7 @@ class VLATrainer(TrainerUtils):
                 raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
             logger.info(f"Training complete. Final model saved at {final_checkpoint}")
 
+        del state_dict
         if self.accelerator.is_main_process:
             wandb.finish()
 

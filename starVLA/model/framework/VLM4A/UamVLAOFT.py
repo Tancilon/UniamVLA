@@ -1213,7 +1213,12 @@ class UamVLAOFT(Qwenvl_OFT):
         return {"action_loss": total, **log_metrics}
 
     @torch.inference_mode()
-    def visualize_batch(self, batch: List[dict], n_samples: int = 1) -> dict:
+    def visualize_batch(
+        self,
+        batch: List[dict],
+        n_samples: int = 1,
+        distributed_all_ranks: bool = False,
+    ) -> dict:
         """Visualize action predictions plus any enabled aux heads."""
         if not isinstance(batch, list):
             batch = [batch]

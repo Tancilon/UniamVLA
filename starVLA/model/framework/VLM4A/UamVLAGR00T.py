@@ -9,11 +9,14 @@ Qwen-VL hidden state.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from collections import OrderedDict
 from typing import List
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from PIL import Image
 
@@ -283,7 +286,12 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
         return examples, pred_actions.detach().cpu().numpy(), hidden, batch_dict
 
     @torch.inference_mode()
-    def visualize_batch(self, batch: List[dict], n_samples: int = 1) -> dict:
+    def visualize_batch(
+        self,
+        batch: List[dict],
+        n_samples: int = 1,
+        distributed_all_ranks: bool = False,
+    ) -> dict:
         """Visualize action predictions plus enabled aux heads under GR00T keys."""
         if not isinstance(batch, list):
             batch = [batch]
@@ -334,6 +342,7 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
                 batch_dict,
                 num_samples=limit,
                 outputs=outputs,
+                distributed_all_ranks=distributed_all_ranks,
             )
         finally:
             if was_training:
@@ -345,6 +354,7 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
         batch_dict: dict,
         num_samples: int,
         outputs: dict,
+        distributed_all_ranks: bool = False,
     ) -> dict:
         """Append enabled aux-head visualizations under ``viz/uamvla_gr00t``."""
         if not self.aux_heads:
@@ -352,11 +362,39 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
 
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
+        profile = os.environ.get("UAMVLA_AUX_PROFILE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0") or 0)
         for name, head in self.aux_heads.items():
             if not hasattr(head, "visualize"):
                 continue
             try:
                 mask = self._resolve_head_mask(name, batch_dict, batch_size, device)
+                valid_count = int(mask.to(dtype=torch.bool).sum().item())
+                if distributed_all_ranks and dist.is_initialized():
+                    valid_any = torch.tensor([int(valid_count > 0)], device=device, dtype=torch.int32)
+                    dist.all_reduce(valid_any, op=dist.ReduceOp.MIN)
+                    if int(valid_any.item()) == 0:
+                        if profile:
+                            print(
+                                f"[uamvla-aux-profile][rank{rank}] "
+                                f"step=viz head={name} skip valid={valid_count}/{batch_size}",
+                                flush=True,
+                            )
+                        continue
+                if profile:
+                    print(
+                        f"[uamvla-aux-profile][rank{rank}] "
+                        f"step=viz head={name} start valid={valid_count}/{batch_size}",
+                        flush=True,
+                    )
+                    t_start = time.perf_counter()
+                else:
+                    t_start = None
                 kwargs = {}
                 if name == "pose":
                     kwargs["camera_params"] = getattr(head, "camera_params", None)
@@ -369,6 +407,12 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
                 )
                 for idx, image in enumerate(images or []):
                     outputs[f"viz/uamvla_gr00t/{name}_{idx}"] = image
+                if profile:
+                    print(
+                        f"[uamvla-aux-profile][rank{rank}] "
+                        f"step=viz head={name} done elapsed={time.perf_counter() - t_start:.3f}s",
+                        flush=True,
+                    )
             except Exception as exc:
                 logger.warning("UamVLAGR00T %s visualization failed: %s", name, exc)
         return outputs
