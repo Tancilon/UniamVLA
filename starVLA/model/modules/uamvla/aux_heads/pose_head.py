@@ -213,7 +213,7 @@ class PoseHead(AuxHead):
     ) -> HeadOutput:
         if not mask.any():
             return HeadOutput(
-                loss=self.get_dummy_loss(),
+                loss=self._zero_aligned_loss(hidden_states, batch),
                 metrics={"pose_loss": 0.0, "pose_translation_residual_mean": 0.0},
                 predictions=None,
             )
@@ -298,6 +298,61 @@ class PoseHead(AuxHead):
             },
             predictions=None,
         )
+
+    def _zero_aligned_loss(self, hidden_states: torch.Tensor, batch: dict) -> torch.Tensor:
+        """Run a zero-weight dummy path so ZeRO-3 collectives stay aligned."""
+        if hidden_states.shape[0] == 0:
+            return self.get_dummy_loss()
+
+        device = hidden_states.device
+        score_dtype = self._get_score_dtype()
+        dummy_batch = 2
+        hidden_dummy = hidden_states[:1].expand(dummy_batch, -1, -1).contiguous()
+
+        point_dim = 3
+        point_cloud = batch.get("point_cloud")
+        if torch.is_tensor(point_cloud) and point_cloud.ndim >= 3:
+            point_dim = int(point_cloud.shape[-1])
+        dummy_point_cloud = torch.zeros(
+            dummy_batch,
+            1024,
+            point_dim,
+            device=device,
+            dtype=hidden_states.dtype,
+        )
+        dummy_mask = torch.ones(dummy_batch, dtype=torch.bool, device=device)
+
+        semantic_feat, pts_feat, _, _ = self._prepare_score_inputs(
+            hidden_states=hidden_dummy,
+            point_cloud=dummy_point_cloud,
+            mask=dummy_mask,
+            score_dtype=score_dtype,
+        )
+
+        semantic_feat_rep = semantic_feat.repeat(self.repeat_num, 1)
+        pts_feat_rep = pts_feat.repeat(self.repeat_num, 1)
+        B_rep = dummy_batch * self.repeat_num
+        sampled_pose = torch.zeros(
+            B_rep,
+            self.pose_dim,
+            device=device,
+            dtype=score_dtype,
+        )
+        random_t = torch.full(
+            (B_rep, 1),
+            float(self.sde_eps),
+            device=device,
+            dtype=score_dtype,
+        )
+        score = self.score_net(
+            {
+                "semantic_feat": semantic_feat_rep,
+                "pts_feat": pts_feat_rep,
+                "sampled_pose": sampled_pose,
+                "t": random_t,
+            }
+        )
+        return score.mean().to(hidden_states.dtype) * 0.0
 
     def predict(
         self,
