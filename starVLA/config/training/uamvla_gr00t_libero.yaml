@@ -94,6 +94,7 @@ framework:
       action_embed_dim: 512
       action_encoder_heads: 8
       action_dropout: 0.1
+      film_hidden_dim: 512
       target_frame_offset: future_action_window_size
     grounding:
       enabled: false

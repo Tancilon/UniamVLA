@@ -113,8 +113,12 @@ def test_action_conditioned_future_uses_action_film_condition():
         action_embed_dim=8,
         action_encoder_heads=2,
         action_dropout=0.0,
+        film_hidden_dim=2,
         denoiser=_FakeDenoiser(),
     )
+    assert isinstance(head.film, nn.Sequential)
+    assert head.film[1].out_features == 2
+    assert head.film[-1].out_features == 8
     hidden = torch.randn(2, 4, 4)
     batch = {
         "input_ids": torch.full((2, 4), 99, dtype=torch.long),
@@ -143,6 +147,7 @@ def test_action_conditioned_future_rejects_grid_mismatch():
         action_embed_dim=8,
         action_encoder_heads=2,
         action_dropout=0.0,
+        film_hidden_dim=2,
         denoiser=_FakeDenoiser(),
     )
     hidden = torch.randn(1, 4, 4)
@@ -170,6 +175,7 @@ def test_action_conditioned_future_empty_mask_returns_dummy_loss():
         action_encoder_layers=1,
         action_embed_dim=8,
         action_encoder_heads=2,
+        film_hidden_dim=2,
         denoiser=denoiser,
     )
     out = head.compute_loss(
@@ -205,6 +211,7 @@ def test_action_conditioned_future_visualizes_gt_vs_pred(monkeypatch):
         action_embed_dim=8,
         action_encoder_heads=2,
         action_dropout=0.0,
+        film_hidden_dim=2,
         denoiser=_FakeDenoiser(),
     )
     hidden = torch.zeros(2, 4, 4)

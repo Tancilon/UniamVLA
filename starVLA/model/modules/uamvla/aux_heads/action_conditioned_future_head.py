@@ -36,6 +36,7 @@ class ActionConditionedFutureHead(AuxHead):
         action_embed_dim: int = 512,
         action_encoder_heads: int = 8,
         action_dropout: float = 0.1,
+        film_hidden_dim: int = 512,
         denoiser: nn.Module | None = None,
         **kwargs,
     ) -> None:
@@ -49,6 +50,9 @@ class ActionConditionedFutureHead(AuxHead):
         self.target_resize = int(target_resize)
         self.action_horizon = int(action_horizon)
         self.action_dropout = float(action_dropout)
+        self.film_hidden_dim = int(film_hidden_dim)
+        if self.film_hidden_dim <= 0:
+            raise ValueError(f"film_hidden_dim must be positive, got {film_hidden_dim}")
 
         self.register_buffer(
             "image_mean",
@@ -70,7 +74,12 @@ class ActionConditionedFutureHead(AuxHead):
             num_heads=action_encoder_heads,
             max_horizon=action_horizon,
         )
-        self.film = nn.Linear(hidden_size, 2 * hidden_size)
+        self.film = nn.Sequential(
+            nn.LayerNorm(hidden_size, elementwise_affine=False),
+            nn.Linear(hidden_size, self.film_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.film_hidden_dim, 2 * hidden_size),
+        )
 
         x_channel = vae.latent_channels * 4
         self.denoiser = denoiser or ReconDenoiser(
