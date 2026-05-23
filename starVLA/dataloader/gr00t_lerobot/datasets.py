@@ -1368,6 +1368,7 @@ class LeRobotSingleDataset(Dataset):
         raw_data = self.get_step_data(trajectory_id, base_index)
         raw_data["__trajectory_id"] = int(trajectory_id)
         raw_data["__base_index"] = int(base_index)
+        raw_data["__dataset_name"] = self.dataset_name
         data = self.transforms(raw_data)
         return self._pack_sample(data)
 
@@ -1422,6 +1423,8 @@ class LeRobotSingleDataset(Dataset):
             sample["__trajectory_id"] = int(data["__trajectory_id"])
         if "__base_index" in data:
             sample["__base_index"] = int(data["__base_index"])
+        if "__dataset_name" in data:
+            sample["__dataset_name"] = str(data["__dataset_name"])
 
         return sample
 
@@ -2406,6 +2409,7 @@ class LeRobotMixtureDataset(Dataset):
                 # per-step point_cloud / image_target sidecar files.
                 raw_data["__trajectory_id"] = int(trajectory_id)
                 raw_data["__base_index"] = int(step)
+                raw_data["__dataset_name"] = dataset.dataset_name
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
                 sample["robot_tag"] = dataset.tag

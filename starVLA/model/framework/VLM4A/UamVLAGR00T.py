@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -72,14 +71,10 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
 
     def _init_uamvla_sidecars(self) -> None:
         """Initialize the UAMVLA sidecar state used by inherited helpers."""
-        from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
-
-        mixture = DATASET_NAMED_MIXTURES[self.config.datasets.vla_data.data_mix]
-        dataset_name = mixture[0][0]
-        self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
+        self._init_uamvla_sidecar_roots()
         self._init_lerobot_video_path_config()
 
-        self._image_target_cache: "OrderedDict[tuple[int, int], torch.Tensor]" = OrderedDict()
+        self._image_target_cache: "OrderedDict[tuple[str, int, int], torch.Tensor]" = OrderedDict()
         self._image_target_cache_maxsize = int(
             self.config.datasets.vla_data.get("image_target_cache_maxsize", 256)
         )

@@ -32,8 +32,10 @@ def test_aux_sidecar_paths_and_collate_masks(tmp_path):
         "static_cam_trans": [30, 33],
     }
     model._image_target_cache = {}
-    model._load_image_future = lambda traj, base: None
-    model._load_image_action_future = lambda traj, base: torch.ones(3, 8, 8)
+    model._load_image_future = lambda traj, base, sidecar_root=None: None
+    model._load_image_action_future = (
+        lambda traj, base, sidecar_root=None: torch.ones(3, 8, 8)
+    )
 
     for subdir, value in [
         ("depths/static/3", np.ones((4, 4), dtype=np.float32)),
@@ -64,11 +66,53 @@ def test_aux_sidecar_paths_and_collate_masks(tmp_path):
         [out, {"action": torch.zeros(8, 7)}],
         {"input_ids": torch.zeros(2, 4, dtype=torch.long)},
     )
+    assert torch.equal(batch["pose_mask"], torch.tensor([False, False]))
     assert torch.equal(batch["depth_mask"], torch.tensor([True, False]))
     assert torch.equal(batch["grounding_mask_mask"], torch.tensor([True, False]))
     assert torch.equal(batch["affordance_mask"], torch.tensor([True, False]))
     assert torch.equal(batch["action_conditioned_future_mask"], torch.tensor([True, False]))
     assert batch["grounding_level"] == ["object", ""]
+
+
+def test_aux_sidecar_lookup_uses_dataset_name_root(tmp_path):
+    model = object.__new__(UamVLAOFT)
+    wrong_root = tmp_path / "lerobot_libero_spatial"
+    right_root = tmp_path / "lerobot_libero_goal"
+    model.sidecar_root = wrong_root
+    model.sidecar_roots = {
+        "lerobot_libero_spatial": wrong_root,
+        "lerobot_libero_goal": right_root,
+    }
+    model.aux_state_slice = {
+        "target_pose_rot6d": [15, 21],
+        "target_pose_trans": [21, 24],
+        "static_cam_rot6d": [24, 30],
+        "static_cam_trans": [30, 33],
+    }
+    model._image_target_cache = {}
+    model._image_target_cache_maxsize = 16
+    model._load_image_future = lambda traj, base, sidecar_root=None: None
+    model._load_image_action_future = lambda traj, base, sidecar_root=None: None
+
+    pc_dir = right_root / "point_clouds" / "3"
+    pc_dir.mkdir(parents=True)
+    expected = np.full((1024, 3), 7.0, dtype=np.float32)
+    np.save(pc_dir / "5.npy", expected)
+
+    sample = {
+        "__dataset_name": "lerobot_libero_goal",
+        "__trajectory_id": 3,
+        "__base_index": 5,
+        "image": [],
+        "lang": "open drawer",
+        "action": np.zeros((8, 7), dtype=np.float32),
+        "state": np.zeros((1, 33), dtype=np.float32),
+    }
+
+    out = UamVLAOFT._unpack_lerobot_sample(model, sample)
+
+    assert "point_cloud" in out
+    assert torch.equal(out["point_cloud"], torch.as_tensor(expected))
 
 
 def test_grounding_head_key_matches_grounding_mask_presence_mask(monkeypatch):

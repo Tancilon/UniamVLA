@@ -87,14 +87,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 f"or replace 🔍 with a registered special token."
             )
 
-        # ── Sidecar root for point_cloud / image_target lookup ──────
-        # Resolve via the mixture registry so the framework tracks
-        # whichever dataset directory was registered (e.g. *_SMOKE vs
-        # full ABCD).
-        from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
-        mixture = DATASET_NAMED_MIXTURES[self.config.datasets.vla_data.data_mix]
-        dataset_name = mixture[0][0] # name: lerobot_calvin_abcd
-        self.sidecar_root = Path(self.config.datasets.vla_data.data_root_dir) / dataset_name
+        self._init_uamvla_sidecar_roots()
         self._init_lerobot_video_path_config()
 
         # Per-frame image_target cache (one PNG per trajectory/base index).
@@ -102,7 +95,7 @@ class UamVLAOFT(Qwenvl_OFT):
         # datasets (many frame crops per trajectory; cap bounds worker memory).
         # 256 entries ≈ 120 MB per worker — comfortable headroom even for 16 workers.
         from collections import OrderedDict
-        self._image_target_cache: "OrderedDict[tuple[int, int], torch.Tensor]" = (
+        self._image_target_cache: "OrderedDict[tuple[str, int, int], torch.Tensor]" = (
             OrderedDict()
         )
         self._image_target_cache_maxsize = int(
@@ -126,6 +119,27 @@ class UamVLAOFT(Qwenvl_OFT):
         self.aux_heads = nn.ModuleDict()
         self._maybe_build_aux_heads()
         self._maybe_build_aux_loss_control()
+
+    def _init_uamvla_sidecar_roots(self) -> None:
+        """Resolve sidecar roots for every dataset in the active LeRobot mix."""
+        from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
+
+        mixture = DATASET_NAMED_MIXTURES[self.config.datasets.vla_data.data_mix]
+        data_root = Path(self.config.datasets.vla_data.data_root_dir)
+        self.sidecar_roots = {
+            dataset_name: data_root / dataset_name
+            for dataset_name, _, _ in mixture
+        }
+        self.sidecar_root = self.sidecar_roots[mixture[0][0]]
+
+    def _sidecar_root_for_sample(self, sample: dict) -> Path:
+        dataset_name = sample.get("__dataset_name")
+        roots = getattr(self, "sidecar_roots", None)
+        if dataset_name is not None and roots is not None:
+            root = roots.get(str(dataset_name))
+            if root is not None:
+                return root
+        return self.sidecar_root
 
     # ──────────────────────────────────────────────────────────────────
     #  Aux heads (no-op in PR 4)
@@ -453,15 +467,16 @@ class UamVLAOFT(Qwenvl_OFT):
         # ── Sidecar IO ──────────────────────────────────────────────
         traj = int(sample["__trajectory_id"])
         base = int(sample["__base_index"])
+        sidecar_root = self._sidecar_root_for_sample(sample)
 
-        pc_path = self.sidecar_root / "point_clouds" / str(traj) / f"{base}.npy"
+        pc_path = sidecar_root / "point_clouds" / str(traj) / f"{base}.npy"
         if pc_path.exists():
             pc = np.load(pc_path)
             out["point_cloud"] = torch.as_tensor(pc, dtype=torch.float32)
 
-        image_target_key = (traj, base)
+        image_target_key = (str(sidecar_root), traj, base)
         if image_target_key not in self._image_target_cache:
-            it_path = self.sidecar_root / "image_targets" / str(traj) / f"{base}.png"
+            it_path = sidecar_root / "image_targets" / str(traj) / f"{base}.png"
             if it_path.exists():
                 arr = np.array(Image.open(it_path).convert("RGB"), dtype=np.uint8)
                 self._image_target_cache[image_target_key] = (
@@ -477,24 +492,26 @@ class UamVLAOFT(Qwenvl_OFT):
 
         # image_future: load the terminal primary frame of this task episode.
         # Each CALVIN LeRobot episode corresponds to one language task window.
-        future_tensor = self._load_image_future(traj, base)
+        future_tensor = self._load_image_future(traj, base, sidecar_root=sidecar_root)
         if future_tensor is not None:
             out["image_future"] = future_tensor
 
-        depth = self._load_depth_target(traj, base)
+        depth = self._load_depth_target(traj, base, sidecar_root=sidecar_root)
         if depth is not None:
             out["depth_target"] = depth
 
-        grounding = self._load_grounding_mask(traj, base)
+        grounding = self._load_grounding_mask(traj, base, sidecar_root=sidecar_root)
         if grounding is not None:
             out["grounding_mask"] = grounding["mask"]
             out["grounding_level"] = grounding["level"]
 
-        affordance = self._load_affordance_heatmap(traj, base)
+        affordance = self._load_affordance_heatmap(traj, base, sidecar_root=sidecar_root)
         if affordance is not None:
             out["affordance_heatmap"] = affordance
 
-        image_action_future = self._load_image_action_future(traj, base)
+        image_action_future = self._load_image_action_future(
+            traj, base, sidecar_root=sidecar_root,
+        )
         if image_action_future is not None:
             out["image_action_future"] = image_action_future
         return out
@@ -530,14 +547,16 @@ class UamVLAOFT(Qwenvl_OFT):
             info.get("video_path", _DEFAULT_LEROBOT_VIDEO_PATH_PATTERN)
         )
 
-    def _image_future_video_path(self, trajectory_id: int) -> Path:
+    def _image_future_video_path(
+        self, trajectory_id: int, sidecar_root: Path | None = None,
+    ) -> Path:
         episode_chunk = int(trajectory_id) // self._lerobot_chunks_size
         video_filename = self._lerobot_video_path_pattern.format(
             episode_chunk=episode_chunk,
             episode_index=int(trajectory_id),
             video_key="video.primary_image",
         )
-        return self.sidecar_root / video_filename
+        return (sidecar_root or self.sidecar_root) / video_filename
 
     @staticmethod
     def _image_future_frame_index(video_length: int) -> int | None:
@@ -556,13 +575,25 @@ class UamVLAOFT(Qwenvl_OFT):
             arr = np.moveaxis(arr, -1, 0)
         return torch.as_tensor(arr, dtype=torch.float32)
 
-    def _load_depth_target(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
-        path = self.sidecar_root / "depths" / "static" / str(trajectory_id) / f"{base_index}.npy"
+    def _load_depth_target(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+    ) -> torch.Tensor | None:
+        root = sidecar_root or self.sidecar_root
+        path = root / "depths" / "static" / str(trajectory_id) / f"{base_index}.npy"
         return self._load_npy_sidecar(path)
 
-    def _load_grounding_mask(self, trajectory_id: int, base_index: int) -> dict | None:
+    def _load_grounding_mask(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+    ) -> dict | None:
+        root = sidecar_root or self.sidecar_root
         mask_path = (
-            self.sidecar_root
+            root
             / "grounding_masks"
             / "static"
             / str(trajectory_id)
@@ -582,9 +613,15 @@ class UamVLAOFT(Qwenvl_OFT):
                 logger.warning("Failed to load grounding metadata %s: %s", meta_path, exc)
         return {"mask": mask, "level": level}
 
-    def _load_affordance_heatmap(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+    def _load_affordance_heatmap(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+    ) -> torch.Tensor | None:
+        root = sidecar_root or self.sidecar_root
         path = (
-            self.sidecar_root
+            root
             / "affordance_heatmaps"
             / "static"
             / str(trajectory_id)
@@ -890,13 +927,18 @@ class UamVLAOFT(Qwenvl_OFT):
                 logger.warning("UamVLAOFT %s visualization failed: %s", name, exc)
         return outputs
 
-    def _load_image_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+    def _load_image_future(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+    ) -> torch.Tensor | None:
         """Read the task episode's terminal primary video frame.
 
         Returns CHW float in [-1, 1] (matching VAE input normalization spec
         in :meth:`FutureHead._normalize_for_vae`).
         """
-        video_path = self._image_future_video_path(trajectory_id)
+        video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
         if not video_path.exists():
             return None
         try:
@@ -919,9 +961,14 @@ class UamVLAOFT(Qwenvl_OFT):
             )
             return None
 
-    def _load_image_action_future(self, trajectory_id: int, base_index: int) -> torch.Tensor | None:
+    def _load_image_action_future(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+    ) -> torch.Tensor | None:
         """Read the local future frame aligned to the current action chunk."""
-        video_path = self._image_future_video_path(trajectory_id)
+        video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
         if not video_path.exists():
             return None
         try:
@@ -1059,6 +1106,11 @@ class UamVLAOFT(Qwenvl_OFT):
         if pose_out is not None:
             batch_dict["pose_gt"] = pose_out["pose_gt"]
             batch_dict["pose_mask"] = pose_out["pose_mask"]
+            point_cloud_mask = batch_dict.get("point_cloud_mask")
+            if point_cloud_mask is None:
+                batch_dict["pose_mask"] = torch.zeros_like(batch_dict["pose_mask"])
+            else:
+                batch_dict["pose_mask"] = batch_dict["pose_mask"] & point_cloud_mask
 
         cam_out = stack_static_cam_extrinsic(examples)
         if cam_out is not None:
