@@ -311,10 +311,14 @@ def symlink_episodes_in_range(
         src = src_dir / name
         if not src.exists():
             continue
+        resolved_src = src.resolve()
         dst = dst_dir / name
+        if dst.is_symlink() and dst.resolve() == resolved_src:
+            n += 1
+            continue
         if dst.exists() or dst.is_symlink():
             dst.unlink()
-        os.symlink(src.resolve(), dst)
+        os.symlink(resolved_src, dst)
         n += 1
     return n
 

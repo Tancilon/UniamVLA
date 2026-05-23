@@ -145,6 +145,37 @@ def test_splitter_only_links_episodes_in_range(tmp_path):
     assert b_eps == ["episode_0000110.npz"]
 
 
+def test_symlink_episodes_in_range_skips_existing_correct_symlink(tmp_path, monkeypatch):
+    from tools.preprocess import calvin_scene_splitter as splitter
+
+    src_dir = tmp_path / "src"
+    dst_dir = tmp_path / "dst"
+    src_dir.mkdir()
+    dst_dir.mkdir()
+    src = src_dir / "episode_0000000.npz"
+    src.write_bytes(b"frame")
+    dst = dst_dir / "episode_0000000.npz"
+    dst.symlink_to(src.resolve())
+
+    calls = []
+
+    def fail_if_recreated(src_path, dst_path):
+        calls.append((src_path, dst_path))
+        raise AssertionError("existing correct symlink should not be rebuilt")
+
+    monkeypatch.setattr(splitter.os, "symlink", fail_if_recreated)
+
+    n_links = splitter.symlink_episodes_in_range(
+        src_dir=src_dir,
+        dst_dir=dst_dir,
+        frame_range=(0, 0),
+    )
+
+    assert n_links == 1
+    assert calls == []
+    assert dst.resolve() == src.resolve()
+
+
 def test_filter_lang_annotations_drops_episodes_field(tmp_path):
     """Real CALVIN dumps include `info.episodes` whose length is NOT
     parallel to `info.indx` (semantics differ by version). Earlier
