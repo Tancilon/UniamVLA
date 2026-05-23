@@ -1,7 +1,26 @@
 from __future__ import annotations
 
+import os
+import time
+
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return int(dist.get_rank())
+    return int(os.environ.get("RANK", "0") or 0)
+
+
+def _cuda_synchronize(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
 
 
 class AuxDenoisingSuite(nn.Module):
@@ -49,10 +68,29 @@ class AuxDenoisingSuite(nn.Module):
         dtype = action_loss.dtype
         losses: dict[str, torch.Tensor] = {}
         metrics: dict[str, torch.Tensor | float] = {}
+        profile = _env_flag("UAMVLA_AUX_PROFILE")
+        profile_rank = _rank()
 
         for name, head in self.heads.items():
             mask = masks[name]
+            if profile:
+                valid = int(mask.detach().sum().item()) if torch.is_tensor(mask) else -1
+                _cuda_synchronize(device)
+                head_start = time.perf_counter()
+                print(
+                    f"[uamvla-aux-profile][rank{profile_rank}] "
+                    f"step={global_step} head={name} start valid={valid}/{len(mask)}",
+                    flush=True,
+                )
             out = head.compute_loss(hidden_states, batch, mask=mask)
+            if profile:
+                _cuda_synchronize(device)
+                elapsed = time.perf_counter() - head_start
+                print(
+                    f"[uamvla-aux-profile][rank{profile_rank}] "
+                    f"step={global_step} head={name} done elapsed={elapsed:.3f}s",
+                    flush=True,
+                )
             if out.loss is None:
                 continue
             losses[name] = out.loss

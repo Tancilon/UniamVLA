@@ -423,22 +423,62 @@ class VLATrainer(TrainerUtils):
 
     def _train_step(self, batch_vla, batch_vlm=None):
         """Execute single training step."""
-        with self.accelerator.accumulate(self.model):
-            self.optimizer.zero_grad()
+        profile = os.environ.get("UAMVLA_TRAIN_STEP_PROFILE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0") or 0)
 
+        def _sync() -> None:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+        def _mark(stage: str, start: float | None = None) -> float:
+            if profile:
+                _sync()
+                now = time.perf_counter()
+                elapsed = "" if start is None else f" elapsed={now - start:.3f}s"
+                print(
+                    f"[uamvla-train-profile][rank{rank}] "
+                    f"step={self.completed_steps} {stage}{elapsed}",
+                    flush=True,
+                )
+                return now
+            return time.perf_counter()
+
+        with self.accelerator.accumulate(self.model):
+            t0 = _mark("zero_grad:start")
+            self.optimizer.zero_grad()
+            t0 = _mark("zero_grad:done", t0)
+
+            t0 = _mark("forward:start")
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
+                output_dict = self.model.forward(
+                    batch_vla,
+                    global_step=self.completed_steps,
+                )
                 action_loss = output_dict["action_loss"]
                 total_loss = action_loss
+            t0 = _mark("forward:done", t0)
 
+            t0 = _mark("backward:start")
             self.accelerator.backward(total_loss)
+            t0 = _mark("backward:done", t0)
 
             if self.config.trainer.gradient_clipping is not None:
+                t0 = _mark("clip_grad:start")
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+                t0 = _mark("clip_grad:done", t0)
 
+            t0 = _mark("optimizer_step:start")
             self.optimizer.step()
+            t0 = _mark("optimizer_step:done", t0)
             if self.accelerator.sync_gradients:
+                t0 = _mark("scheduler_step:start")
                 self.lr_scheduler.step()
+                _mark("scheduler_step:done", t0)
 
         return _collect_forward_scalar_metrics(output_dict)
 

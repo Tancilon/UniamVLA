@@ -1,5 +1,6 @@
 import sys
 
+import pytest
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -109,6 +110,33 @@ def test_action_conditioned_future_uses_action_film_condition():
     assert out.loss is not None
     assert out.metrics["valid_ratio"] == 1.0
     assert head.denoiser.last_z.shape == (2, 4, 2, 2)
+
+
+def test_action_conditioned_future_rejects_grid_mismatch():
+    head = ActionConditionedFutureHead(
+        hidden_size=4,
+        vae=_FakeVAE(),
+        image_mean=[0.5, 0.5, 0.5],
+        image_std=[0.5, 0.5, 0.5],
+        image_token_id=99,
+        patches_per_view=4,
+        action_dim=7,
+        action_horizon=8,
+        target_resize=16,
+        action_encoder_layers=1,
+        action_embed_dim=8,
+        action_encoder_heads=2,
+        action_dropout=0.0,
+        denoiser=_FakeDenoiser(),
+    )
+    hidden = torch.randn(1, 4, 4)
+    batch = {
+        "input_ids": torch.full((1, 4), 99, dtype=torch.long),
+        "action": torch.randn(1, 8, 7),
+        "image_action_future": torch.rand(1, 3, 32, 32),
+    }
+    with pytest.raises(RuntimeError, match="condition/target grid mismatch"):
+        head.compute_loss(hidden, batch, torch.tensor([True]))
 
 
 def test_action_conditioned_future_empty_mask_returns_dummy_loss():

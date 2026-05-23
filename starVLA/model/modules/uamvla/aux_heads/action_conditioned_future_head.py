@@ -147,6 +147,15 @@ class ActionConditionedFutureHead(AuxHead):
             future_vae = self._normalize_for_vae(future_images)
             z_q = self._encode_to_latent(future_vae)
 
+        if fused_cond.shape[-2:] != z_q.shape[-2:]:
+            raise RuntimeError(
+                "ActionConditionedFutureHead condition/target grid mismatch: "
+                f"condition grid={tuple(fused_cond.shape[-2:])}, "
+                f"target latent grid={tuple(z_q.shape[-2:])}. "
+                "The current UamVLA aux design expects a unified 20x20 grid; "
+                "with the bundled Flux VAE this corresponds to target_resize=320."
+            )
+
         repeated_cond = fused_cond.repeat(self.repeat_factor, 1, 1, 1).contiguous().float()
         repeated_target = z_q.repeat(self.repeat_factor, 1, 1, 1).contiguous().float()
         loss = self.denoiser(z=repeated_cond, target=repeated_target)
