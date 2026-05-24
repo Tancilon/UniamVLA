@@ -1,24 +1,35 @@
-#!/bin/bash
-export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools from main repo
-# === Paths (adapted for this cluster) ===
-STARVLA_DIR=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UniamVLA
-LIBERO_HOME=/home/jye624/Projcets/LIBERO
-STARVLA_PYTHON=$(conda run -n uamvla which python)
-LIBERO_PYTHON=/home/jye624/.conda/envs/libero/bin/python
+#!/usr/bin/env bash
+set -euo pipefail
 
-# === Checkpoint ===
-CKPT=${STARVLA_DIR}/playground/Checkpoints/uamvla_libero_phase1/checkpoints/steps_50000_pytorch_model.pt
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STARVLA_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${STARVLA_DIR}"
 
-export star_vla_python=${STARVLA_PYTHON}
-your_ckpt=${CKPT}   
-gpu_id=0
-port=6694
-################# star Policy Server ######################
+DEFAULT_CKPT="${STARVLA_DIR}/playground/Checkpoints/uamvla_gr00t_libero_8b_h8_no_pose_bs128/checkpoints/steps_5000_pytorch_model.pt"
 
-# export DEBUG=true
-CUDA_VISIBLE_DEVICES=$gpu_id ${star_vla_python} deployment/model_server/server_policy.py \
-    --ckpt_path ${your_ckpt} \
-    --port ${port} \
-    --use_bf16
+CKPT="${CKPT:-${DEFAULT_CKPT}}"
+GPU_ID="${GPU_ID:-0}"
+PORT="${PORT:-6694}"
+STARVLA_PYTHON="${STARVLA_PYTHON:-conda run -n uamvla python}"
 
-# #################################
+if [[ ! -f "${CKPT}" ]]; then
+  echo "[ERROR] Checkpoint not found: ${CKPT}" >&2
+  exit 1
+fi
+
+export PYTHONPATH="${STARVLA_DIR}:${PYTHONPATH:-}"
+
+echo "=========================================="
+echo " UamVLA LIBERO policy server"
+echo "=========================================="
+echo " STARVLA_DIR    : ${STARVLA_DIR}"
+echo " CKPT           : ${CKPT}"
+echo " GPU_ID         : ${GPU_ID}"
+echo " PORT           : ${PORT}"
+echo " STARVLA_PYTHON : ${STARVLA_PYTHON}"
+echo "=========================================="
+
+CUDA_VISIBLE_DEVICES="${GPU_ID}" ${STARVLA_PYTHON} deployment/model_server/server_policy.py \
+  --ckpt_path "${CKPT}" \
+  --port "${PORT}" \
+  --use_bf16
