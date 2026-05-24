@@ -33,7 +33,7 @@ if [[ -n "${GPU_ID:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 fi
 
-CONFIG_YAML="${CONFIG_YAML:-./starVLA/config/training/uamvla_gr00t_calvin_d.yaml}"
+CONFIG_YAML="${CONFIG_YAML:-./starVLA/config/training/uamvla_gr00t_calvin.yaml}"
 NUM_GPUS="${NUM_GPUS:-8}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-starVLA/config/deepseeds/deepspeed_zero2.yaml}"
