@@ -1,44 +1,61 @@
-#!/bin/bash
-# === Paths (adapted for this cluster) ===
-STARVLA_DIR=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UniamVLA
+#!/usr/bin/env bash
+set -euo pipefail
 
-cd ${STARVLA_DIR}
-# === Checkpoint ===
-CKPT=${STARVLA_DIR}/playground/Checkpoints/uamvla_libero_phase1/checkpoints/steps_50000_pytorch_model.pt
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STARVLA_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+cd "${STARVLA_DIR}"
 
-###########################################################################################
-# === Please modify the following paths according to your environment ===
-export LIBERO_HOME=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/LIBERO
-export LIBERO_CONFIG_PATH=${LIBERO_HOME}/libero
-export LIBERO_Python=$(conda run -n libero_env which python)
+DEFAULT_CKPT="${STARVLA_DIR}/playground/Checkpoints/uamvla_gr00t_libero_8b_h8_no_pose_bs128/checkpoints/steps_5000_pytorch_model.pt"
 
-export PYTHONPATH=$PYTHONPATH:${LIBERO_HOME} # let eval_libero find the LIBERO tools
-export PYTHONPATH=$(pwd):${PYTHONPATH} # let LIBERO find the websocket tools from main repo
+CKPT="${CKPT:-${DEFAULT_CKPT}}"
+LIBERO_HOME="${LIBERO_HOME:-${STARVLA_DIR}/../LIBERO}"
+LIBERO_PYTHON="${LIBERO_PYTHON:-conda run -n libero_env python}"
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-6694}"
+TASK_SUITE="${TASK_SUITE:-libero_spatial}"
+NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
 
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
+if [[ ! -f "${CKPT}" ]]; then
+  echo "[ERROR] Checkpoint not found: ${CKPT}" >&2
+  exit 1
+fi
 
-host="127.0.0.1"
-base_port=6694
-unnorm_key="franka"
-your_ckpt=${CKPT}
+if [[ ! -d "${LIBERO_HOME}" ]]; then
+  echo "[ERROR] LIBERO_HOME does not exist: ${LIBERO_HOME}" >&2
+  echo "Set LIBERO_HOME=/path/to/LIBERO and rerun." >&2
+  exit 1
+fi
 
-# export DEBUG=true
+export LIBERO_HOME
+export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
+export PYTHONPATH="${STARVLA_DIR}:${LIBERO_HOME}:${PYTHONPATH:-}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 
-folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
-# model_root: playground/Checkpoints/<run_id>
-model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
-# === End of environment variable configuration ===
-###########################################################################################
+folder_name="$(basename "$(dirname "$(dirname "${CKPT}")")")_$(basename "$(dirname "${CKPT}")")_$(basename "${CKPT}")"
+model_root="${CKPT%%/checkpoints/*}"
+video_out_path="${model_root}/results/${TASK_SUITE}/${folder_name}"
 
-task_suite_name=libero_spatial
-num_trials_per_task=50
-video_out_path="${model_root}/results/${task_suite_name}/${folder_name}"
+mkdir -p "${video_out_path}"
 
-${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
-    --args.pretrained-path ${your_ckpt} \
-    --args.host "$host" \
-    --args.port $base_port \
-    --args.task-suite-name "$task_suite_name" \
-    --args.num-trials-per-task "$num_trials_per_task" \
-    --args.video-out-path "$video_out_path"
+echo "=========================================="
+echo " LIBERO evaluator"
+echo "=========================================="
+echo " STARVLA_DIR          : ${STARVLA_DIR}"
+echo " CKPT                 : ${CKPT}"
+echo " LIBERO_HOME          : ${LIBERO_HOME}"
+echo " LIBERO_PYTHON        : ${LIBERO_PYTHON}"
+echo " HOST                 : ${HOST}"
+echo " PORT                 : ${PORT}"
+echo " TASK_SUITE           : ${TASK_SUITE}"
+echo " NUM_TRIALS_PER_TASK  : ${NUM_TRIALS_PER_TASK}"
+echo " VIDEO_OUT_PATH       : ${video_out_path}"
+echo "=========================================="
+
+${LIBERO_PYTHON} ./examples/LIBERO/eval_files/eval_libero.py \
+  --args.pretrained-path "${CKPT}" \
+  --args.host "${HOST}" \
+  --args.port "${PORT}" \
+  --args.task-suite-name "${TASK_SUITE}" \
+  --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
+  --args.video-out-path "${video_out_path}"
