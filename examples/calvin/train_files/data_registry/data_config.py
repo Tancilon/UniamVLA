@@ -101,6 +101,9 @@ DATASET_NAMED_MIXTURES = {
     "uamvla_calvin_abcd_h8": [
         ("lerobot_calvin_abcd", 1.0, "uamvla_calvin_franka_h8"),
     ],
+    "uamvla_calvin_abc_h8": [
+        ("lerobot_calvin_abc", 1.0, "uamvla_calvin_franka_h8"),
+    ],
     "uamvla_calvin_d_h8": [
         ("lerobot_calvin_d", 1.0, "uamvla_calvin_franka_h8"),
     ],

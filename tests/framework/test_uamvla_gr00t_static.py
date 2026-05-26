@@ -64,8 +64,8 @@ def _load_uamvla_gr00t_module(monkeypatch):
     return module
 
 
-def test_uamvla_gr00t_calvin_d_config_uses_horizon_8():
-    cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin_d.yaml").read_text())
+def test_uamvla_gr00t_calvin_config_uses_horizon_8():
+    cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin.yaml").read_text())
 
     assert cfg["framework"]["name"] == "UamVLAGR00T"
     assert cfg["framework"]["action_model"]["action_model_type"] == "DiT-B"
@@ -76,10 +76,44 @@ def test_uamvla_gr00t_calvin_d_config_uses_horizon_8():
     assert cfg["datasets"]["vla_data"]["data_mix"] == "uamvla_calvin_d_h8"
 
 
+def test_calvin_registry_contains_abc_h8_mix(monkeypatch):
+    datasets = types.ModuleType("starVLA.dataloader.gr00t_lerobot.datasets")
+
+    class _ModalityConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    datasets.ModalityConfig = _ModalityConfig
+    monkeypatch.setitem(sys.modules, "starVLA.dataloader.gr00t_lerobot.datasets", datasets)
+
+    base_transform = types.ModuleType("starVLA.dataloader.gr00t_lerobot.transform.base")
+    base_transform.ComposedModalityTransform = lambda transforms: transforms
+    monkeypatch.setitem(sys.modules, "starVLA.dataloader.gr00t_lerobot.transform.base", base_transform)
+
+    state_action = types.ModuleType("starVLA.dataloader.gr00t_lerobot.transform.state_action")
+    state_action.StateActionToTensor = lambda **kwargs: ("to_tensor", kwargs)
+    state_action.StateActionTransform = lambda **kwargs: ("transform", kwargs)
+    monkeypatch.setitem(sys.modules, "starVLA.dataloader.gr00t_lerobot.transform.state_action", state_action)
+
+    embodiment_tags = types.ModuleType("starVLA.dataloader.gr00t_lerobot.embodiment_tags")
+    embodiment_tags.EmbodimentTag = types.SimpleNamespace(FRANKA="franka")
+    monkeypatch.setitem(sys.modules, "starVLA.dataloader.gr00t_lerobot.embodiment_tags", embodiment_tags)
+
+    path = Path("examples/calvin/train_files/data_registry/data_config.py")
+    spec = importlib.util.spec_from_file_location("calvin_data_config_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    assert module.DATASET_NAMED_MIXTURES["uamvla_calvin_abc_h8"] == [
+        ("lerobot_calvin_abc", 1.0, "uamvla_calvin_franka_h8"),
+    ]
+
+
 def test_uamvla_gr00t_config_defines_aux_loss_control_and_new_heads():
-    cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin_d.yaml").read_text())
+    cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin.yaml").read_text())
     assert cfg["framework"]["aux_loss_control"]["enabled"] is True
-    assert cfg["framework"]["aux_loss_control"]["aux_budget"] == 1.0
+    assert cfg["framework"]["aux_loss_control"]["aux_budget"] == 0.5
     assert "warmup_steps" not in cfg["framework"]["aux_loss_control"]
     assert "aux_ratio_cap" not in cfg["framework"]["aux_loss_control"]
     assert "action_loss_ema_beta" not in cfg["framework"]["aux_loss_control"]
