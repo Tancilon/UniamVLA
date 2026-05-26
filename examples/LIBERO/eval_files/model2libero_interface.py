@@ -16,7 +16,31 @@ import yaml
 
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 from examples.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
-from starVLA.model.tools import read_mode_config
+
+
+def read_mode_config(pretrained_checkpoint):
+    checkpoint_pt = Path(pretrained_checkpoint)
+    if not checkpoint_pt.is_file():
+        raise FileNotFoundError(f"Pretrained checkpoint does not exist: {checkpoint_pt}")
+
+    run_dir = checkpoint_pt.parents[1]
+    config_yaml = run_dir / "config.yaml"
+    dataset_statistics_json = run_dir / "dataset_statistics.json"
+    if not config_yaml.exists():
+        raise FileNotFoundError(f"Missing config.yaml for run dir: {run_dir}")
+    if not dataset_statistics_json.exists():
+        raise FileNotFoundError(f"Missing dataset_statistics.json for run dir: {run_dir}")
+
+    with open(config_yaml) as f:
+        model_config = yaml.safe_load(f)
+    with open(dataset_statistics_json) as f:
+        norm_stats = json.load(f)
+
+    action_model = model_config.get("framework", {}).get("action_model", {})
+    if "future_action_window_size" not in action_model and "action_horizon" in action_model:
+        action_model["future_action_window_size"] = int(action_model["action_horizon"]) - 1
+
+    return model_config, norm_stats
 
 
 def _to_numpy_leaves(d: dict) -> dict:

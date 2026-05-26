@@ -12,6 +12,8 @@ export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
 export PYTHONPATH="${STARVLA_DIR}:${LIBERO_HOME}:${PYTHONPATH:-}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/tmp/libero_numba_cache}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/libero_mpl_config}"
 
 LIBERO_PYTHON="${LIBERO_PYTHON:-conda run -n libero_env python}"
 STARVLA_PYTHON="${STARVLA_PYTHON:-conda run -n uamvla python}"
@@ -37,6 +39,26 @@ if [[ ! -d "${LIBERO_HOME}" ]]; then
   echo "[ERROR] LIBERO_HOME does not exist: ${LIBERO_HOME}" >&2
   echo "Set LIBERO_HOME=/path/to/LIBERO and rerun." >&2
   exit 1
+fi
+
+LIBERO_NCCL_SO="${LIBERO_NCCL_SO:-$(${LIBERO_PYTHON} -c 'import site; from pathlib import Path; matches=[]; [matches.append(Path(base) / "nvidia" / "nccl" / "lib" / "libnccl.so.2") for base in site.getsitepackages() if (Path(base) / "nvidia" / "nccl" / "lib" / "libnccl.so.2").exists()]; print(matches[0] if matches else "")')}"
+LIBERO_LD_PRELOAD="${LD_PRELOAD:-}"
+if [[ -n "${LIBERO_NCCL_SO}" && -f "${LIBERO_NCCL_SO}" ]]; then
+  LIBERO_LD_PRELOAD="${LIBERO_NCCL_SO}${LIBERO_LD_PRELOAD:+:${LIBERO_LD_PRELOAD}}"
+fi
+
+LIBERO_BENCHMARK_ROOT="${LIBERO_HOME}/libero/libero"
+LIBERO_CONFIG_FILE="${LIBERO_CONFIG_PATH}/config.yaml"
+if [[ ! -f "${LIBERO_CONFIG_FILE}" ]]; then
+  mkdir -p "${LIBERO_CONFIG_PATH}"
+  {
+    echo "assets: ${LIBERO_BENCHMARK_ROOT}/assets"
+    echo "bddl_files: ${LIBERO_BENCHMARK_ROOT}/bddl_files"
+    echo "benchmark_root: ${LIBERO_BENCHMARK_ROOT}"
+    echo "datasets: ${LIBERO_BENCHMARK_ROOT}/../datasets"
+    echo "init_states: ${LIBERO_BENCHMARK_ROOT}/init_files"
+  } > "${LIBERO_CONFIG_FILE}"
+  echo "Initialized LIBERO config: ${LIBERO_CONFIG_FILE}"
 fi
 
 server_pid=""
@@ -68,6 +90,7 @@ echo " HOST                 : ${host}"
 echo " PORT                 : ${base_port}"
 echo " LIBERO_HOME          : ${LIBERO_HOME}"
 echo " LIBERO_PYTHON        : ${LIBERO_PYTHON}"
+echo " LIBERO_NCCL_SO       : ${LIBERO_NCCL_SO:-<not found>}"
 echo " STARVLA_PYTHON       : ${STARVLA_PYTHON}"
 echo " VIDEO_OUT_PATH       : ${video_out_path}"
 echo " LOG_PATH             : ${log_path}/${folder_name}.log"
@@ -80,7 +103,7 @@ CUDA_VISIBLE_DEVICES="${gpu_id}" ${STARVLA_PYTHON} deployment/model_server/serve
 
 server_pid=$!
 
-${LIBERO_PYTHON} ./examples/LIBERO/eval_files/eval_libero.py \
+DEBUG="${LIBERO_DEBUG:-}" LD_PRELOAD="${LIBERO_LD_PRELOAD}" ${LIBERO_PYTHON} ./examples/LIBERO/eval_files/eval_libero.py \
   --args.pretrained-path "${your_ckpt}" \
   --args.host "${host}" \
   --args.port "${base_port}" \
