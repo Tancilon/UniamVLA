@@ -66,7 +66,7 @@ framework:
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
     recon:
       enabled: false
       loss_weight: 1.0
@@ -75,7 +75,7 @@ framework:
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
     depth:
       enabled: false
       loss_weight: 1.0
@@ -84,7 +84,7 @@ framework:
       target_size: 10
       denoiser_depth: 3
       denoiser_embed_dim: 512
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
     action_conditioned_future:
       enabled: false
       loss_weight: 1.0
@@ -98,7 +98,7 @@ framework:
       action_encoder_heads: 8
       action_dropout: 0.1
       film_hidden_dim: 512
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
       target_frame_offset: future_action_window_size
     grounding:
       enabled: false
@@ -107,7 +107,7 @@ framework:
       target_size: 10
       denoiser_depth: 3
       denoiser_embed_dim: 512
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
     affordance:
       enabled: false
       loss_weight: 1.0
@@ -116,7 +116,7 @@ framework:
       heatmap_sigma: 2.0
       denoiser_depth: 3
       denoiser_embed_dim: 512
-      gen_timesteps: "100"
+      gen_timesteps: "1000"
 
 # datasets: CALVIN D-only LeRobot dataset, 8-step action chunks
 datasets:
