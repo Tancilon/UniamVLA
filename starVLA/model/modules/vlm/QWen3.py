@@ -26,6 +26,57 @@ _ACTION_TOKEN_MAX = (
 import torch.nn as nn
 
 
+def _cfg_get(container, key: str, default=None):
+    if container is None:
+        return default
+    if hasattr(container, "get"):
+        try:
+            return container.get(key, default)
+        except TypeError:
+            pass
+    return getattr(container, key, default)
+
+
+def _resolve_square_obs_image_size(config) -> int | None:
+    framework = _cfg_get(config, "framework", None)
+    value = _cfg_get(framework, "qwen_image_size", None)
+    if value is None:
+        value = _cfg_get(framework, "obs_image_size", None)
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) or (
+        not isinstance(value, (str, bytes))
+        and hasattr(value, "__len__")
+        and hasattr(value, "__getitem__")
+    ):
+        if len(value) != 2:
+            raise ValueError(f"obs_image_size must be [S, S], got {value}")
+        height, width = int(value[0]), int(value[1])
+        if height != width:
+            raise ValueError(f"Qwen3-VL expects square obs_image_size here, got {value}")
+        return height
+    return int(value)
+
+
+def _fix_processor_pixel_budget(processor, image_size: int | None) -> int | None:
+    if image_size is None:
+        return None
+    pixels = int(image_size) * int(image_size)
+    targets = [processor]
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is not None:
+        targets.append(image_processor)
+    for target in targets:
+        for attr in ("min_pixels", "max_pixels"):
+            if hasattr(target, attr):
+                setattr(target, attr, pixels)
+        size = getattr(target, "size", None)
+        if isinstance(size, dict):
+            size["shortest_edge"] = pixels
+            size["longest_edge"] = pixels
+    return pixels
+
+
 class _QWen3_VL_Interface(nn.Module):
     """
     This exists because of the diversity of VLMs, so we encapsulate the changes here.
@@ -73,6 +124,10 @@ class _QWen3_VL_Interface(nn.Module):
         )
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
+        self.fixed_image_pixels = _fix_processor_pixel_budget(
+            processor,
+            _resolve_square_obs_image_size(config),
+        )
 
         self.model = model
         self.processor = processor
@@ -150,7 +205,13 @@ class _QWen3_VL_Interface(nn.Module):
         messages = []
         assert len(images) == len(instructions), "Images and instructions must have the same length"
         for imgs, instruction in zip(images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
+            content = []
+            for img in imgs:
+                image_content = {"type": "image", "image": img}
+                if self.fixed_image_pixels is not None:
+                    image_content["min_pixels"] = self.fixed_image_pixels
+                    image_content["max_pixels"] = self.fixed_image_pixels
+                content.append(image_content)
 
             if "CoT_prompt" in self.config.datasets.vla_data:  # If using a grounding prompt to task
                 CoT_prompt = self.config.datasets.vla_data.get("CoT_prompt", "")

@@ -141,12 +141,12 @@ class UamVLAGR00T(Qwen_GR00T, UamVLAOFT):
         return torch.as_tensor(np.asarray(state), device=device, dtype=dtype)
 
     def _assert_image_token_count(self, input_ids: torch.Tensor, examples: List[dict]) -> None:
-        """Keep UAMVLA's fixed 640x640 Qwen3-VL image-token invariant."""
+        """Keep UAMVLA's configured Qwen3-VL image-token invariant."""
         if hasattr(self.qwen_vl_interface, "image_token_id"):
             image_token_id = self.qwen_vl_interface.image_token_id
         else:
             image_token_id = self.qwen_vl_interface.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-        patches_per_view = 400
+        patches_per_view = getattr(self, "_qwen_patches_per_view", lambda: 400)()
         num_views = len(examples[0]["image"])
         expected = patches_per_view * num_views
         counts = (input_ids == image_token_id).sum(dim=1)

@@ -46,6 +46,8 @@ _DEFAULT_LEROBOT_VIDEO_PATH_PATTERN = (
     "videos/chunk-000/{video_key}/episode_{episode_index:06d}.mp4"
 )
 _DEFAULT_LEROBOT_CHUNKS_SIZE = 1_000_000_000
+_QWEN3_SPATIAL_SCALE = 32
+_UAMVLA_VAE_TARGET_SCALE = 16
 
 
 def _move_to_device(value, device):
@@ -120,6 +122,78 @@ class UamVLAOFT(Qwenvl_OFT):
         self._maybe_build_aux_heads()
         self._maybe_build_aux_loss_control()
 
+    @staticmethod
+    def _cfg_get(container, key: str, default=None):
+        if container is None:
+            return default
+        if hasattr(container, "get"):
+            try:
+                return container.get(key, default)
+            except TypeError:
+                pass
+        return getattr(container, key, default)
+
+    def _qwen_image_size(self) -> int:
+        """Return the square Qwen input size for UamVLA vision-token layout."""
+        framework = self._cfg_get(getattr(self, "config", None), "framework", None)
+        value = self._cfg_get(framework, "qwen_image_size", None)
+        if value is None:
+            value = self._cfg_get(framework, "obs_image_size", None)
+        if value is None:
+            return 640
+
+        if isinstance(value, (list, tuple)) or (
+            not isinstance(value, (str, bytes))
+            and hasattr(value, "__len__")
+            and hasattr(value, "__getitem__")
+        ):
+            if len(value) != 2:
+                raise ValueError(f"obs_image_size must be [S, S], got {value}")
+            height, width = int(value[0]), int(value[1])
+            if height != width:
+                raise ValueError(f"UamVLA expects square obs_image_size, got {value}")
+            image_size = height
+        else:
+            image_size = int(value)
+
+        if image_size <= 0 or image_size % _QWEN3_SPATIAL_SCALE != 0:
+            raise ValueError(
+                "qwen_image_size/obs_image_size must be a positive multiple of "
+                f"{_QWEN3_SPATIAL_SCALE}, got {image_size}"
+            )
+        return image_size
+
+    def _qwen_vision_layout(self) -> dict[str, int]:
+        """Derive all Qwen/aux spatial parameters from the configured image size."""
+        image_size = self._qwen_image_size()
+        grid_size = image_size // _QWEN3_SPATIAL_SCALE
+        return {
+            "image_size": image_size,
+            "grid_size": grid_size,
+            "patches_per_view": grid_size * grid_size,
+            "target_size": grid_size,
+            "target_resize": grid_size * _UAMVLA_VAE_TARGET_SCALE,
+        }
+
+    def _qwen_patches_per_view(self) -> int:
+        return self._qwen_vision_layout()["patches_per_view"]
+
+    @staticmethod
+    def _aux_head_cfg_without_layout_keys(cfg) -> dict:
+        layout_keys = {
+            "enabled",
+            "lr",
+            "patches_per_view",
+            "n_patches",
+            "target_resize",
+            "target_size",
+        }
+        return {
+            key: value
+            for key, value in cfg.items()
+            if key not in layout_keys
+        }
+
     def _init_uamvla_sidecar_roots(self) -> None:
         """Resolve sidecar roots for every dataset in the active LeRobot mix."""
         from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
@@ -155,6 +229,7 @@ class UamVLAOFT(Qwenvl_OFT):
 
         cfg_heads = self.config.framework.aux_heads
         hidden_size = self.qwen_vl_interface.model.config.hidden_size
+        layout = self._qwen_vision_layout()
 
         if cfg_heads.get("pose", {}).get("enabled", False):
             pose_kwargs = {
@@ -189,14 +264,11 @@ class UamVLAOFT(Qwenvl_OFT):
                         "<|image_pad|>"
                     ),
                 ),
-                "patches_per_view": 400,
-                "n_patches": 400,
-                "target_resize": 320,
+                "patches_per_view": layout["patches_per_view"],
+                "n_patches": layout["patches_per_view"],
+                "target_resize": layout["target_resize"],
             }
-            future_cfg = {
-                k: v for k, v in cfg_heads.future.items()
-                if k not in ("enabled", "lr")
-            }
+            future_cfg = self._aux_head_cfg_without_layout_keys(cfg_heads.future)
             self.aux_heads["future"] = FutureHead(
                 hidden_size=hidden_size, vae=self.vae,
                 **{**vision_extra, **future_cfg},
@@ -237,14 +309,11 @@ class UamVLAOFT(Qwenvl_OFT):
                         "<|image_pad|>"
                     ),
                 ),
-                "patches_per_view": 400,
-                "n_patches": 400,
-                "target_resize": 320,
+                "patches_per_view": layout["patches_per_view"],
+                "n_patches": layout["patches_per_view"],
+                "target_resize": layout["target_resize"],
             }
-            recon_cfg = {
-                k: v for k, v in cfg_heads.recon.items()
-                if k not in ("enabled", "lr")
-            }
+            recon_cfg = self._aux_head_cfg_without_layout_keys(cfg_heads.recon)
             self.aux_heads["recon"] = ReconHead(
                 hidden_size=hidden_size, vae=self.vae,
                 **{**vision_extra, **recon_cfg},
@@ -258,16 +327,14 @@ class UamVLAOFT(Qwenvl_OFT):
                     "<|image_pad|>"
                 ),
             ),
-            "patches_per_view": 400,
+            "patches_per_view": layout["patches_per_view"],
+            "target_size": layout["target_size"],
         }
 
         if cfg_heads.get("depth", {}).get("enabled", False):
             from starVLA.model.modules.uamvla.aux_heads.depth_head import DepthDenoisingHead
 
-            depth_cfg = {
-                k: v for k, v in cfg_heads.depth.items()
-                if k not in ("enabled", "lr")
-            }
+            depth_cfg = self._aux_head_cfg_without_layout_keys(cfg_heads.depth)
             self.aux_heads["depth"] = DepthDenoisingHead(
                 hidden_size=hidden_size,
                 **{**map_vision_extra, **depth_cfg},
@@ -278,10 +345,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 GroundingMaskDenoisingHead,
             )
 
-            grounding_cfg = {
-                k: v for k, v in cfg_heads.grounding.items()
-                if k not in ("enabled", "lr")
-            }
+            grounding_cfg = self._aux_head_cfg_without_layout_keys(cfg_heads.grounding)
             self.aux_heads["grounding_mask"] = GroundingMaskDenoisingHead(
                 hidden_size=hidden_size,
                 **{**map_vision_extra, **grounding_cfg},
@@ -292,10 +356,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 AffordanceHeatmapDenoisingHead,
             )
 
-            affordance_cfg = {
-                k: v for k, v in cfg_heads.affordance.items()
-                if k not in ("enabled", "lr")
-            }
+            affordance_cfg = self._aux_head_cfg_without_layout_keys(cfg_heads.affordance)
             self.aux_heads["affordance"] = AffordanceHeatmapDenoisingHead(
                 hidden_size=hidden_size,
                 **{**map_vision_extra, **affordance_cfg},
@@ -312,10 +373,9 @@ class UamVLAOFT(Qwenvl_OFT):
             if not hasattr(self, "vae") or self.vae is None:
                 self.vae = VAEPixelDecoder(self.config.framework.vae.path)
 
-            action_future_cfg = {
-                k: v for k, v in cfg_heads.action_conditioned_future.items()
-                if k not in ("enabled", "lr")
-            }
+            action_future_cfg = self._aux_head_cfg_without_layout_keys(
+                cfg_heads.action_conditioned_future
+            )
             action_model_cfg = self.config.framework.action_model
             action_dim = int(action_model_cfg.get("action_dim", 7))
             action_horizon = int(
@@ -325,9 +385,9 @@ class UamVLAOFT(Qwenvl_OFT):
                 "image_mean": [0.5, 0.5, 0.5],
                 "image_std":  [0.5, 0.5, 0.5],
                 "image_token_id": map_vision_extra["image_token_id"],
-                "patches_per_view": 400,
-                "n_patches": 400,
-                "target_resize": 320,
+                "patches_per_view": layout["patches_per_view"],
+                "n_patches": layout["patches_per_view"],
+                "target_resize": layout["target_resize"],
             }
             self.aux_heads["action_conditioned_future"] = ActionConditionedFutureHead(
                 hidden_size=hidden_size,
@@ -363,27 +423,20 @@ class UamVLAOFT(Qwenvl_OFT):
     #  Image resize — shared between training and inference
     # ──────────────────────────────────────────────────────────────────
     def _force_resize_640(self, image_list: list) -> list:
-        """Resize each image to 640x640 via ``Image.BICUBIC``, idempotent.
+        """Resize each image to the configured square Qwen size.
 
-        Qwen3VLProcessor produces ``image_grid_thw=(1, 40, 40)``
-        (i.e. ppv=400) at this resolution, which matches the
-        image_pad token count invariant in :meth:`forward`. Both training
-        and inference must call this to keep tokens-per-view consistent.
-        See spec §5.2.
-
-        Idempotent: if the dataloader already produced 640×640 (e.g. via
-        ``datasets.vla_data.image_resize: 640`` driving
-        ``LeRobotSingleDataset._pack_sample``), this is a no-op for that
-        image. Inference paths that feed PIL of arbitrary size still get
-        resized. Together this collapses the training-time double resize
-        from 200→224→640 to 200→640 (codex I-5).
+        The method name is kept for backward compatibility with tests and
+        framework subclasses.  Its behavior is now driven by
+        ``framework.qwen_image_size`` or ``framework.obs_image_size`` so
+        training, inference, and aux-head spatial layouts remain aligned.
         """
+        image_size = self._qwen_image_size()
         out: list = []
         for img in image_list:
             if not isinstance(img, Image.Image):
                 img = to_pil_preserve(img)
-            if img.size != (640, 640):
-                img = img.resize((640, 640), Image.BICUBIC)
+            if img.size != (image_size, image_size):
+                img = img.resize((image_size, image_size), Image.BICUBIC)
             out.append(img)
         return out
 
@@ -1171,7 +1224,7 @@ class UamVLAOFT(Qwenvl_OFT):
             "image_token_id",
             self.qwen_vl_interface.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>"),
         )
-        ppv = 400
+        ppv = self._qwen_patches_per_view()
         num_views = len(examples[0]["image"])  # 2 for CALVIN (primary + wrist)
         img_token_count = (input_ids == image_token_id).sum(dim=1)
         expected = ppv * num_views

@@ -162,8 +162,9 @@ class ActionConditionedFutureHead(AuxHead):
                 "ActionConditionedFutureHead condition/target grid mismatch: "
                 f"condition grid={tuple(fused_cond.shape[-2:])}, "
                 f"target latent grid={tuple(z_q.shape[-2:])}. "
-                "The current UamVLA aux design expects a unified 20x20 grid; "
-                "with the bundled Flux VAE this corresponds to target_resize=320."
+                "UamVLA expects the Qwen visual-token grid and bundled Flux VAE "
+                f"target grid to match; check patches_per_view={self.patches_per_view} "
+                f"and target_resize={self.target_resize}."
             )
 
         repeated_cond = fused_cond.repeat(self.repeat_factor, 1, 1, 1).contiguous().float()
@@ -216,8 +217,9 @@ class ActionConditionedFutureHead(AuxHead):
                 "ActionConditionedFutureHead condition/target grid mismatch: "
                 f"condition grid={tuple(fused_cond.shape[-2:])}, "
                 f"target latent grid={tuple(z_q.shape[-2:])}. "
-                "The current UamVLA aux design expects a unified 20x20 grid; "
-                "with the bundled Flux VAE this corresponds to target_resize=320."
+                "UamVLA expects the Qwen visual-token grid and bundled Flux VAE "
+                f"target grid to match; check patches_per_view={self.patches_per_view} "
+                f"and target_resize={self.target_resize}."
             )
 
         loss = self.denoiser(

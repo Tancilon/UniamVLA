@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 import yaml
 
@@ -113,7 +114,9 @@ def test_calvin_registry_contains_abc_h8_mix(monkeypatch):
 def test_uamvla_gr00t_config_defines_aux_loss_control_and_new_heads():
     cfg = yaml.safe_load(Path("starVLA/config/training/uamvla_gr00t_calvin.yaml").read_text())
     assert cfg["framework"]["aux_loss_control"]["enabled"] is True
-    assert cfg["framework"]["aux_loss_control"]["aux_budget"] == 0.5
+    assert cfg["framework"]["aux_loss_control"]["aux_budget"] == 1.0
+    assert cfg["framework"]["obs_image_size"] == [320, 320]
+    assert cfg["datasets"]["vla_data"]["image_resize"] == 320
     assert "warmup_steps" not in cfg["framework"]["aux_loss_control"]
     assert "aux_ratio_cap" not in cfg["framework"]["aux_loss_control"]
     assert "action_loss_ema_beta" not in cfg["framework"]["aux_loss_control"]
@@ -121,6 +124,12 @@ def test_uamvla_gr00t_config_defines_aux_loss_control_and_new_heads():
     for name in ["depth", "action_conditioned_future", "grounding", "affordance"]:
         assert name in heads
         assert heads[name]["enabled"] is False
+    assert heads["future"]["target_resize"] == 160
+    assert heads["recon"]["target_resize"] == 160
+    assert heads["action_conditioned_future"]["target_resize"] == 160
+    assert heads["depth"]["target_size"] == 10
+    assert heads["grounding"]["target_size"] == 10
+    assert heads["affordance"]["target_size"] == 10
 
 
 def test_uamvla_gr00t_registers_framework_and_uses_flow_matching_forward(monkeypatch):
@@ -177,6 +186,27 @@ def test_uamvla_gr00t_registers_framework_and_uses_flow_matching_forward(monkeyp
     assert actions.shape == (2, 8, 7)
     assert state is None
     np.testing.assert_allclose(actions[0].numpy(), sample["action"][-8:])
+
+
+def test_uamvla_gr00t_image_token_assert_uses_configured_layout(monkeypatch):
+    module = _load_uamvla_gr00t_module(monkeypatch)
+    model = object.__new__(module.UamVLAGR00T)
+    model.qwen_vl_interface = types.SimpleNamespace(image_token_id=99)
+    model._qwen_patches_per_view = lambda: 100
+    examples = [{"image": [object(), object()]}]
+
+    module.UamVLAGR00T._assert_image_token_count(
+        model,
+        torch.full((1, 200), 99, dtype=torch.long),
+        examples,
+    )
+
+    with pytest.raises(RuntimeError, match="expected 200"):
+        module.UamVLAGR00T._assert_image_token_count(
+            model,
+            torch.full((1, 800), 99, dtype=torch.long),
+            examples,
+        )
 
 
 def test_uamvla_gr00t_forward_repeats_extracted_calvin_robot_obs_state(monkeypatch):

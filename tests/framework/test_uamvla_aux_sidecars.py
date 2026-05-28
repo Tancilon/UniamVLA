@@ -172,3 +172,104 @@ def test_grounding_head_key_matches_grounding_mask_presence_mask(monkeypatch):
         device=torch.device("cpu"),
     )
     assert torch.equal(mask, torch.tensor([True, False]))
+
+
+def test_aux_heads_use_configured_320_vision_layout(monkeypatch):
+    class _FakePoseHead(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+
+    class _FakeHead(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+
+    class _FakeVAE(nn.Module):
+        latent_channels = 4
+
+        def __init__(self, _path):
+            super().__init__()
+
+    def _install_module(name, attr_name, cls):
+        module = types.ModuleType(name)
+        setattr(module, attr_name, cls)
+        monkeypatch.setitem(sys.modules, name, module)
+
+    aux_heads_pkg = types.ModuleType("starVLA.model.modules.uamvla.aux_heads")
+    aux_heads_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, aux_heads_pkg.__name__, aux_heads_pkg)
+    _install_module("starVLA.model.modules.uamvla.aux_heads.pose_head", "PoseHead", _FakePoseHead)
+    _install_module("starVLA.model.modules.uamvla.aux_heads.future_head", "FutureHead", _FakeHead)
+    _install_module("starVLA.model.modules.uamvla.aux_heads.recon_head", "ReconHead", _FakeHead)
+    _install_module(
+        "starVLA.model.modules.uamvla.aux_heads.depth_head",
+        "DepthDenoisingHead",
+        _FakeHead,
+    )
+    _install_module(
+        "starVLA.model.modules.uamvla.aux_heads.grounding_head",
+        "GroundingMaskDenoisingHead",
+        _FakeHead,
+    )
+    _install_module(
+        "starVLA.model.modules.uamvla.aux_heads.affordance_head",
+        "AffordanceHeatmapDenoisingHead",
+        _FakeHead,
+    )
+    _install_module(
+        "starVLA.model.modules.uamvla.aux_heads.action_conditioned_future_head",
+        "ActionConditionedFutureHead",
+        _FakeHead,
+    )
+    _install_module(
+        "starVLA.model.modules.uamvla.components.pixel_decoder.vae",
+        "VAEPixelDecoder",
+        _FakeVAE,
+    )
+
+    model = object.__new__(UamVLAOFT)
+    nn.Module.__init__(model)
+    model.aux_heads = nn.ModuleDict()
+    model.qwen_vl_interface = _AttrDict(
+        image_token_id=99,
+        processor=_AttrDict(tokenizer=_Tokenizer()),
+        model=_AttrDict(config=_AttrDict(hidden_size=4)),
+    )
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            obs_image_size=[320, 320],
+            vae=_AttrDict(path="fake-vae"),
+            action_model=_AttrDict(action_dim=7, action_horizon=8),
+            aux_heads=_AttrDict(
+                future=_AttrDict(enabled=True, target_resize=320, n_patches=400),
+                recon=_AttrDict(enabled=True, target_resize=320, n_patches=400),
+                depth=_AttrDict(enabled=True, target_size=20),
+                grounding=_AttrDict(enabled=True, target_size=20),
+                affordance=_AttrDict(enabled=True, target_size=20),
+                action_conditioned_future=_AttrDict(
+                    enabled=True,
+                    target_resize=320,
+                    n_patches=400,
+                ),
+            ),
+        ),
+    )
+
+    UamVLAOFT._maybe_build_aux_heads(model)
+
+    assert model.aux_heads["future"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["future"].kwargs["n_patches"] == 100
+    assert model.aux_heads["future"].kwargs["target_resize"] == 160
+    assert model.aux_heads["recon"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["recon"].kwargs["n_patches"] == 100
+    assert model.aux_heads["recon"].kwargs["target_resize"] == 160
+    assert model.aux_heads["depth"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["depth"].kwargs["target_size"] == 10
+    assert model.aux_heads["grounding_mask"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["grounding_mask"].kwargs["target_size"] == 10
+    assert model.aux_heads["affordance"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["affordance"].kwargs["target_size"] == 10
+    assert model.aux_heads["action_conditioned_future"].kwargs["patches_per_view"] == 100
+    assert model.aux_heads["action_conditioned_future"].kwargs["n_patches"] == 100
+    assert model.aux_heads["action_conditioned_future"].kwargs["target_resize"] == 160

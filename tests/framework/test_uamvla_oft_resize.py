@@ -9,6 +9,14 @@ import numpy as np
 from PIL import Image
 
 
+class _AttrDict(dict):
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+
+
 def _load_uamvla_oft_module(monkeypatch):
     class _Registry:
         def register(self, _name):
@@ -37,6 +45,16 @@ def _load_uamvla_oft_module(monkeypatch):
     return module
 
 
+def _model_with_image_size(module, image_size):
+    model = object.__new__(module.UamVLAOFT)
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            obs_image_size=[image_size, image_size],
+        ),
+    )
+    return model
+
+
 def test_force_resize_640_converts_numpy_arrays_to_640_pil(monkeypatch):
     module = _load_uamvla_oft_module(monkeypatch)
     model = object.__new__(module.UamVLAOFT)
@@ -56,3 +74,29 @@ def test_force_resize_640_keeps_existing_640_pil(monkeypatch):
     out = module.UamVLAOFT._force_resize_640(model, [image])
 
     assert out[0] is image
+
+
+def test_force_resize_uses_configured_320_layout(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+    model = _model_with_image_size(module, 320)
+
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    out = module.UamVLAOFT._force_resize_640(model, [image])
+
+    assert isinstance(out[0], Image.Image)
+    assert out[0].size == (320, 320)
+
+
+def test_qwen_vision_layout_derives_320_aux_grid(monkeypatch):
+    module = _load_uamvla_oft_module(monkeypatch)
+    model = _model_with_image_size(module, 320)
+
+    layout = module.UamVLAOFT._qwen_vision_layout(model)
+
+    assert layout == {
+        "image_size": 320,
+        "grid_size": 10,
+        "patches_per_view": 100,
+        "target_size": 10,
+        "target_resize": 160,
+    }

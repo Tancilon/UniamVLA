@@ -42,7 +42,7 @@ framework:
       num_layers: 16
       output_dim: 1024
       positional_embeddings: null
-  obs_image_size: [640, 640]
+  obs_image_size: [320, 320]
   vae:
     path: ckpt/pretrained_vae
   aux_loss_control:
@@ -61,7 +61,7 @@ framework:
       enabled: false
       loss_weight: 1.0
       view_idx: 0
-      target_resize: 320
+      target_resize: 160
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
@@ -70,7 +70,7 @@ framework:
       enabled: false
       loss_weight: 1.0
       view_idx: 0
-      target_resize: 320
+      target_resize: 160
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
@@ -80,7 +80,7 @@ framework:
       loss_weight: 1.0
       view_idx: 0
       target_kind: relative_inverse_depth_per_frame
-      target_size: 20
+      target_size: 10
       denoiser_depth: 3
       denoiser_embed_dim: 512
       gen_timesteps: "100"
@@ -88,7 +88,7 @@ framework:
       enabled: false
       loss_weight: 1.0
       view_idx: 0
-      target_resize: 320
+      target_resize: 160
       denoiser_depth: 3
       denoiser_embed_dim: 1024
       repeat_factor: 4
@@ -103,7 +103,7 @@ framework:
       enabled: false
       loss_weight: 1.0
       view_idx: 0
-      target_size: 20
+      target_size: 10
       denoiser_depth: 3
       denoiser_embed_dim: 512
       gen_timesteps: "100"
@@ -111,7 +111,7 @@ framework:
       enabled: false
       loss_weight: 1.0
       view_idx: 0
-      target_size: 20
+      target_size: 10
       heatmap_sigma: 2.0
       denoiser_depth: 3
       denoiser_embed_dim: 512
@@ -126,7 +126,7 @@ datasets:
     per_device_batch_size: 1
     obs: ["video.primary_image", "video.wrist_image"]
     include_state: true
-    image_resize: 640
+    image_resize: 320
     aux_state_slice:
       target_pose_rot6d: [15, 21]
       target_pose_trans: [21, 24]
