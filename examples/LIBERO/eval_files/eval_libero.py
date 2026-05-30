@@ -92,6 +92,23 @@ def eval_libero(args: Args) -> None:
         image_size=args.resize_size,
     )
 
+    # UamVLAGR00T state branch: training applies mean_std norm to state.robot_obs
+    # (UamVLALiberoH8DataConfig.transform), but the inference path
+    # (_state_batch_or_none) does NOT normalize. Load state mean/std here and
+    # normalize state[:7] before sending; otherwise the policy sees off-distribution
+    # proprio and degenerates (observed as 0% success).
+    _fw_cfg = (getattr(client_model, "model_config", {}) or {}).get("framework", {}) or {}
+    _send_state = _fw_cfg.get("name") == "UamVLAGR00T" and int((_fw_cfg.get("action_model", {}) or {}).get("state_dim", 0) or 0) >= 7
+    _state_mean = _state_std = None
+    if _send_state:
+        _run_dir = pathlib.Path(args.pretrained_path).resolve().parents[1]
+        with open(_run_dir / "dataset_statistics.json") as _f:
+            _ds_stats = json.load(_f)
+        _skey = next(iter(_ds_stats))
+        _state_mean = np.asarray(_ds_stats[_skey]["state"]["mean"][:7], dtype=np.float32)
+        _state_std = np.asarray(_ds_stats[_skey]["state"]["std"][:7], dtype=np.float32)
+        logging.info(f"[state] mean_std norm ON | mean={_state_mean.tolist()} std={_state_std.tolist()}")
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
@@ -163,14 +180,13 @@ def eval_libero(args: Args) -> None:
                     "lang": observation["instruction"][0],
                 }
 
-                # UamVLAGR00T consumes proprio state via example["state"] (parity with
-                # eval_calvin.py). Training packs robot_obs[:7] = ee_pos(3) +
-                # ee_ori axis-angle(3) + gripper_qpos[0](1); see pack_robot_obs in
-                # tools/preprocess/libero_preprocess_utils.py and gr00t_lerobot/data_config.py.
-                # The `state` above is exactly that order, so state[:7] matches training.
-                _fw = (getattr(client_model, "model_config", {}) or {}).get("framework", {}) or {}
-                if _fw.get("name") == "UamVLAGR00T" and int((_fw.get("action_model", {}) or {}).get("state_dim", 0) or 0) >= 7:
-                    example_dict["state"] = state[:7].reshape(1, 7).astype(np.float32)
+                # state[:7] = ee_pos(3) + ee_ori axis-angle(3) + gripper_qpos[0](1),
+                # matching robot_obs[:7] consumed by the GR00T state branch. Apply the
+                # same mean_std normalization that training used on state.robot_obs.
+                if _send_state:
+                    s7 = state[:7].astype(np.float32)
+                    s7 = np.where(_state_std != 0, (s7 - _state_mean) / _state_std, s7)
+                    example_dict["state"] = s7.reshape(1, 7).astype(np.float32)
 
                 # Spec §6.2: when ModelClient is in UamVLA state-passthrough
                 # mode, hand it the four raw fields LiberoAdapter expects.
