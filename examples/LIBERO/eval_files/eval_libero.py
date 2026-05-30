@@ -31,7 +31,7 @@ def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
 class Args:
     host: str = "127.0.0.1"
     port: int = 10093
-    resize_size = [224, 224]
+    resize_size = [256, 256]
 
     #################################################################################################################
     # LIBERO environment-specific parameters
@@ -162,6 +162,15 @@ def eval_libero(args: Args) -> None:
                     "image": [observation["observation.primary"][0], observation["observation.wrist_image"][0]],
                     "lang": observation["instruction"][0],
                 }
+
+                # UamVLAGR00T consumes proprio state via example["state"] (parity with
+                # eval_calvin.py). Training packs robot_obs[:7] = ee_pos(3) +
+                # ee_ori axis-angle(3) + gripper_qpos[0](1); see pack_robot_obs in
+                # tools/preprocess/libero_preprocess_utils.py and gr00t_lerobot/data_config.py.
+                # The `state` above is exactly that order, so state[:7] matches training.
+                _fw = (getattr(client_model, "model_config", {}) or {}).get("framework", {}) or {}
+                if _fw.get("name") == "UamVLAGR00T" and int((_fw.get("action_model", {}) or {}).get("state_dim", 0) or 0) >= 7:
+                    example_dict["state"] = state[:7].reshape(1, 7).astype(np.float32)
 
                 # Spec §6.2: when ModelClient is in UamVLA state-passthrough
                 # mode, hand it the four raw fields LiberoAdapter expects.
