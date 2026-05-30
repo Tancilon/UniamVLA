@@ -100,6 +100,7 @@ def eval_libero(args: Args) -> None:
     _fw_cfg = (getattr(client_model, "model_config", {}) or {}).get("framework", {}) or {}
     _send_state = _fw_cfg.get("name") == "UamVLAGR00T" and int((_fw_cfg.get("action_model", {}) or {}).get("state_dim", 0) or 0) >= 7
     _state_mean = _state_std = None
+    _state_logged = False
     if _send_state:
         _run_dir = pathlib.Path(args.pretrained_path).resolve().parents[1]
         with open(_run_dir / "dataset_statistics.json") as _f:
@@ -188,9 +189,12 @@ def eval_libero(args: Args) -> None:
                 # matching robot_obs[:7] consumed by the GR00T state branch. Apply the
                 # same mean_std normalization that training used on state.robot_obs.
                 if _send_state:
-                    s7 = state[:7].astype(np.float32)
-                    s7 = np.where(_state_std != 0, (s7 - _state_mean) / _state_std, s7)
+                    s7_raw = state[:7].astype(np.float32)
+                    s7 = np.where(_state_std != 0, (s7_raw - _state_mean) / _state_std, s7_raw)
                     example_dict["state"] = s7.reshape(1, 7).astype(np.float32)
+                    if not _state_logged:
+                        logging.info(f"[state] 1st raw={np.round(s7_raw, 4).tolist()} norm={np.round(s7, 4).tolist()}")
+                        _state_logged = True
 
                 # Spec §6.2: when ModelClient is in UamVLA state-passthrough
                 # mode, hand it the four raw fields LiberoAdapter expects.
