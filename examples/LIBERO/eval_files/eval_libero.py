@@ -222,10 +222,7 @@ def eval_libero(args: Args) -> None:
                 world_vector_delta = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
                 rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
                 open_gripper = np.asarray(raw_action.get("open_gripper"), dtype=np.float32).reshape(-1)
-                # open_gripper from unnormalize_actions is 0=open (model -1) / 1=close (model +1).
-                # LIBERO env wants -1=open / +1=close. The old _binarize_gripper_open INVERTED
-                # this (model open -> env close), so grasping always failed (0% on every suite).
-                gripper = np.array([1.0 if float(open_gripper[0]) > 0.5 else -1.0], dtype=np.float32)
+                gripper = _binarize_gripper_open(open_gripper)
 
                 if not (world_vector_delta.size == 3 and rotation_delta.size == 3 and open_gripper.size == 1):
                     logging.warning(
