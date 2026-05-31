@@ -153,13 +153,9 @@ def eval_libero(args: Args) -> None:
                     t += 1
                     continue
 
-                # IMPORTANT: vertical flip ONLY, to match train preprocessing.
-                # Training renders with rgb[::-1] (_render_rgb; STATIC_CAM=agentview,
-                # WRIST_CAM=robot0_eye_in_hand). The previous [::-1, ::-1] (rotate 180)
-                # added an extra horizontal flip, so the policy saw a left-right-mirrored
-                # scene and produced wrong-direction actions.
-                img = np.ascontiguousarray(obs["agentview_image"][::-1])
-                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1])
+                # IMPORTANT: rotate 180 degrees to match train preprocessing
+                img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
 
                 # Save preprocessed image for replay video
                 replay_images.append(img)
