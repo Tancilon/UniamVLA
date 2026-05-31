@@ -23,6 +23,7 @@ import os
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional, Tuple
 
 import hydra
 import numpy as np
@@ -123,6 +124,14 @@ class CalvinPolicyClient:
         self.step_count = 0
         self.train_renderer = train_renderer
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
+        self._uamvla_gr00t_state_mean = None
+        self._uamvla_gr00t_state_std = None
+        if self.send_uamvla_gr00t_state:
+            stats_key = getattr(self.client, "unnorm_key", None) or unnorm_key or None
+            (
+                self._uamvla_gr00t_state_mean,
+                self._uamvla_gr00t_state_std,
+            ) = self._load_uamvla_gr00t_state_stats(pretrained_path, stats_key)
 
     @staticmethod
     def _nested_config_get(config, *keys):
@@ -148,11 +157,80 @@ class CalvinPolicyClient:
         return framework_name == "UamVLAGR00T" and state_dim >= 7
 
     @staticmethod
-    def _extract_uamvla_gr00t_state(obs: dict) -> np.ndarray:
+    def _load_uamvla_gr00t_state_stats(
+        pretrained_path: str,
+        unnorm_key: Optional[str],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        checkpoint_path = Path(pretrained_path)
+        if len(checkpoint_path.parents) < 2:
+            raise FileNotFoundError(
+                "UamVLAGR00T CALVIN eval requires a checkpoint path inside a "
+                f"training run directory, got {pretrained_path!r}."
+            )
+
+        stats_path = checkpoint_path.parents[1] / "dataset_statistics.json"
+        if not stats_path.exists():
+            raise FileNotFoundError(
+                "UamVLAGR00T CALVIN eval requires state normalization stats at "
+                f"{stats_path}. Expected dataset_statistics.json from the "
+                "training run directory."
+            )
+
+        with open(stats_path) as f:
+            dataset_stats = json.load(f)
+
+        stats_key = unnorm_key
+        if stats_key is None:
+            if len(dataset_stats) != 1:
+                raise KeyError(
+                    "dataset_statistics.json has multiple entries; pass "
+                    f"--args.unnorm-key. Available keys: {list(dataset_stats.keys())}"
+                )
+            stats_key = next(iter(dataset_stats.keys()))
+
+        if stats_key not in dataset_stats:
+            raise KeyError(
+                f"State stats key {stats_key!r} not found in {stats_path}. "
+                f"Available keys: {list(dataset_stats.keys())}"
+            )
+
+        state_stats = dataset_stats[stats_key].get("state")
+        if not isinstance(state_stats, dict) or "mean" not in state_stats or "std" not in state_stats:
+            raise KeyError(
+                f"{stats_path} entry {stats_key!r} must contain "
+                "state.mean and state.std for UamVLAGR00T CALVIN eval."
+            )
+
+        mean = np.asarray(state_stats["mean"], dtype=np.float32).reshape(-1)
+        std = np.asarray(state_stats["std"], dtype=np.float32).reshape(-1)
+        if mean.shape[0] < 7 or std.shape[0] < 7:
+            raise ValueError(
+                f"Expected at least 7 state mean/std values in {stats_path} "
+                f"for key {stats_key!r}, got mean={mean.shape}, std={std.shape}."
+            )
+        return mean[:7], std[:7]
+
+    @staticmethod
+    def _extract_raw_uamvla_gr00t_state(obs: dict) -> np.ndarray:
         robot_obs = np.asarray(obs["robot_obs"], dtype=np.float32).reshape(-1)
         if robot_obs.shape[0] < 7:
             raise ValueError(f"Expected CALVIN robot_obs with at least 7 dims, got {robot_obs.shape}.")
         return robot_obs[:7].reshape(1, 7)
+
+    def _extract_uamvla_gr00t_state(self, obs: dict) -> np.ndarray:
+        state = self._extract_raw_uamvla_gr00t_state(obs).reshape(-1)
+        if self._uamvla_gr00t_state_mean is None or self._uamvla_gr00t_state_std is None:
+            raise RuntimeError(
+                "UamVLAGR00T state normalization stats were not initialized."
+            )
+
+        mean = self._uamvla_gr00t_state_mean
+        std = self._uamvla_gr00t_state_std
+        normalized = np.zeros_like(state, dtype=np.float32)
+        mask = std != 0
+        normalized[mask] = (state[mask] - mean[mask]) / std[mask]
+        normalized[~mask] = state[~mask]
+        return normalized.reshape(1, 7)
 
     def reset(self):
         """Reset action plan buffer."""
