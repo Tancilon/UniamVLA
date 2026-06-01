@@ -1,0 +1,175 @@
+run_id: auxvla_gr00t_libero_primary_h8
+run_root_dir: playground/Checkpoints
+seed: 42
+trackers: [jsonl, wandb]
+wandb_project: uamvla
+wandb_entity: tancilon1-fudan-university-school-of-management
+is_debug: false
+version_id: "0.1"
+
+framework:
+  name: AuxVLAGR00T
+  reconvla:
+    model_path: ckpt/pretrain-checkpoint-10388
+    attn_implementation: flash_attention_2
+    single_view_mode: primary
+    synthetic_image_token_id: -200
+    disable_internal_recon_loss: true
+  action_model:
+    action_model_type: DiT-B
+    action_hidden_dim: 1024
+    hidden_size: 1024
+    add_pos_embed: true
+    max_seq_len: 1024
+    action_dim: 7
+    # LIBERO preprocessing packs robot_obs[:7] as ee_pos(3) + ee_ori(3)
+    # + gripper(1), matching the CALVIN GR00T state contract.
+    state_dim: 7
+    action_horizon: 8
+    future_action_window_size: 7
+    past_action_window_size: 0
+    repeated_diffusion_steps: 8
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 3584
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+  obs_image_size: [320, 320]
+  vae:
+    path: ckpt/pretrained_vae
+  aux_loss_control:
+    enabled: true
+    aux_budget: 1.0
+  aux_heads:
+    pose:
+      enabled: false
+      loss_weight: 1.0
+      pose_mode: rot_matrix
+      sde_mode: ve
+      num_queries: 4
+      semantic_dim: 512
+      sampling_steps: 20
+    future:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_resize: 160
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
+      gen_timesteps: "1000"
+    recon:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_resize: 160
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
+      gen_timesteps: "1000"
+    depth:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_kind: relative_inverse_depth_per_frame
+      target_size: 10
+      denoiser_depth: 3
+      denoiser_embed_dim: 512
+      gen_timesteps: "1000"
+    action_conditioned_future:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_resize: 160
+      denoiser_depth: 3
+      denoiser_embed_dim: 1024
+      repeat_factor: 4
+      action_encoder_layers: 2
+      action_embed_dim: 512
+      action_encoder_heads: 8
+      action_dropout: 0.1
+      film_hidden_dim: 512
+      gen_timesteps: "1000"
+      target_frame_offset: future_action_window_size
+    grounding:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_size: 10
+      denoiser_depth: 3
+      denoiser_embed_dim: 512
+      gen_timesteps: "1000"
+    affordance:
+      enabled: false
+      loss_weight: 1.0
+      view_idx: 0
+      target_size: 10
+      heatmap_sigma: 2.0
+      denoiser_depth: 3
+      denoiser_embed_dim: 512
+      gen_timesteps: "1000"
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: datasets/libero2uam
+    data_mix: uamvla_libero_all_h8
+    action_type: delta_eef
+    per_device_batch_size: 1
+    obs: ["video.primary_image", "video.wrist_image"]
+    include_state: true
+    image_resize: 320
+    aux_state_slice:
+      target_pose_rot6d: [15, 21]
+      target_pose_trans: [21, 24]
+      static_cam_rot6d:  [24, 30]
+      static_cam_trans:  [30, 33]
+
+trainer:
+  epochs: 5
+  max_train_steps: 200000
+  num_warmup_steps: 2000
+  save_interval: 5000
+  eval_interval: 999999
+  visualization:
+    enabled: true
+    train_every_n_steps: 2000
+    num_samples: 1
+
+  learning_rate:
+    base:               1.0e-4
+    qwen_vl_interface:  1.0e-5
+    action_model:       1.0e-4
+
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-6
+
+  freeze_modules: null
+  max_grad_norm: 1.0
+  logging_frequency: 100
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 1.0e-8
+
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true

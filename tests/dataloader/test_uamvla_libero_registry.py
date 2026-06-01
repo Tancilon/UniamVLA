@@ -171,3 +171,16 @@ def test_uamvla_gr00t_libero_yaml_loads():
     assert cfg.framework.action_model.state_dim == 7
     assert cfg.framework.action_model.action_horizon == 8
     assert cfg.datasets.vla_data.aux_state_slice.target_pose_rot6d == [15, 21]
+
+
+def test_auxvla_gr00t_libero_yaml_loads():
+    cfg = OmegaConf.load("starVLA/config/training/auxvla_gr00t_libero.yaml")
+    assert cfg.framework.name == "AuxVLAGR00T"
+    assert cfg.framework.reconvla.model_path == "ckpt/pretrain-checkpoint-10388"
+    assert cfg.framework.reconvla.single_view_mode == "primary"
+    assert cfg.framework.reconvla.synthetic_image_token_id == -200
+    assert cfg.framework.reconvla.disable_internal_recon_loss is True
+    assert cfg.datasets.vla_data.data_mix == "uamvla_libero_all_h8"
+    assert cfg.datasets.vla_data.obs == ["video.primary_image", "video.wrist_image"]
+    assert cfg.framework.action_model.action_horizon == 8
+    assert cfg.framework.aux_heads.recon.enabled is False
