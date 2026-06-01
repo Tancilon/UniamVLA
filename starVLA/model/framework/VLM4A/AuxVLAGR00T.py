@@ -71,6 +71,7 @@ class AuxVLAGR00TDefaultConfig:
     reconvla: dict = field(
         default_factory=lambda: {
             "model_path": "ckpt/pretrain-checkpoint-10388",
+            "vision_tower_path": "ckpt/siglip-so400m-patch14-384",
             "attn_implementation": "flash_attention_2",
             "single_view_mode": "primary",
             "synthetic_image_token_id": -200,
@@ -118,7 +119,7 @@ class ReconVLAInterface(nn.Module):
         _ensure_reconvla_pythonpath()
         from recon.model.language_model.recon_qwen import ReconQwen2ForCausalLM
         import recon.mm_utils as recon_mm_utils
-        from transformers import AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer
 
         self.config = config
         recon_cfg = config.framework.get("reconvla", {})
@@ -137,6 +138,11 @@ class ReconVLAInterface(nn.Module):
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=False)
         self.processor = SimpleNamespace(tokenizer=self.tokenizer)
+        model_config = AutoConfig.from_pretrained(self.model_path)
+        vision_tower_path = self._resolve_vision_tower_path(recon_cfg, model_config)
+        if vision_tower_path is not None:
+            model_config.mm_vision_tower = vision_tower_path
+        load_kwargs["config"] = model_config
         self.model = ReconQwen2ForCausalLM.from_pretrained(self.model_path, **load_kwargs)
         self.model.config.use_cache = False
 
@@ -149,6 +155,29 @@ class ReconVLAInterface(nn.Module):
             vision_tower.load_model(device_map=None)
         self.image_processor = vision_tower.image_processor
         self.image_embed_len = int(getattr(self.model.config, "image_embed_len", 729))
+
+    def _resolve_vision_tower_path(self, recon_cfg, model_config):
+        configured = recon_cfg.get("vision_tower_path", None) or recon_cfg.get("mm_vision_tower", None)
+        if configured:
+            return str(configured)
+
+        original = getattr(model_config, "mm_vision_tower", None)
+        if not original:
+            return None
+        original_str = str(original)
+        original_path = Path(original_str)
+        if original_path.is_absolute() or original_path.exists():
+            return original_str if original_path.exists() else None
+
+        relative = original_str[2:] if original_str.startswith("./") else original_str
+        candidates = [
+            Path(self.model_path).parent / relative,
+            _repo_root() / relative,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
 
     @property
     def device(self):

@@ -177,6 +177,7 @@ def test_auxvla_gr00t_libero_yaml_loads():
     cfg = OmegaConf.load("starVLA/config/training/auxvla_gr00t_libero.yaml")
     assert cfg.framework.name == "AuxVLAGR00T"
     assert cfg.framework.reconvla.model_path == "ckpt/pretrain-checkpoint-10388"
+    assert cfg.framework.reconvla.vision_tower_path == "ckpt/siglip-so400m-patch14-384"
     assert cfg.framework.reconvla.single_view_mode == "primary"
     assert cfg.framework.reconvla.synthetic_image_token_id == -200
     assert cfg.framework.reconvla.disable_internal_recon_loss is True

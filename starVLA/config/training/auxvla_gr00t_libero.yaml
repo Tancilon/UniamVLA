@@ -11,6 +11,7 @@ framework:
   name: AuxVLAGR00T
   reconvla:
     model_path: ckpt/pretrain-checkpoint-10388
+    vision_tower_path: ckpt/siglip-so400m-patch14-384
     attn_implementation: flash_attention_2
     single_view_mode: primary
     synthetic_image_token_id: -200

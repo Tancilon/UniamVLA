@@ -77,6 +77,18 @@ class _FakeTokenizer:
         return tokenizer
 
 
+class _FakeAutoConfig:
+    @classmethod
+    def from_pretrained(cls, path):
+        return types.SimpleNamespace(
+            hidden_size=3584,
+            image_embed_len=729,
+            recon_enable=True,
+            reconstruct_image=True,
+            mm_vision_tower="./siglip-so400m-patch14-384",
+        )
+
+
 class _FakeImageProcessor:
     image_mean = [0.5, 0.5, 0.5]
 
@@ -110,6 +122,8 @@ class _FakeReconModel(torch.nn.Module):
         model = cls()
         model.path = path
         model.from_pretrained_kwargs = kwargs
+        if "config" in kwargs:
+            model.config = kwargs["config"]
         return model
 
     def get_vision_tower(self):
@@ -132,6 +146,7 @@ def _install_reconvla_fakes(monkeypatch):
     monkeypatch.setitem(sys.modules, fake_lm.__name__, fake_lm)
 
     fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoConfig = _FakeAutoConfig
     fake_transformers.AutoTokenizer = _FakeTokenizer
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
@@ -168,6 +183,26 @@ def test_reconvla_interface_loads_and_disables_internal_recon(monkeypatch):
     assert interface.image_embed_len == 729
     assert interface.model.from_pretrained_kwargs["attn_implementation"] == "sdpa"
     assert interface.model.from_pretrained_kwargs["ignore_mismatched_sizes"] is False
+
+
+def test_reconvla_interface_overrides_local_vision_tower_path(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                vision_tower_path="ckpt/siglip-so400m-patch14-384",
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+
+    loaded_config = interface.model.from_pretrained_kwargs["config"]
+    assert loaded_config.mm_vision_tower == "ckpt/siglip-so400m-patch14-384"
+    assert interface.model.config.mm_vision_tower == "ckpt/siglip-so400m-patch14-384"
 
 
 def test_reconvla_interface_builds_single_image_batch(monkeypatch):
