@@ -397,6 +397,40 @@ class AuxVLAGR00T(baseframework):
         ]
         return torch.as_tensor(np.asarray(states), device=device, dtype=dtype)
 
+    def _action_model_compute_dtype(self, fallback_dtype: torch.dtype) -> torch.dtype:
+        parameters = getattr(self.action_model, "parameters", None)
+        if parameters is None:
+            return fallback_dtype
+        for param in parameters():
+            if torch.is_floating_point(param):
+                return param.dtype
+        return fallback_dtype
+
+    def _prepare_gr00t_action_inputs(
+        self,
+        examples: List[dict],
+        hidden: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        action_dtype = self._action_model_compute_dtype(hidden.dtype)
+        gt_actions = [example["action"] for example in examples]
+        actions = torch.as_tensor(
+            np.asarray([
+                action.detach().float().cpu().numpy()
+                if torch.is_tensor(action)
+                else np.asarray(action)
+                for action in gt_actions
+            ]),
+            device=hidden.device,
+            dtype=action_dtype,
+        )
+        actions_target = actions[:, -self.action_horizon :, :]
+        if actions_target.shape[1] != self.action_horizon:
+            raise RuntimeError(
+                f"Expected at least {self.action_horizon} action steps, got {actions.shape[1]}."
+            )
+        state = self._state_batch_or_none(examples, hidden.device, action_dtype)
+        return hidden.to(dtype=action_dtype), actions_target, state
+
     def _select_single_view(self, image_list, mode: str):
         if not isinstance(image_list, (list, tuple)):
             return image_list
@@ -492,28 +526,15 @@ class AuxVLAGR00T(baseframework):
     def forward(self, examples: List[dict], **kwargs) -> dict:
         examples = self._prepare_examples(examples)
         recon_inputs, hidden = self._encode_reconvla_hidden(examples)
-        gt_actions = [example["action"] for example in examples]
 
         with torch.autocast("cuda", dtype=torch.float32):
-            actions = torch.as_tensor(
-                np.asarray([
-                    action.detach().float().cpu().numpy()
-                    if torch.is_tensor(action)
-                    else np.asarray(action)
-                    for action in gt_actions
-                ]),
-                device=hidden.device,
-                dtype=hidden.dtype,
+            hidden_for_action, actions_target, state = self._prepare_gr00t_action_inputs(
+                examples,
+                hidden,
             )
-            actions_target = actions[:, -self.action_horizon :, :]
-            if actions_target.shape[1] != self.action_horizon:
-                raise RuntimeError(
-                    f"Expected at least {self.action_horizon} action steps, got {actions.shape[1]}."
-                )
             repeat = int(self.config.framework.action_model.get("repeated_diffusion_steps", 4))
             actions_repeated = actions_target.repeat(repeat, 1, 1)
-            hidden_repeated = hidden.repeat(repeat, 1, 1)
-            state = self._state_batch_or_none(examples, hidden.device, hidden.dtype)
+            hidden_repeated = hidden_for_action.repeat(repeat, 1, 1)
             state_repeated = state.repeat(repeat, 1, 1) if state is not None else None
             total = self.action_model(hidden_repeated, actions_repeated, state_repeated)
 
@@ -535,7 +556,9 @@ class AuxVLAGR00T(baseframework):
             examples = [examples]
         examples = self._prepare_examples(examples)
         _recon_inputs, hidden = self._encode_reconvla_hidden(examples)
-        state = self._state_batch_or_none(examples, hidden.device, hidden.dtype)
+        action_dtype = self._action_model_compute_dtype(hidden.dtype)
+        hidden_for_action = hidden.to(dtype=action_dtype)
+        state = self._state_batch_or_none(examples, hidden.device, action_dtype)
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(hidden, state)
+            pred_actions = self.action_model.predict_action(hidden_for_action, state)
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}

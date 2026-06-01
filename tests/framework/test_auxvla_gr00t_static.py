@@ -243,6 +243,60 @@ def test_forward_routes_reconvla_hidden_to_gr00t_action_and_aux_suite(monkeypatc
     assert model.aux_suite.calls[0][4] == 9
 
 
+def test_forward_casts_action_inputs_to_action_model_dtype(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeReconInterface:
+        image_token_id = -200
+        image_embed_len = 4
+
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.zeros(1, 3, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones(1, 6, 16, dtype=torch.bfloat16)
+            return types.SimpleNamespace(hidden_states=[hidden], boi_ids=[1], eoi_ids=[4])
+
+    class _FloatActionModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.ones(()))
+            self.calls = []
+
+        def forward(self, vl_embs, actions, state):
+            self.calls.append((vl_embs, actions, state))
+            assert vl_embs.dtype == self.marker.dtype
+            assert actions.dtype == self.marker.dtype
+            assert state.dtype == self.marker.dtype
+            return self.marker * 0 + torch.tensor(1.0)
+
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = _FakeReconInterface()
+    model.action_model = _FloatActionModel()
+    model.action_horizon = 8
+    model.aux_heads = {}
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(single_view_mode="primary", synthetic_image_token_id=-200),
+            action_model=_AttrDict(repeated_diffusion_steps=2, state_dim=7),
+        ),
+    )
+    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+
+    sample = {
+        "image": [object()],
+        "lang": "open drawer",
+        "action": np.arange(10 * 7, dtype=np.float32).reshape(10, 7),
+        "state": np.arange(7, dtype=np.float32).reshape(1, 7),
+    }
+
+    out = module.AuxVLAGR00T.forward(model, [sample])
+
+    assert out["action_loss"].item() == 1.0
+
+
 def test_predict_action_uses_single_view_without_aux(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
@@ -275,4 +329,55 @@ def test_predict_action_uses_single_view_without_aux(monkeypatch):
         model,
         {"image": [object(), object()], "lang": "open drawer"},
     )
+    assert out["normalized_actions"].shape == (1, 8, 7)
+
+
+def test_predict_action_casts_hidden_to_action_model_dtype(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeReconInterface:
+        image_token_id = -200
+        image_embed_len = 4
+
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.zeros(1, 3, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones(1, 6, 16, dtype=torch.bfloat16)
+            return types.SimpleNamespace(hidden_states=[hidden], boi_ids=[1], eoi_ids=[4])
+
+    class _FloatPredictActionModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.ones(()))
+            self.calls = []
+
+        def predict_action(self, hidden, state):
+            self.calls.append((hidden, state))
+            assert hidden.dtype == self.marker.dtype
+            assert state.dtype == self.marker.dtype
+            return torch.zeros(hidden.shape[0], 8, 7, dtype=self.marker.dtype)
+
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = _FakeReconInterface()
+    model.action_model = _FloatPredictActionModel()
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(single_view_mode="primary", synthetic_image_token_id=-200),
+            action_model=_AttrDict(state_dim=7),
+        ),
+    )
+    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+
+    out = module.AuxVLAGR00T.predict_action(
+        model,
+        {
+            "image": [object()],
+            "lang": "open drawer",
+            "state": np.arange(7, dtype=np.float32).reshape(1, 7),
+        },
+    )
+
     assert out["normalized_actions"].shape == (1, 8, 7)

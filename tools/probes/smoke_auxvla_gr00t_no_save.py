@@ -18,7 +18,6 @@ import os
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from omegaconf import OmegaConf
@@ -45,20 +44,6 @@ def freeze_backbone(model) -> None:
         param.requires_grad_(False)
     model.qwen_vl_interface.eval()
     model.action_model.train()
-
-
-def tensor_to_numpy(value):
-    if torch.is_tensor(value):
-        return value.detach().float().cpu().numpy()
-    return np.asarray(value)
-
-
-def make_action_batch(examples, device, dtype):
-    return torch.as_tensor(
-        np.asarray([tensor_to_numpy(example["action"]) for example in examples]),
-        device=device,
-        dtype=dtype,
-    )
 
 
 def grad_norm(module: torch.nn.Module, device: torch.device) -> torch.Tensor:
@@ -143,17 +128,14 @@ def main() -> None:
             recon_inputs, hidden = model._encode_reconvla_hidden(examples)
         hidden = hidden.detach()
 
-        actions = make_action_batch(examples, device=hidden.device, dtype=hidden.dtype)
-        actions_target = actions[:, -model.action_horizon :, :]
-        if actions_target.shape[1] != model.action_horizon:
-            raise RuntimeError(
-                f"Expected action horizon {model.action_horizon}, got {actions_target.shape[1]}"
-            )
+        hidden_for_action, actions_target, state = model._prepare_gr00t_action_inputs(
+            examples,
+            hidden,
+        )
 
         repeat = int(cfg.framework.action_model.get("repeated_diffusion_steps", 4))
-        hidden_repeated = hidden.repeat(repeat, 1, 1)
+        hidden_repeated = hidden_for_action.repeat(repeat, 1, 1)
         actions_repeated = actions_target.repeat(repeat, 1, 1)
-        state = model._state_batch_or_none(examples, hidden.device, hidden.dtype)
         state_repeated = state.repeat(repeat, 1, 1) if state is not None else None
 
         optimizer = torch.optim.AdamW(
@@ -175,6 +157,8 @@ def main() -> None:
         synthetic_counts = (recon_inputs["input_ids"] == synthetic_id).sum(dim=1).tolist()
 
         print(f"hidden_shape={tuple(hidden.shape)}")
+        print(f"hidden_dtype={hidden.dtype}")
+        print(f"action_input_dtype={actions_target.dtype}")
         print(f"aux_input_ids_shape={tuple(recon_inputs['input_ids'].shape)}")
         print(f"synthetic_image_tokens={synthetic_counts}")
         print(f"actions_target_shape={tuple(actions_target.shape)}")
