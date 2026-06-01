@@ -76,6 +76,19 @@ class _FakeUamVLAOFT:
     _init_uamvla_sidecar_roots = lambda self: None
     _init_lerobot_video_path_config = lambda self: None
     _sidecar_root_for_sample = lambda self, sample: None
+    _image_future_video_path = lambda self, trajectory_id, sidecar_root=None: Path("missing.mp4")
+    _image_future_frame_index = staticmethod(
+        lambda video_length: video_length - 1 if video_length > 0 else None
+    )
+    _load_npy_sidecar = staticmethod(lambda path: None)
+    _load_depth_target = lambda self, trajectory_id, base_index, sidecar_root=None: None
+    _load_grounding_mask = lambda self, trajectory_id, base_index, sidecar_root=None: None
+    _load_affordance_heatmap = lambda self, trajectory_id, base_index, sidecar_root=None: None
+    _image_action_future_frame_index = (
+        lambda self, base_index, video_length: base_index if base_index < video_length else None
+    )
+    _load_image_future = lambda self, trajectory_id, base_index, sidecar_root=None: None
+    _load_image_action_future = lambda self, trajectory_id, base_index, sidecar_root=None: None
     _maybe_build_aux_heads = lambda self: None
     _maybe_build_aux_loss_control = lambda self: None
     _aux_head_cfg_without_layout_keys = staticmethod(lambda cfg: dict(cfg))
@@ -106,6 +119,28 @@ class _FakeActionModel:
 def test_auxvla_gr00t_registers_framework(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     assert "AuxVLAGR00T" in module._registered_names
+
+
+def test_auxvla_delegates_uamvla_sidecar_loaders(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    expected_methods = [
+        "_image_future_video_path",
+        "_image_future_frame_index",
+        "_load_npy_sidecar",
+        "_load_depth_target",
+        "_load_grounding_mask",
+        "_load_affordance_heatmap",
+        "_image_action_future_frame_index",
+        "_load_image_future",
+        "_load_image_action_future",
+    ]
+    for name in expected_methods:
+        assert hasattr(module.AuxVLAGR00T, name), name
+
+    model = object.__new__(module.AuxVLAGR00T)
+    assert model._image_future_frame_index(3) == 2
+    assert model._load_npy_sidecar(Path("missing.npy")) is None
+    assert model._aux_head_cfg_without_layout_keys({"enabled": True}) == {"enabled": True}
 
 
 def test_make_aux_input_ids_marks_boi_eoi_span(monkeypatch):
