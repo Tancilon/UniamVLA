@@ -14,6 +14,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-6694}"
 TASK_SUITE="${TASK_SUITE:-libero_spatial}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-2}"
+LIBERO_IMAGE_TRANSFORM="${LIBERO_IMAGE_TRANSFORM:-rotate180}"
 
 if [[ ! -f "${CKPT}" ]]; then
   echo "[ERROR] Checkpoint not found: ${CKPT}" >&2
@@ -49,6 +50,7 @@ echo " HOST                 : ${HOST}"
 echo " PORT                 : ${PORT}"
 echo " TASK_SUITE           : ${TASK_SUITE}"
 echo " NUM_TRIALS_PER_TASK  : ${NUM_TRIALS_PER_TASK}"
+echo " LIBERO_IMAGE_TRANSFORM: ${LIBERO_IMAGE_TRANSFORM}"
 echo " VIDEO_OUT_PATH       : ${video_out_path}"
 echo "=========================================="
 
@@ -58,4 +60,5 @@ ${LIBERO_PYTHON} ./examples/LIBERO/eval_files/eval_libero.py \
   --args.port "${PORT}" \
   --args.task-suite-name "${TASK_SUITE}" \
   --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
+  --args.image-transform "${LIBERO_IMAGE_TRANSFORM}" \
   --args.video-out-path "${video_out_path}"

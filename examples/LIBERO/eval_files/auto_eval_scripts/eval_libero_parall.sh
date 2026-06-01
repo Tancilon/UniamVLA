@@ -29,6 +29,7 @@ gpu_id="$3"
 base_port="$4"
 num_trials_per_task="${5:-${NUM_TRIALS_PER_TASK:-2}}"
 host="${HOST:-127.0.0.1}"
+LIBERO_IMAGE_TRANSFORM="${LIBERO_IMAGE_TRANSFORM:-rotate180}"
 
 if [[ ! -f "${your_ckpt}" ]]; then
   echo "[ERROR] Checkpoint not found: ${your_ckpt}" >&2
@@ -85,6 +86,7 @@ echo " STARVLA_DIR          : ${STARVLA_DIR}"
 echo " CKPT                 : ${your_ckpt}"
 echo " TASK_SUITE           : ${task_suite_name}"
 echo " NUM_TRIALS_PER_TASK  : ${num_trials_per_task}"
+echo " LIBERO_IMAGE_TRANSFORM: ${LIBERO_IMAGE_TRANSFORM}"
 echo " GPU_ID               : ${gpu_id}"
 echo " HOST                 : ${host}"
 echo " PORT                 : ${base_port}"
@@ -109,6 +111,7 @@ DEBUG="${LIBERO_DEBUG:-}" LD_PRELOAD="${LIBERO_LD_PRELOAD}" ${LIBERO_PYTHON} ./e
   --args.port "${base_port}" \
   --args.task-suite-name "${task_suite_name}" \
   --args.num-trials-per-task "${num_trials_per_task}" \
+  --args.image-transform "${LIBERO_IMAGE_TRANSFORM}" \
   --args.video-out-path "${video_out_path}" \
   2>&1 | tee "${log_path}/${folder_name}.log"
 

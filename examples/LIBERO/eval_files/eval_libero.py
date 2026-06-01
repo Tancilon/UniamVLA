@@ -27,6 +27,17 @@ def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
     return np.asarray([bin_val], dtype=np.float32)
 
 
+def _preprocess_libero_image(image: np.ndarray, image_transform: str) -> np.ndarray:
+    if image_transform == "rotate180":
+        return np.ascontiguousarray(image[::-1, ::-1])
+    if image_transform == "vertical":
+        return np.ascontiguousarray(image[::-1])
+    raise ValueError(
+        "image_transform must be one of {'rotate180', 'vertical'}, "
+        f"got {image_transform!r}"
+    )
+
+
 @dataclasses.dataclass
 class Args:
     host: str = "127.0.0.1"
@@ -41,6 +52,7 @@ class Args:
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
+    image_transform: str = "rotate180"  # Options: rotate180, vertical
 
     #################################################################################################################
     # Utils
@@ -155,9 +167,9 @@ def eval_libero(args: Args) -> None:
                     t += 1
                     continue
 
-                # IMPORTANT: rotate 180 degrees to match train preprocessing
-                img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-                wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+                # Match the image convention used by the checkpoint's train preprocessing.
+                img = _preprocess_libero_image(obs["agentview_image"], args.image_transform)
+                wrist_img = _preprocess_libero_image(obs["robot0_eye_in_hand_image"], args.image_transform)
 
                 # Save preprocessed image for replay video
                 replay_images.append(img)
