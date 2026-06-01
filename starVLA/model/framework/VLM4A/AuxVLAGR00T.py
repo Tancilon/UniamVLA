@@ -115,7 +115,130 @@ class AuxVLAGR00TDefaultConfig:
 class ReconVLAInterface(nn.Module):
     def __init__(self, config):
         super().__init__()
-        raise NotImplementedError("ReconVLAInterface is implemented in Task 4")
+        _ensure_reconvla_pythonpath()
+        from recon.model.language_model.recon_qwen import ReconQwen2ForCausalLM
+        import recon.mm_utils as recon_mm_utils
+        from transformers import AutoTokenizer
+
+        self.config = config
+        recon_cfg = config.framework.get("reconvla", {})
+        self.model_path = str(recon_cfg.get("model_path", "ckpt/pretrain-checkpoint-10388"))
+        self.image_token_id = int(recon_cfg.get("synthetic_image_token_id", -200))
+        self._tokenizer_image_token = recon_mm_utils.tokenizer_image_token
+        self._process_images = getattr(recon_mm_utils, "process_images", None)
+
+        load_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "ignore_mismatched_sizes": False,
+        }
+        attn_implementation = recon_cfg.get("attn_implementation", None)
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=False)
+        self.processor = SimpleNamespace(tokenizer=self.tokenizer)
+        self.model = ReconQwen2ForCausalLM.from_pretrained(self.model_path, **load_kwargs)
+        self.model.config.use_cache = False
+
+        if bool(recon_cfg.get("disable_internal_recon_loss", True)):
+            self.model.config.recon_enable = False
+            self.model.config.reconstruct_image = False
+
+        vision_tower = self.model.get_vision_tower()
+        if not getattr(vision_tower, "is_loaded", True):
+            vision_tower.load_model(device_map=None)
+        self.image_processor = vision_tower.image_processor
+        self.image_embed_len = int(getattr(self.model.config, "image_embed_len", 729))
+
+    @property
+    def device(self):
+        first_param = next(self.model.parameters(), None)
+        if first_param is None:
+            return torch.device("cpu")
+        return first_param.device
+
+    def _process_image(self, image):
+        image_size = getattr(image, "size", None)
+        if self._process_images is not None:
+            pixel_values = self._process_images([image], self.image_processor, self.model.config)
+            if pixel_values.ndim == 4:
+                pixel_values = pixel_values[0]
+        else:
+            pixel_values = self.image_processor.preprocess(
+                image,
+                return_tensors="pt",
+            )["pixel_values"][0]
+        if image_size is None:
+            image_size = (pixel_values.shape[-1], pixel_values.shape[-2])
+        return pixel_values, tuple(image_size)
+
+    def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
+        if solutions is not None:
+            raise ValueError("AuxVLAGR00T does not support language/action-token solutions")
+        if len(images) != len(instructions):
+            raise AssertionError("Images and instructions must have the same length")
+
+        input_ids = []
+        image_tensors = []
+        image_sizes = []
+        boi_ids = []
+        eoi_ids = []
+        for sample_images, instruction in zip(images, instructions):
+            if len(sample_images) != 1:
+                raise RuntimeError(
+                    f"ReconVLA single-view path expects exactly one image, got {len(sample_images)}"
+                )
+            prompt = f"<image>\n{instruction}"
+            ids = self._tokenizer_image_token(
+                prompt,
+                self.tokenizer,
+                self.image_token_id,
+                return_tensors=None,
+            )
+            if not torch.is_tensor(ids):
+                ids = torch.as_tensor(ids, dtype=torch.long)
+            image_positions = torch.where(ids == self.image_token_id)[0]
+            if image_positions.numel() != 1:
+                raise RuntimeError(
+                    f"Expected exactly one image token in ReconVLA prompt, got {image_positions.numel()}"
+                )
+            boi = int(image_positions[0].item())
+            boi_ids.append(boi)
+            eoi_ids.append(boi + self.image_embed_len - 1)
+            input_ids.append(ids)
+            pixel_values, image_size = self._process_image(sample_images[0])
+            image_tensors.append(pixel_values)
+            image_sizes.append(image_size)
+
+        padded_input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids,
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id,
+        )
+        attention_mask = padded_input_ids.ne(self.tokenizer.pad_token_id)
+        images_tensor = torch.stack(image_tensors, dim=0)
+        device = self.device
+        return {
+            "input_ids": padded_input_ids.to(device),
+            "attention_mask": attention_mask.to(device),
+            "images": images_tensor.to(device),
+            "image_sizes": image_sizes,
+            "boi_ids": boi_ids,
+            "eoi_ids": eoi_ids,
+        }
+
+    def forward(self, **kwargs):
+        boi_ids = kwargs.pop("boi_ids", None)
+        eoi_ids = kwargs.pop("eoi_ids", None)
+        kwargs.setdefault("use_cache", False)
+        kwargs.setdefault("output_hidden_states", True)
+        kwargs.setdefault("return_dict", True)
+        outputs = self.model(**kwargs)
+        if boi_ids is not None:
+            setattr(outputs, "boi_ids", boi_ids)
+        if eoi_ids is not None:
+            setattr(outputs, "eoi_ids", eoi_ids)
+        return outputs
 
 
 @FRAMEWORK_REGISTRY.register("AuxVLAGR00T")
