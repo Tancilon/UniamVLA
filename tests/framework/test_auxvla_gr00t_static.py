@@ -62,6 +62,7 @@ def _load_auxvla_module(monkeypatch):
     spec = importlib.util.spec_from_file_location("auxvla_gr00t_under_test", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     module._registered_names = registered
     return module
