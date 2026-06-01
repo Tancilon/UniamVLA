@@ -276,6 +276,39 @@ def test_unnormalize_actions_allows_gripper_threshold_override():
     assert calvin_out[:, 6].tolist() == [1.0, 0.0, 1.0]
 
 
+def test_unnormalize_actions_can_interpret_libero_gripper_sign_as_open():
+    """LIBERO datasets store gripper as action sign (-1=open, +1=close).
+
+    The client still exposes open_gripper to eval_libero.py, so the sign needs
+    to become open probability semantics before eval maps it back to LIBERO's
+    env action convention.
+    """
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    stats = {
+        "min": [-1.0] * 7,
+        "max": [1.0] * 7,
+        "mask": [True] * 6 + [False],
+    }
+    normalized = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.75],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    out = ModelClient.unnormalize_actions(
+        normalized.copy(),
+        stats,
+        gripper_binarize_threshold=0.0,
+        gripper_interpretation="libero_sign",
+    )
+
+    assert out[:, 6].tolist() == [1.0, 0.0, 0.0]
+
+
 def test_action_query_interval_replans_before_chunk_boundary(make_client):
     """CALVIN eval uses replan_steps=5 while checkpoints emit chunk=8; the
     client should requery on the requested interval and consume the fresh

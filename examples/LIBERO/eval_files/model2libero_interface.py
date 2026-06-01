@@ -96,6 +96,7 @@ class ModelClient:
         num_ddim_steps: int = 10,
         adaptive_ensemble_alpha=0.1,
         gripper_binarize_threshold: float = 0.5,
+        gripper_interpretation: str = "positive_open",
         action_query_interval: Optional[int] = None,
         host="0.0.0.0",
         port=10095,
@@ -125,6 +126,12 @@ class ModelClient:
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
         self.action_ensemble_horizon = action_ensemble_horizon
         self.gripper_binarize_threshold = float(gripper_binarize_threshold)
+        if gripper_interpretation not in {"positive_open", "libero_sign"}:
+            raise ValueError(
+                "gripper_interpretation must be one of "
+                "{'positive_open', 'libero_sign'}"
+            )
+        self.gripper_interpretation = gripper_interpretation
         self.sticky_action_is_on = False
         self.gripper_action_repeat = 0
         self.sticky_gripper_action = 0.0
@@ -292,6 +299,7 @@ class ModelClient:
                 normalized_actions=normalized_actions,
                 action_norm_stats=self.action_norm_stats,
                 gripper_binarize_threshold=self.gripper_binarize_threshold,
+                gripper_interpretation=self.gripper_interpretation,
             )
             if _debug_uamvla_actions_enabled():
                 _debug_print_action_array("normalized_actions(client)", normalized_actions)
@@ -312,11 +320,28 @@ class ModelClient:
         normalized_actions: np.ndarray,
         action_norm_stats: Dict[str, np.ndarray],
         gripper_binarize_threshold: float = 0.5,
+        gripper_interpretation: str = "positive_open",
     ) -> np.ndarray:
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
         normalized_actions = np.clip(normalized_actions, -1, 1)
-        normalized_actions[:, 6] = np.where(normalized_actions[:, 6] < gripper_binarize_threshold, 0, 1)
+        if gripper_interpretation == "positive_open":
+            normalized_actions[:, 6] = np.where(
+                normalized_actions[:, 6] < gripper_binarize_threshold,
+                0,
+                1,
+            )
+        elif gripper_interpretation == "libero_sign":
+            normalized_actions[:, 6] = np.where(
+                normalized_actions[:, 6] < gripper_binarize_threshold,
+                1,
+                0,
+            )
+        else:
+            raise ValueError(
+                "gripper_interpretation must be one of "
+                "{'positive_open', 'libero_sign'}"
+            )
         actions = np.where(
             mask,
             0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
