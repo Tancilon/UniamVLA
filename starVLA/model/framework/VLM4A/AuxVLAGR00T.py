@@ -448,6 +448,10 @@ class AuxVLAGR00T(baseframework):
         )
 
         self.qwen_vl_interface = ReconVLAInterface(self.config)
+        recon_cfg = _cfg_get(self.config.framework, "reconvla", {})
+        lora_cfg = _cfg_get(recon_cfg, "lora", {})
+        if bool(_cfg_get(lora_cfg, "enabled", False)):
+            self.qwen_vl_interface.apply_language_lora(lora_cfg)
         hidden_size = int(self.qwen_vl_interface.model.config.hidden_size)
         self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = hidden_size
         self.action_model = get_gr00t_action_model(config=self.config)

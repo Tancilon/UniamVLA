@@ -116,6 +116,19 @@ class _FakeActionModel:
         return torch.zeros(hidden.shape[0], 8, 7)
 
 
+class _FakeReconInterfaceForInit:
+    instances = []
+
+    def __init__(self, config):
+        self.config = config
+        self.model = types.SimpleNamespace(config=types.SimpleNamespace(hidden_size=3584))
+        self.applied_lora = None
+        self.__class__.instances.append(self)
+
+    def apply_language_lora(self, lora_cfg):
+        self.applied_lora = lora_cfg
+
+
 def test_auxvla_gr00t_registers_framework(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     assert "AuxVLAGR00T" in module._registered_names
@@ -142,6 +155,39 @@ def test_auxvla_lora_defaults_are_disabled(monkeypatch):
         "up_proj",
         "down_proj",
     ]
+
+
+def test_auxvla_init_applies_reconvla_lora_when_enabled(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    _FakeReconInterfaceForInit.instances = []
+    monkeypatch.setattr(module, "ReconVLAInterface", _FakeReconInterfaceForInit)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                lora=_AttrDict(
+                    enabled=True,
+                    r=16,
+                    lora_alpha=32,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=["q_proj"],
+                )
+            ),
+            action_model=_AttrDict(
+                diffusion_model_cfg=_AttrDict(cross_attention_dim=0),
+                action_horizon=8,
+            ),
+        ),
+        datasets=_AttrDict(vla_data=_AttrDict()),
+    )
+
+    model = module.AuxVLAGR00T(cfg)
+
+    assert model.qwen_vl_interface is _FakeReconInterfaceForInit.instances[0]
+    assert model.qwen_vl_interface.applied_lora is cfg.framework.reconvla.lora
+    assert cfg.framework.action_model.diffusion_model_cfg.cross_attention_dim == 3584
 
 
 def test_auxvla_delegates_uamvla_sidecar_loaders(monkeypatch):
