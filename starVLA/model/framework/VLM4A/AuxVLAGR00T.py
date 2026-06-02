@@ -457,6 +457,123 @@ class AuxVLAGR00T(baseframework):
         self.action_model = get_gr00t_action_model(config=self.config)
         self.action_horizon = int(self.config.framework.action_model.action_horizon)
 
+    def _reconvla_lora_enabled(self) -> bool:
+        qwen_interface = getattr(self, "qwen_vl_interface", None)
+        if bool(getattr(qwen_interface, "lora_enabled", False)):
+            return True
+        framework_cfg = _cfg_get(getattr(self, "config", None), "framework", {})
+        recon_cfg = _cfg_get(framework_cfg, "reconvla", {})
+        lora_cfg = _cfg_get(recon_cfg, "lora", {})
+        return bool(_cfg_get(lora_cfg, "enabled", False))
+
+    def _trainer_freeze_patterns(self) -> list[str]:
+        trainer_cfg = _cfg_get(getattr(self, "config", None), "trainer", {})
+        freeze_modules = _cfg_get(trainer_cfg, "freeze_modules", "")
+        if freeze_modules is None:
+            return []
+        if isinstance(freeze_modules, str):
+            return [pattern.strip() for pattern in freeze_modules.split(",") if pattern.strip()]
+        if isinstance(freeze_modules, (list, tuple)):
+            return [str(pattern).strip() for pattern in freeze_modules if str(pattern).strip()]
+        return [str(freeze_modules).strip()] if str(freeze_modules).strip() else []
+
+    def _resolve_module_path(self, module_path: str):
+        module = self
+        for attr in module_path.split("."):
+            module = getattr(module, attr)
+        return module
+
+    def _frozen_param_ids_from_config(self) -> set[int]:
+        frozen_param_ids: set[int] = set()
+        for freeze_path in self._trainer_freeze_patterns():
+            try:
+                module = self._resolve_module_path(freeze_path)
+            except AttributeError:
+                logger.warning("freeze module path does not exist: %s", freeze_path)
+                continue
+            if hasattr(module, "parameters"):
+                frozen_param_ids.update(id(param) for param in module.parameters())
+        return frozen_param_ids
+
+    def get_lr_groups(self, lr_cfg):
+        lr_cfg = _cfg_to_plain_dict(lr_cfg)
+        base_lr = float(lr_cfg.get("base", 1.0e-4))
+        lora_enabled = self._reconvla_lora_enabled()
+        freeze_patterns = self._trainer_freeze_patterns()
+        if lora_enabled and any(
+            pattern == "qwen_vl_interface" or pattern.startswith("qwen_vl_interface.")
+            for pattern in freeze_patterns
+        ):
+            raise RuntimeError(
+                "AuxVLAGR00T LoRA is enabled, but trainer.freeze_modules includes "
+                "`qwen_vl_interface`. This would freeze LoRA adapters; set "
+                "trainer.freeze_modules=null and rely on the framework LR groups."
+            )
+
+        excluded_param_ids = self._frozen_param_ids_from_config()
+        if lora_enabled and hasattr(getattr(self, "qwen_vl_interface", None), "named_parameters"):
+            for name, param in self.qwen_vl_interface.named_parameters():
+                if "lora_" not in name.lower():
+                    excluded_param_ids.add(id(param))
+
+        used_param_ids: set[int] = set()
+        param_groups: list[dict] = []
+
+        def _module_params_for_group(module_name: str, module) -> list[torch.nn.Parameter]:
+            if (
+                lora_enabled
+                and (
+                    module_name == "qwen_vl_interface"
+                    or module_name.startswith("qwen_vl_interface.")
+                )
+                and hasattr(module, "named_parameters")
+            ):
+                return [
+                    param
+                    for name, param in module.named_parameters()
+                    if "lora_" in name.lower()
+                ]
+            if not hasattr(module, "parameters"):
+                return []
+            return list(module.parameters())
+
+        def _append_group(name: str, params, lr: float) -> None:
+            group_params = [
+                param
+                for param in params
+                if param.requires_grad
+                and id(param) not in excluded_param_ids
+                and id(param) not in used_param_ids
+            ]
+            if not group_params:
+                return
+            param_groups.append({"params": group_params, "lr": float(lr), "name": name})
+            used_param_ids.update(id(param) for param in group_params)
+
+        for module_name, lr in lr_cfg.items():
+            if module_name == "base":
+                continue
+            try:
+                module = self._resolve_module_path(module_name)
+            except AttributeError:
+                logger.warning("LR module path does not exist: %s", module_name)
+                continue
+            _append_group(
+                module_name,
+                _module_params_for_group(str(module_name), module),
+                float(lr),
+            )
+
+        remaining_params = [
+            param
+            for param in self.parameters()
+            if param.requires_grad
+            and id(param) not in excluded_param_ids
+            and id(param) not in used_param_ids
+        ]
+        _append_group("base", remaining_params, base_lr)
+        return param_groups
+
     def _init_uamvla_sidecars(self) -> None:
         self._init_uamvla_sidecar_roots()
         self._init_lerobot_video_path_config()

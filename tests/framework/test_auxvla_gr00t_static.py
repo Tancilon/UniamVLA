@@ -129,6 +129,20 @@ class _FakeReconInterfaceForInit:
         self.applied_lora = lora_cfg
 
 
+class _NamedParamModule(torch.nn.Module):
+    def __init__(self, name: str):
+        super().__init__()
+        self.register_parameter(name, torch.nn.Parameter(torch.ones(())))
+
+
+class _FakeLoRAInterface(torch.nn.Module):
+    def __init__(self, lora_enabled=True):
+        super().__init__()
+        self.lora_enabled = lora_enabled
+        self.base_weight = torch.nn.Parameter(torch.ones(()))
+        self.lora_A = torch.nn.Parameter(torch.ones(()))
+
+
 def test_auxvla_gr00t_registers_framework(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     assert "AuxVLAGR00T" in module._registered_names
@@ -188,6 +202,66 @@ def test_auxvla_init_applies_reconvla_lora_when_enabled(monkeypatch):
     assert model.qwen_vl_interface is _FakeReconInterfaceForInit.instances[0]
     assert model.qwen_vl_interface.applied_lora is cfg.framework.reconvla.lora
     assert cfg.framework.action_model.diffusion_model_cfg.cross_attention_dim == 3584
+
+
+def test_auxvla_get_lr_groups_routes_lora_and_action_params(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = _FakeLoRAInterface(lora_enabled=True)
+    model.action_model = _NamedParamModule("action_weight")
+    model.aux_heads = torch.nn.ModuleDict({"recon": _NamedParamModule("aux_weight")})
+    model.extra_weight = torch.nn.Parameter(torch.ones(()))
+    model.config = _AttrDict(
+        framework=_AttrDict(reconvla=_AttrDict(lora=_AttrDict(enabled=True))),
+        trainer=_AttrDict(freeze_modules=None),
+    )
+
+    groups = module.AuxVLAGR00T.get_lr_groups(
+        model,
+        _AttrDict(
+            base=1.0e-4,
+            qwen_vl_interface=1.0e-5,
+            action_model=2.0e-4,
+            aux_heads=3.0e-4,
+        ),
+    )
+
+    by_name = {group["name"]: group for group in groups}
+    assert by_name["qwen_vl_interface"]["lr"] == 1.0e-5
+    assert by_name["action_model"]["lr"] == 2.0e-4
+    assert by_name["aux_heads"]["lr"] == 3.0e-4
+    assert by_name["base"]["lr"] == 1.0e-4
+
+    qwen_param_ids = {id(param) for param in by_name["qwen_vl_interface"]["params"]}
+    all_group_param_ids = {id(param) for group in groups for param in group["params"]}
+    assert qwen_param_ids == {id(model.qwen_vl_interface.lora_A)}
+    assert id(model.qwen_vl_interface.base_weight) not in all_group_param_ids
+    assert id(model.action_model.action_weight) in {
+        id(param) for param in by_name["action_model"]["params"]
+    }
+    assert id(model.aux_heads["recon"].aux_weight) in {
+        id(param) for param in by_name["aux_heads"]["params"]
+    }
+    assert id(model.extra_weight) in {id(param) for param in by_name["base"]["params"]}
+
+
+def test_auxvla_get_lr_groups_rejects_freezing_qwen_interface_with_lora(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = _FakeLoRAInterface(lora_enabled=True)
+    model.action_model = _NamedParamModule("action_weight")
+    model.config = _AttrDict(
+        framework=_AttrDict(reconvla=_AttrDict(lora=_AttrDict(enabled=True))),
+        trainer=_AttrDict(freeze_modules="qwen_vl_interface"),
+    )
+
+    with pytest.raises(RuntimeError, match="freeze_modules"):
+        module.AuxVLAGR00T.get_lr_groups(
+            model,
+            _AttrDict(base=1.0e-4, qwen_vl_interface=1.0e-5, action_model=2.0e-4),
+        )
 
 
 def test_auxvla_delegates_uamvla_sidecar_loaders(monkeypatch):
