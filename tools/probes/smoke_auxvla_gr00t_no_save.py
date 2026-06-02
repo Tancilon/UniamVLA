@@ -68,12 +68,41 @@ def count_named_parameters(module: torch.nn.Module, predicate) -> int:
     )
 
 
+def named_parameter_examples(module: torch.nn.Module, predicate, limit: int = 8) -> list[str]:
+    examples: list[str] = []
+    for name, param in module.named_parameters():
+        if predicate(name, param):
+            examples.append(name)
+            if len(examples) >= limit:
+                break
+    return examples
+
+
 def grad_norm_named(module: torch.nn.Module, device: torch.device, predicate) -> torch.Tensor:
     total = torch.zeros((), device=device, dtype=torch.float32)
     for name, param in module.named_parameters():
         if predicate(name, param) and param.grad is not None:
             total = total + param.grad.detach().float().norm().pow(2)
     return total.sqrt()
+
+
+def grad_count_named(module: torch.nn.Module, predicate) -> int:
+    return sum(
+        param.grad is not None
+        for name, param in module.named_parameters()
+        if predicate(name, param)
+    )
+
+
+def grad_examples_named(module: torch.nn.Module, predicate, limit: int = 8) -> list[str]:
+    examples: list[str] = []
+    for name, param in module.named_parameters():
+        if predicate(name, param) and param.grad is not None:
+            norm = param.grad.detach().float().norm().item()
+            examples.append(f"{name}:{norm:.3e}")
+            if len(examples) >= limit:
+                break
+    return examples
 
 
 def parse_args():
@@ -193,6 +222,24 @@ def main() -> None:
                 param.requires_grad and _is_lora_param(name) and "mm_inv_projector" in name
             ),
         )
+        mm_projector_lora_examples = named_parameter_examples(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad
+                and _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        language_lora_examples = named_parameter_examples(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad
+                and _is_lora_param(name)
+                and "mm_projector" not in name
+                and "mm_inv_projector" not in name
+            ),
+        )
         action_trainable = sum(
             param.numel() for param in model.action_model.parameters() if param.requires_grad
         )
@@ -208,6 +255,8 @@ def main() -> None:
         print(f"mm_projector_lora_trainable_params={mm_projector_lora_trainable / 1e6:.2f}M")
         print(f"mm_projector_base_trainable_params={mm_projector_base_trainable}")
         print(f"mm_inv_projector_lora_trainable_params={mm_inv_projector_lora_trainable / 1e6:.2f}M")
+        print(f"mm_projector_lora_trainable_examples={mm_projector_lora_examples}")
+        print(f"language_lora_trainable_examples={language_lora_examples}")
         if args.enable_lora:
             assert lora_trainable > 0, "LoRA is enabled but no adapter parameters are trainable"
             assert backbone_base_trainable == 0, "non-LoRA backbone parameters are trainable"
@@ -268,6 +317,40 @@ def main() -> None:
             hidden.device,
             lambda name, param: _is_lora_param(name),
         )
+        mm_projector_lora_grad_norm = grad_norm_named(
+            model.qwen_vl_interface,
+            hidden.device,
+            lambda name, param: (
+                _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        mm_projector_lora_b_grad_norm = grad_norm_named(
+            model.qwen_vl_interface,
+            hidden.device,
+            lambda name, param: (
+                "lora_b" in name.lower()
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        mm_projector_lora_grad_count = grad_count_named(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        mm_projector_lora_grad_examples = grad_examples_named(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
         backbone_grad_count = sum(
             param.grad is not None
             for name, param in model.qwen_vl_interface.named_parameters()
@@ -288,6 +371,10 @@ def main() -> None:
         print(f"loss={loss.detach().float().item():.6f}")
         print(f"action_grad_norm={action_grad_norm.item():.6f}")
         print(f"lora_grad_norm={lora_grad_norm.item():.6f}")
+        print(f"mm_projector_lora_grad_count={mm_projector_lora_grad_count}")
+        print(f"mm_projector_lora_grad_norm={mm_projector_lora_grad_norm.item():.6f}")
+        print(f"mm_projector_lora_b_grad_norm={mm_projector_lora_b_grad_norm.item():.6f}")
+        print(f"mm_projector_lora_grad_examples={mm_projector_lora_grad_examples}")
         print(f"backbone_grad_count={backbone_grad_count}")
 
         assert hidden.shape[-1] == 3584, f"unexpected hidden dim: {hidden.shape}"
@@ -297,6 +384,13 @@ def main() -> None:
         assert action_grad_norm.item() > 0, "action head did not receive gradients"
         if args.enable_lora:
             assert lora_grad_norm.item() > 0, "LoRA adapters did not receive gradients"
+            if train_mm_projector:
+                assert (
+                    mm_projector_lora_grad_count > 0
+                ), "train_mm_projector=true but mm_projector LoRA parameters have no gradients"
+                assert (
+                    mm_projector_lora_b_grad_norm.item() > 0
+                ), "train_mm_projector=true but mm_projector LoRA-B gradients are zero"
         assert backbone_grad_count == 0, "frozen backbone unexpectedly has gradients"
         print("SMOKE_OK")
     finally:
