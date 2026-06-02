@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 
@@ -110,12 +111,30 @@ class _FakeImageProcessor:
         return {"pixel_values": torch.full((1, 3, 384, 384), float(image))}
 
 
-class _FakeVisionTower:
+class _FakeVisionTower(torch.nn.Module):
     is_loaded = True
     image_processor = _FakeImageProcessor()
 
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(2, 2)
+
     def load_model(self, device_map=None):
         self.loaded_device_map = device_map
+
+
+class _FakeInnerReconModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mm_projector = torch.nn.Linear(2, 2)
+        self.mm_inv_projector = torch.nn.Linear(2, 2)
+        self.q_proj = torch.nn.Linear(2, 2)
+        self.k_proj = torch.nn.Linear(2, 2)
+        self.v_proj = torch.nn.Linear(2, 2)
+        self.o_proj = torch.nn.Linear(2, 2)
+        self.gate_proj = torch.nn.Linear(2, 2)
+        self.up_proj = torch.nn.Linear(2, 2)
+        self.down_proj = torch.nn.Linear(2, 2)
 
 
 class _FakeReconModel(torch.nn.Module):
@@ -128,6 +147,7 @@ class _FakeReconModel(torch.nn.Module):
             reconstruct_image=True,
         )
         self.vision_tower = _FakeVisionTower()
+        self.model = _FakeInnerReconModel()
         self.forward_kwargs = None
 
     @classmethod
@@ -138,6 +158,9 @@ class _FakeReconModel(torch.nn.Module):
         if "config" in kwargs:
             model.config = kwargs["config"]
         return model
+
+    def get_model(self):
+        return self.model
 
     def get_vision_tower(self):
         return self.vision_tower
@@ -171,6 +194,32 @@ def _install_reconvla_fakes(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, fake_mm_utils.__name__, fake_mm_utils)
     return fake_mm_utils
+
+
+def _install_fake_peft(monkeypatch, add_lora_param=True):
+    fake_peft = types.ModuleType("peft")
+
+    class _FakeTaskType:
+        CAUSAL_LM = "CAUSAL_LM"
+
+    class _FakeLoraConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.target_modules = kwargs["target_modules"]
+
+    def _fake_get_peft_model(model, lora_config):
+        for param in model.parameters():
+            param.requires_grad_(False)
+        model.peft_config_seen = lora_config
+        if add_lora_param:
+            model.lora_A = torch.nn.Parameter(torch.ones(1))
+        return model
+
+    fake_peft.TaskType = _FakeTaskType
+    fake_peft.LoraConfig = _FakeLoraConfig
+    fake_peft.get_peft_model = _fake_get_peft_model
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+    return fake_peft
 
 
 def test_reconvla_interface_loads_and_disables_internal_recon(monkeypatch):
@@ -216,6 +265,75 @@ def test_reconvla_interface_overrides_local_vision_tower_path(monkeypatch):
     loaded_config = interface.model.from_pretrained_kwargs["config"]
     assert loaded_config.mm_vision_tower == "ckpt/siglip-so400m-patch14-384"
     assert interface.model.config.mm_vision_tower == "ckpt/siglip-so400m-patch14-384"
+
+
+def test_reconvla_interface_applies_lora_and_freezes_multimodal(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+    _install_fake_peft(monkeypatch)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                vision_tower_path="ckpt/siglip-so400m-patch14-384",
+                lora=_AttrDict(
+                    enabled=True,
+                    r=16,
+                    lora_alpha=32,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                ),
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+    interface.apply_language_lora(cfg.framework.reconvla.lora)
+
+    assert interface.lora_enabled is True
+    assert interface.model.peft_config_seen.kwargs["r"] == 16
+    assert interface.model.peft_config_seen.kwargs["lora_alpha"] == 32
+    assert interface.model.peft_config_seen.kwargs["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+    ]
+    trainable = [name for name, param in interface.model.named_parameters() if param.requires_grad]
+    assert trainable == ["lora_A"]
+    assert all(not p.requires_grad for p in interface.model.get_vision_tower().parameters())
+    assert all(not p.requires_grad for p in interface.model.get_model().mm_projector.parameters())
+    assert all(not p.requires_grad for p in interface.model.get_model().mm_inv_projector.parameters())
+
+
+def test_reconvla_interface_rejects_lora_without_trainable_adapters(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+    _install_fake_peft(monkeypatch, add_lora_param=False)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                lora=_AttrDict(
+                    enabled=True,
+                    r=16,
+                    lora_alpha=32,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=["q_proj"],
+                ),
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+    with pytest.raises(RuntimeError, match="No trainable LoRA parameters"):
+        interface.apply_language_lora(cfg.framework.reconvla.lora)
 
 
 def test_reconvla_interface_builds_single_image_batch(monkeypatch):

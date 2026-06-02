@@ -37,6 +37,33 @@ def _ensure_reconvla_pythonpath() -> None:
         sys.path.insert(0, root_str)
 
 
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _cfg_to_plain_dict(cfg) -> dict:
+    if cfg is None:
+        return {}
+    if isinstance(cfg, dict):
+        return {key: _cfg_to_plain_dict(value) for key, value in cfg.items()}
+    if hasattr(cfg, "items"):
+        return {key: _cfg_to_plain_dict(value) for key, value in cfg.items()}
+    if isinstance(cfg, (list, tuple)):
+        return [_cfg_to_plain_dict(value) for value in cfg]
+    return cfg
+
+
+def _freeze_module(module) -> None:
+    if module is None or not hasattr(module, "parameters"):
+        return
+    for param in module.parameters():
+        param.requires_grad_(False)
+
+
 def _make_aux_input_ids(
     batch_size: int,
     seq_len: int,
@@ -172,6 +199,7 @@ class ReconVLAInterface(nn.Module):
             vision_tower.load_model(device_map=None)
         self.image_processor = vision_tower.image_processor
         self.image_embed_len = int(getattr(self.model.config, "image_embed_len", 729))
+        self.lora_enabled = False
 
     def _resolve_vision_tower_path(self, recon_cfg, model_config):
         configured = recon_cfg.get("vision_tower_path", None) or recon_cfg.get("mm_vision_tower", None)
@@ -195,6 +223,100 @@ class ReconVLAInterface(nn.Module):
             if candidate.exists():
                 return str(candidate)
         return None
+
+    def _base_reconvla_model(self):
+        if hasattr(self.model, "get_base_model"):
+            return self.model.get_base_model()
+        base_model = getattr(self.model, "base_model", None)
+        if base_model is not None:
+            wrapped_model = getattr(base_model, "model", None)
+            if wrapped_model is not None:
+                return wrapped_model
+        return self.model
+
+    def _inner_reconvla_model(self):
+        base_model = self._base_reconvla_model()
+        if hasattr(base_model, "get_model"):
+            return base_model.get_model()
+        wrapped_model = getattr(base_model, "model", None)
+        if wrapped_model is not None:
+            return wrapped_model
+        return base_model
+
+    def _matched_lora_targets(self, target_modules: list[str]) -> set[str]:
+        targets = {str(target) for target in target_modules}
+        matched: set[str] = set()
+        for name, _module in self.model.named_modules():
+            leaf_name = name.rsplit(".", 1)[-1]
+            if leaf_name in targets:
+                matched.add(leaf_name)
+        return matched
+
+    def _freeze_non_language_multimodal_modules(self) -> None:
+        base_model = self._base_reconvla_model()
+        inner_model = self._inner_reconvla_model()
+        vision_tower = None
+        if hasattr(base_model, "get_vision_tower"):
+            vision_tower = base_model.get_vision_tower()
+        elif hasattr(inner_model, "get_vision_tower"):
+            vision_tower = inner_model.get_vision_tower()
+        _freeze_module(vision_tower)
+        for attr in ("mm_projector", "mm_inv_projector"):
+            _freeze_module(getattr(inner_model, attr, None))
+
+    def lora_trainable_parameter_names(self) -> list[str]:
+        return [
+            name
+            for name, param in self.model.named_parameters()
+            if param.requires_grad and "lora_" in name.lower()
+        ]
+
+    def apply_language_lora(self, lora_cfg) -> None:
+        lora_cfg = _cfg_to_plain_dict(lora_cfg)
+        if not bool(lora_cfg.get("enabled", False)):
+            return
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model
+        except ImportError as exc:
+            raise RuntimeError(
+                "AuxVLAGR00T LoRA requires peft. Install peft or set "
+                "framework.reconvla.lora.enabled=false."
+            ) from exc
+
+        target_modules = list(lora_cfg.get("target_modules") or [])
+        if not target_modules:
+            raise ValueError("framework.reconvla.lora.target_modules must be non-empty")
+        matched_targets = self._matched_lora_targets(target_modules)
+        if not matched_targets:
+            raise ValueError(
+                "No ReconVLA modules matched LoRA target_modules="
+                f"{target_modules}. Expected Qwen2/Ross names like q_proj, k_proj, "
+                "v_proj, o_proj, gate_proj, up_proj, down_proj."
+            )
+
+        task_type_name = str(lora_cfg.get("task_type", "CAUSAL_LM"))
+        task_type = getattr(TaskType, task_type_name, task_type_name)
+        peft_cfg = LoraConfig(
+            task_type=task_type,
+            r=int(lora_cfg.get("r", 16)),
+            lora_alpha=int(lora_cfg.get("lora_alpha", 32)),
+            lora_dropout=float(lora_cfg.get("lora_dropout", 0.05)),
+            target_modules=target_modules,
+            bias=str(lora_cfg.get("bias", "none")),
+        )
+        self.model = get_peft_model(self.model, peft_cfg)
+        self._freeze_non_language_multimodal_modules()
+        trainable_lora = self.lora_trainable_parameter_names()
+        if not trainable_lora:
+            raise RuntimeError(
+                "No trainable LoRA parameters were created for AuxVLAGR00T. "
+                "Check framework.reconvla.lora.target_modules."
+            )
+        self.lora_enabled = True
+        logger.info(
+            "AuxVLAGR00T LoRA enabled with %d trainable adapter tensors",
+            len(trainable_lora),
+        )
 
     @property
     def device(self):
