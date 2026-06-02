@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 
 class _AttrDict(dict):
@@ -169,6 +170,29 @@ def test_auxvla_lora_defaults_are_disabled(monkeypatch):
         "up_proj",
         "down_proj",
     ]
+
+
+def test_cfg_to_plain_dict_handles_wrapped_lora_target_modules(monkeypatch):
+    from starVLA.training.trainer_utils.config_tracker import wrap_config
+
+    module = _load_auxvla_module(monkeypatch)
+    cfg = wrap_config(
+        OmegaConf.create(
+            {
+                "enabled": True,
+                "r": 16,
+                "target_modules": ["q_proj", "v_proj"],
+            }
+        )
+    )
+
+    plain = module._cfg_to_plain_dict(cfg)
+
+    assert plain == {
+        "enabled": True,
+        "r": 16,
+        "target_modules": ["q_proj", "v_proj"],
+    }
 
 
 def test_auxvla_init_applies_reconvla_lora_when_enabled(monkeypatch):

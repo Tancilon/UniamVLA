@@ -48,12 +48,14 @@ def _cfg_get(cfg, key, default=None):
 def _cfg_to_plain_dict(cfg) -> dict:
     if cfg is None:
         return {}
+    if isinstance(cfg, (list, tuple)):
+        return [_cfg_to_plain_dict(value) for value in cfg]
+    if hasattr(cfg, "_is_list_config") and cfg._is_list_config():
+        return [_cfg_to_plain_dict(value) for value in cfg.values()]
     if isinstance(cfg, dict):
         return {key: _cfg_to_plain_dict(value) for key, value in cfg.items()}
     if hasattr(cfg, "items"):
         return {key: _cfg_to_plain_dict(value) for key, value in cfg.items()}
-    if isinstance(cfg, (list, tuple)):
-        return [_cfg_to_plain_dict(value) for value in cfg]
     return cfg
 
 
