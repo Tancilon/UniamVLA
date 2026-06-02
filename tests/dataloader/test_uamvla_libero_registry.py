@@ -185,3 +185,14 @@ def test_auxvla_gr00t_libero_yaml_loads():
     assert cfg.datasets.vla_data.obs == ["video.primary_image", "video.wrist_image"]
     assert cfg.framework.action_model.action_horizon == 8
     assert cfg.framework.aux_heads.recon.enabled is False
+
+
+def test_auxvla_gr00t_lora_libero_yaml_loads():
+    cfg = OmegaConf.load("starVLA/config/training/auxvla_gr00t_lora_libero.yaml")
+    assert cfg.run_id == "auxvla_gr00t_lora_libero_primary_h8"
+    assert cfg.framework.name == "AuxVLAGR00T"
+    assert cfg.framework.reconvla.lora.enabled is True
+    assert cfg.framework.reconvla.lora.r == 16
+    assert cfg.framework.reconvla.lora.lora_alpha == 32
+    assert "q_proj" in cfg.framework.reconvla.lora.target_modules
+    assert cfg.trainer.freeze_modules is None
