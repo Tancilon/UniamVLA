@@ -1,9 +1,10 @@
 """No-save smoke test for AuxVLAGR00T.
 
-This script loads the ReconVLA backbone, freezes it, trains only the GR00T
-action head for one optimizer step, and prints the key shape/loss/gradient
-checks. It intentionally does not call the main trainer and does not save a
-model checkpoint.
+This script loads the ReconVLA backbone, freezes it by default, trains the
+GR00T action head for one optimizer step, and prints the key shape/loss/gradient
+checks. With --enable_lora, it trains GR00T plus ReconVLA language LoRA adapters
+while keeping the non-LoRA backbone, vision tower, and projectors frozen. It
+intentionally does not call the main trainer and does not save a model checkpoint.
 
 Example:
     CUDA_VISIBLE_DEVICES=0 python tools/probes/smoke_auxvla_gr00t_no_save.py \
@@ -39,10 +40,15 @@ def ensure_single_process_group(port: int) -> bool:
     return True
 
 
+def _is_lora_param(name: str) -> bool:
+    return "lora_" in name.lower()
+
+
 def freeze_backbone(model) -> None:
-    for param in model.qwen_vl_interface.parameters():
-        param.requires_grad_(False)
-    model.qwen_vl_interface.eval()
+    lora_enabled = bool(getattr(model.qwen_vl_interface, "lora_enabled", False))
+    for name, param in model.qwen_vl_interface.named_parameters():
+        param.requires_grad_(lora_enabled and _is_lora_param(name))
+    model.qwen_vl_interface.train(lora_enabled)
     model.action_model.train()
 
 
@@ -50,6 +56,22 @@ def grad_norm(module: torch.nn.Module, device: torch.device) -> torch.Tensor:
     total = torch.zeros((), device=device, dtype=torch.float32)
     for param in module.parameters():
         if param.grad is not None:
+            total = total + param.grad.detach().float().norm().pow(2)
+    return total.sqrt()
+
+
+def count_named_parameters(module: torch.nn.Module, predicate) -> int:
+    return sum(
+        param.numel()
+        for name, param in module.named_parameters()
+        if predicate(name, param)
+    )
+
+
+def grad_norm_named(module: torch.nn.Module, device: torch.device, predicate) -> torch.Tensor:
+    total = torch.zeros((), device=device, dtype=torch.float32)
+    for name, param in module.named_parameters():
+        if predicate(name, param) and param.grad is not None:
             total = total + param.grad.detach().float().norm().pow(2)
     return total.sqrt()
 
@@ -65,6 +87,7 @@ def parse_args():
     parser.add_argument("--master_port", type=int, default=29631)
     parser.add_argument("--lr", type=float, default=1.0e-4)
     parser.add_argument("--repeated_diffusion_steps", type=int, default=None)
+    parser.add_argument("--enable_lora", action="store_true")
     return parser.parse_args()
 
 
@@ -80,9 +103,30 @@ def main() -> None:
         cfg.datasets.vla_data.data_mix = args.data_mix
         cfg.datasets.vla_data.per_device_batch_size = 1
         cfg.output_dir = args.output_dir
-        cfg.trainer.freeze_modules = "qwen_vl_interface"
+        cfg.trainer.freeze_modules = None if args.enable_lora else "qwen_vl_interface"
         cfg.trainer.visualization.enabled = False
         cfg.framework.aux_loss_control.enabled = False
+        if "lora" not in cfg.framework.reconvla:
+            cfg.framework.reconvla.lora = OmegaConf.create(
+                {
+                    "enabled": False,
+                    "r": 16,
+                    "lora_alpha": 32,
+                    "lora_dropout": 0.05,
+                    "bias": "none",
+                    "task_type": "CAUSAL_LM",
+                    "target_modules": [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                        "o_proj",
+                        "gate_proj",
+                        "up_proj",
+                        "down_proj",
+                    ],
+                }
+            )
+        cfg.framework.reconvla.lora.enabled = bool(args.enable_lora)
         if args.model_path:
             cfg.framework.reconvla.model_path = args.model_path
         if args.vision_tower_path:
@@ -100,6 +144,7 @@ def main() -> None:
         print(f"data_mix={cfg.datasets.vla_data.data_mix}")
         print(f"model_path={cfg.framework.reconvla.model_path}")
         print(f"vision_tower_path={cfg.framework.reconvla.vision_tower_path}")
+        print(f"lora_enabled={cfg.framework.reconvla.lora.enabled}")
         print(f"output_dir={cfg.output_dir}")
 
         t0 = time.perf_counter()
@@ -111,22 +156,45 @@ def main() -> None:
         backbone_trainable = sum(
             param.numel() for param in model.qwen_vl_interface.parameters() if param.requires_grad
         )
+        lora_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: param.requires_grad and _is_lora_param(name),
+        )
+        backbone_base_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: param.requires_grad and not _is_lora_param(name),
+        )
+        projector_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: param.requires_grad and "mm_projector" in name,
+        )
         action_trainable = sum(
             param.numel() for param in model.action_model.parameters() if param.requires_grad
         )
         print(f"trainable_params={trainable / 1e6:.2f}M")
         print(f"action_trainable_params={action_trainable / 1e6:.2f}M")
         print(f"backbone_trainable_params={backbone_trainable}")
-        assert backbone_trainable == 0, "backbone is not fully frozen"
+        print(f"lora_trainable_params={lora_trainable / 1e6:.2f}M")
+        print(f"backbone_base_trainable_params={backbone_base_trainable}")
+        print(f"projector_trainable_params={projector_trainable}")
+        if args.enable_lora:
+            assert lora_trainable > 0, "LoRA is enabled but no adapter parameters are trainable"
+            assert backbone_base_trainable == 0, "non-LoRA backbone parameters are trainable"
+            assert projector_trainable == 0, "projector parameters are trainable"
+        else:
+            assert backbone_trainable == 0, "backbone is not fully frozen"
         assert action_trainable > 0, "action head has no trainable parameters"
 
         dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
         batch = next(iter(dataloader))
         examples = model._prepare_examples(batch)
 
-        with torch.no_grad():
+        if args.enable_lora:
             recon_inputs, hidden = model._encode_reconvla_hidden(examples)
-        hidden = hidden.detach()
+        else:
+            with torch.no_grad():
+                recon_inputs, hidden = model._encode_reconvla_hidden(examples)
+            hidden = hidden.detach()
 
         hidden_for_action, actions_target, state = model._prepare_gr00t_action_inputs(
             examples,
@@ -138,18 +206,29 @@ def main() -> None:
         actions_repeated = actions_target.repeat(repeat, 1, 1)
         state_repeated = state.repeat(repeat, 1, 1) if state is not None else None
 
-        optimizer = torch.optim.AdamW(
-            [param for param in model.action_model.parameters() if param.requires_grad],
-            lr=args.lr,
-        )
+        optim_params = [param for param in model.action_model.parameters() if param.requires_grad]
+        if args.enable_lora:
+            optim_params.extend(
+                param
+                for name, param in model.qwen_vl_interface.named_parameters()
+                if param.requires_grad and _is_lora_param(name)
+            )
+        optimizer = torch.optim.AdamW(optim_params, lr=args.lr)
         optimizer.zero_grad(set_to_none=True)
         loss = model.action_model(hidden_repeated, actions_repeated, state_repeated)
         if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite loss: {loss}")
         loss.backward()
         action_grad_norm = grad_norm(model.action_model, hidden.device)
+        lora_grad_norm = grad_norm_named(
+            model.qwen_vl_interface,
+            hidden.device,
+            lambda name, param: _is_lora_param(name),
+        )
         backbone_grad_count = sum(
-            param.grad is not None for param in model.qwen_vl_interface.parameters()
+            param.grad is not None
+            for name, param in model.qwen_vl_interface.named_parameters()
+            if not _is_lora_param(name)
         )
         optimizer.step()
 
@@ -165,6 +244,7 @@ def main() -> None:
         print(f"state_shape={None if state is None else tuple(state.shape)}")
         print(f"loss={loss.detach().float().item():.6f}")
         print(f"action_grad_norm={action_grad_norm.item():.6f}")
+        print(f"lora_grad_norm={lora_grad_norm.item():.6f}")
         print(f"backbone_grad_count={backbone_grad_count}")
 
         assert hidden.shape[-1] == 3584, f"unexpected hidden dim: {hidden.shape}"
@@ -172,6 +252,8 @@ def main() -> None:
         assert tuple(actions_target.shape) == (1, model.action_horizon, 7)
         assert state is None or tuple(state.shape) == (1, 1, 7)
         assert action_grad_norm.item() > 0, "action head did not receive gradients"
+        if args.enable_lora:
+            assert lora_grad_norm.item() > 0, "LoRA adapters did not receive gradients"
         assert backbone_grad_count == 0, "frozen backbone unexpectedly has gradients"
         print("SMOKE_OK")
     finally:
