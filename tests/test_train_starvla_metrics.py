@@ -169,7 +169,7 @@ def test_train_step_logs_all_scalar_forward_metrics(monkeypatch):
     train_starvla = importlib.import_module("starVLA.training.train_starvla")
 
     class _Model:
-        def forward(self, _batch):
+        def forward(self, _batch, **_kwargs):
             return {
                 "action_loss": _FakeTensor(10.0),
                 "action_loss_l1": _FakeTensor(2.0),
@@ -195,6 +195,7 @@ def test_train_step_logs_all_scalar_forward_metrics(monkeypatch):
     trainer.optimizer = optimizer
     trainer.lr_scheduler = lr_scheduler
     trainer.accelerator = accelerator
+    trainer.completed_steps = 0
     trainer.config = SimpleNamespace(
         trainer=SimpleNamespace(gradient_clipping=None),
     )
@@ -217,7 +218,7 @@ def test_train_step_does_not_advance_scheduler_on_accumulation_microstep(monkeyp
     train_starvla = importlib.import_module("starVLA.training.train_starvla")
 
     class _Model:
-        def forward(self, _batch):
+        def forward(self, _batch, **_kwargs):
             return {"action_loss": _FakeTensor(10.0)}
 
         def parameters(self):
@@ -245,6 +246,7 @@ def test_train_step_does_not_advance_scheduler_on_accumulation_microstep(monkeyp
     trainer.optimizer = optimizer
     trainer.lr_scheduler = lr_scheduler
     trainer.accelerator = accelerator
+    trainer.completed_steps = 0
     trainer.config = SimpleNamespace(
         trainer=SimpleNamespace(gradient_clipping=None),
     )
@@ -253,3 +255,64 @@ def test_train_step_does_not_advance_scheduler_on_accumulation_microstep(monkeyp
 
     assert optimizer_step.calls == 1
     assert scheduler_step.calls == 0
+
+
+def test_log_metrics_reports_epoch_from_global_batch_progress(monkeypatch):
+    _install_train_starvla_stubs(monkeypatch)
+    sys.modules.pop("starVLA.training.train_starvla", None)
+    train_starvla = importlib.import_module("starVLA.training.train_starvla")
+
+    logged = []
+    monkeypatch.setattr(train_starvla.wandb, "log", lambda metrics, step: logged.append((dict(metrics), step)))
+
+    class _Dataset:
+        def __len__(self):
+            return 1_046_099
+
+    class _Dataloader:
+        dataset = _Dataset()
+
+        def __len__(self):
+            return 16_345
+
+    trainer = object.__new__(train_starvla.VLATrainer)
+    trainer.completed_steps = 1600
+    trainer.total_batch_size = 512
+    trainer.vla_train_dataloader = _Dataloader()
+    trainer.lr_scheduler = SimpleNamespace(get_last_lr=lambda: [1.9e-5])
+    trainer.accelerator = train_starvla.Accelerator()
+    trainer.config = SimpleNamespace(
+        trainer=SimpleNamespace(logging_frequency=50),
+    )
+
+    trainer._log_metrics({"loss/total": 0.1})
+
+    assert len(logged) == 1
+    metrics, step = logged[0]
+    assert step == 1600
+    assert metrics["epoch"] == round(1600 * 512 / 1_046_099, 2)
+    assert metrics["epoch"] == 0.78
+
+
+def test_log_metrics_skips_accumulation_microsteps(monkeypatch):
+    _install_train_starvla_stubs(monkeypatch)
+    sys.modules.pop("starVLA.training.train_starvla", None)
+    train_starvla = importlib.import_module("starVLA.training.train_starvla")
+
+    logged = []
+    monkeypatch.setattr(train_starvla.wandb, "log", lambda metrics, step: logged.append((dict(metrics), step)))
+
+    trainer = object.__new__(train_starvla.VLATrainer)
+    trainer.completed_steps = 1600
+    trainer.total_batch_size = 512
+    trainer.vla_train_dataloader = SimpleNamespace(dataset=range(1_046_099))
+    trainer.lr_scheduler = SimpleNamespace(get_last_lr=lambda: [1.9e-5])
+    trainer.accelerator = train_starvla.Accelerator()
+    trainer.accelerator.sync_gradients = False
+    trainer.config = SimpleNamespace(
+        trainer=SimpleNamespace(logging_frequency=50),
+    )
+
+    trainer._log_metrics({"loss/total": 0.1})
+
+    assert logged == []
