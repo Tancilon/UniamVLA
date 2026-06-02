@@ -1,4 +1,4 @@
-run_id: auxvla_gr00t_lora_libero_primary_h8
+run_id: auxvla_gr00t_lora_primary_h8
 run_root_dir: playground/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
