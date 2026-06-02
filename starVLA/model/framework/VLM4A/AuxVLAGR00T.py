@@ -76,6 +76,23 @@ class AuxVLAGR00TDefaultConfig:
             "single_view_mode": "primary",
             "synthetic_image_token_id": -200,
             "disable_internal_recon_loss": True,
+            "lora": {
+                "enabled": False,
+                "r": 16,
+                "lora_alpha": 32,
+                "lora_dropout": 0.05,
+                "bias": "none",
+                "task_type": "CAUSAL_LM",
+                "target_modules": [
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "down_proj",
+                ],
+            },
         }
     )
     action_model: dict = field(

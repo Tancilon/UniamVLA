@@ -121,6 +121,29 @@ def test_auxvla_gr00t_registers_framework(monkeypatch):
     assert "AuxVLAGR00T" in module._registered_names
 
 
+def test_auxvla_lora_defaults_are_disabled(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+
+    default_cfg = module.AuxVLAGR00TDefaultConfig()
+    lora_cfg = default_cfg.reconvla["lora"]
+
+    assert lora_cfg["enabled"] is False
+    assert lora_cfg["r"] == 16
+    assert lora_cfg["lora_alpha"] == 32
+    assert lora_cfg["lora_dropout"] == 0.05
+    assert lora_cfg["bias"] == "none"
+    assert lora_cfg["task_type"] == "CAUSAL_LM"
+    assert lora_cfg["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
 def test_auxvla_delegates_uamvla_sidecar_loaders(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     expected_methods = [
