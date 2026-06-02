@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
+from PIL import Image
 
 
 class _AttrDict(dict):
@@ -159,6 +160,7 @@ def test_auxvla_lora_defaults_are_disabled(monkeypatch):
     assert lora_cfg["r"] == 16
     assert lora_cfg["lora_alpha"] == 32
     assert lora_cfg["lora_dropout"] == 0.05
+    assert lora_cfg["init_lora_weights"] is True
     assert lora_cfg["bias"] == "none"
     assert lora_cfg["task_type"] == "CAUSAL_LM"
     assert lora_cfg["train_mm_projector"] is True
@@ -228,6 +230,56 @@ def test_auxvla_init_applies_reconvla_lora_when_enabled(monkeypatch):
     assert model.qwen_vl_interface is _FakeReconInterfaceForInit.instances[0]
     assert model.qwen_vl_interface.applied_lora is cfg.framework.reconvla.lora
     assert cfg.framework.action_model.diffusion_model_cfg.cross_attention_dim == 3584
+
+
+def test_reconvla_lora_init_lora_weights_is_forwarded_to_peft(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    captured = {}
+
+    class _FakeTaskType:
+        CAUSAL_LM = "CAUSAL_LM"
+
+    class _FakeLoraConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    def _fake_get_peft_model(model, _peft_cfg):
+        model.lora_A = torch.nn.Parameter(torch.ones(()))
+        return model
+
+    fake_peft = types.ModuleType("peft")
+    fake_peft.TaskType = _FakeTaskType
+    fake_peft.LoraConfig = _FakeLoraConfig
+    fake_peft.get_peft_model = _fake_get_peft_model
+    monkeypatch.setitem(sys.modules, "peft", fake_peft)
+
+    class _FakeReconModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(2, 2)
+
+    interface = object.__new__(module.ReconVLAInterface)
+    torch.nn.Module.__init__(interface)
+    interface.model = _FakeReconModel()
+    interface.lora_enabled = False
+
+    module.ReconVLAInterface.apply_language_lora(
+        interface,
+        {
+            "enabled": True,
+            "r": 32,
+            "lora_alpha": 16,
+            "lora_dropout": 0.0,
+            "init_lora_weights": "gaussian",
+            "bias": "none",
+            "task_type": "CAUSAL_LM",
+            "train_mm_projector": False,
+            "train_mm_inv_projector": False,
+            "target_modules": ["q_proj"],
+        },
+    )
+
+    assert captured["init_lora_weights"] == "gaussian"
 
 
 def test_auxvla_get_lr_groups_routes_lora_and_action_params(monkeypatch):
@@ -345,6 +397,26 @@ def test_select_single_view_primary_and_wrist(monkeypatch):
     first, second = object(), object()
     assert module.AuxVLAGR00T._select_single_view(model, [first, second], "primary") is first
     assert module.AuxVLAGR00T._select_single_view(model, [first, second], "wrist") is second
+
+
+def test_select_single_view_concat_vertical(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    model._qwen_image_size = lambda: 4
+    primary = Image.new("RGB", (2, 2), (255, 0, 0))
+    wrist = Image.new("RGB", (2, 2), (0, 0, 255))
+
+    out = module.AuxVLAGR00T._select_single_view(
+        model,
+        [primary, wrist],
+        "concat_vertical",
+    )
+
+    assert out.size == (4, 4)
+    assert out.getpixel((1, 0)) == (255, 0, 0)
+    assert out.getpixel((1, 1)) == (255, 0, 0)
+    assert out.getpixel((1, 2)) == (0, 0, 255)
+    assert out.getpixel((1, 3)) == (0, 0, 255)
 
 
 def test_select_single_view_rejects_missing_wrist(monkeypatch):

@@ -1,4 +1,4 @@
-run_id: auxvla_gr00t_lora_primary_h8
+run_id: auxvla_gr00t_lora_concat_h8
 run_root_dir: playground/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
@@ -13,7 +13,7 @@ framework:
     model_path: ckpt/pretrain-checkpoint-10388
     vision_tower_path: ckpt/siglip-so400m-patch14-384
     attn_implementation: flash_attention_2
-    single_view_mode: primary
+    single_view_mode: concat_vertical
     synthetic_image_token_id: -200
     disable_internal_recon_loss: true
     lora:
@@ -21,6 +21,7 @@ framework:
       r: 32
       lora_alpha: 16
       lora_dropout: 0.0
+      init_lora_weights: gaussian
       bias: none
       task_type: CAUSAL_LM
       train_mm_projector: true
@@ -62,7 +63,7 @@ framework:
       num_layers: 16
       output_dim: 1024
       positional_embeddings: null
-  obs_image_size: [320, 320]
+  obs_image_size: [384, 384]
   vae:
     path: ckpt/pretrained_vae
   aux_loss_control:
@@ -146,7 +147,7 @@ datasets:
     per_device_batch_size: 1
     obs: ["video.primary_image", "video.wrist_image"]
     include_state: true
-    image_resize: 320
+    image_resize: 384
     aux_state_slice:
       target_pose_rot6d: [15, 21]
       target_pose_trans: [21, 24]

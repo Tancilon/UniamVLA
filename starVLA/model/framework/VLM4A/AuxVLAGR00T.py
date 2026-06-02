@@ -17,6 +17,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from starVLA.model.framework.VLM4A.UamVLAOFT import UamVLAOFT
 from starVLA.model.framework.base_framework import baseframework
@@ -66,6 +67,23 @@ def _freeze_module(module) -> None:
         param.requires_grad_(False)
 
 
+def _to_rgb_pil(image) -> Image.Image:
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+    if torch.is_tensor(image):
+        array = image.detach().cpu().numpy()
+    else:
+        array = np.asarray(image)
+    if array.ndim == 3 and array.shape[0] in {1, 3, 4} and array.shape[-1] not in {1, 3, 4}:
+        array = np.moveaxis(array, 0, -1)
+    if np.issubdtype(array.dtype, np.floating):
+        scale = 255.0 if float(np.nanmax(array)) <= 1.0 else 1.0
+        array = np.clip(array * scale, 0, 255).astype(np.uint8)
+    elif array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+    return Image.fromarray(array).convert("RGB")
+
+
 def _make_aux_input_ids(
     batch_size: int,
     seq_len: int,
@@ -110,6 +128,7 @@ class AuxVLAGR00TDefaultConfig:
                 "r": 16,
                 "lora_alpha": 32,
                 "lora_dropout": 0.05,
+                "init_lora_weights": True,
                 "bias": "none",
                 "task_type": "CAUSAL_LM",
                 "train_mm_projector": True,
@@ -353,6 +372,7 @@ class ReconVLAInterface(nn.Module):
             r=int(lora_cfg.get("r", 16)),
             lora_alpha=int(lora_cfg.get("lora_alpha", 32)),
             lora_dropout=float(lora_cfg.get("lora_dropout", 0.05)),
+            init_lora_weights=lora_cfg.get("init_lora_weights", True),
             target_modules=target_modules,
             bias=str(lora_cfg.get("bias", "none")),
         )
@@ -744,6 +764,19 @@ class AuxVLAGR00T(baseframework):
         return hidden.to(dtype=action_dtype), actions_target, state
 
     def _select_single_view(self, image_list, mode: str):
+        if mode == "concat_vertical":
+            if not isinstance(image_list, (list, tuple)) or len(image_list) < 2:
+                raise RuntimeError("single_view_mode=concat_vertical requires primary and wrist images")
+            image_size = self._qwen_image_size()
+            top_height = image_size // 2
+            bottom_height = image_size - top_height
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+            primary = _to_rgb_pil(image_list[0]).resize((image_size, top_height), resample)
+            wrist = _to_rgb_pil(image_list[1]).resize((image_size, bottom_height), resample)
+            combined = Image.new("RGB", (image_size, image_size))
+            combined.paste(primary, (0, 0))
+            combined.paste(wrist, (0, top_height))
+            return combined
         if not isinstance(image_list, (list, tuple)):
             return image_list
         if mode == "primary":
@@ -754,7 +787,10 @@ class AuxVLAGR00T(baseframework):
             if len(image_list) < 2:
                 raise RuntimeError("single_view_mode=wrist requires a wrist image at index 1")
             return image_list[1]
-        raise ValueError(f"Unsupported single_view_mode `{mode}`. Expected `primary` or `wrist`.")
+        raise ValueError(
+            f"Unsupported single_view_mode `{mode}`. "
+            "Expected `primary`, `wrist`, or `concat_vertical`."
+        )
 
     def _single_view_images(self, examples: List[dict]) -> list[list]:
         recon_cfg = self.config.framework.get("reconvla", {})

@@ -45,7 +45,7 @@ RUN_ROOT_DIR="${RUN_ROOT_DIR:-playground/Checkpoints}"
 RUN_ID="${RUN_ID:-auxvla_gr00t_lora_calvin_abc_8gpu_full}"
 DATA_ROOT_DIR="${DATA_ROOT_DIR:-datasets/calvin2uam}"
 DATA_MIX="${DATA_MIX:-uamvla_calvin_abc_h8}"
-ACTION_TYPE="${ACTION_TYPE:-delta_qpos}"
+ACTION_TYPE="${ACTION_TYPE:-calvin_rel_action}"
 
 MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-50000}"
 NUM_WARMUP_STEPS="${NUM_WARMUP_STEPS:-1000}"
