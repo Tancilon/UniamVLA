@@ -161,6 +161,8 @@ def test_auxvla_lora_defaults_are_disabled(monkeypatch):
     assert lora_cfg["lora_dropout"] == 0.05
     assert lora_cfg["bias"] == "none"
     assert lora_cfg["task_type"] == "CAUSAL_LM"
+    assert lora_cfg["train_mm_projector"] is True
+    assert lora_cfg["train_mm_inv_projector"] is False
     assert lora_cfg["target_modules"] == [
         "q_proj",
         "k_proj",

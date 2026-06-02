@@ -112,6 +112,8 @@ class AuxVLAGR00TDefaultConfig:
                 "lora_dropout": 0.05,
                 "bias": "none",
                 "task_type": "CAUSAL_LM",
+                "train_mm_projector": True,
+                "train_mm_inv_projector": False,
                 "target_modules": [
                     "q_proj",
                     "k_proj",
@@ -250,11 +252,53 @@ class ReconVLAInterface(nn.Module):
         matched: set[str] = set()
         for name, _module in self.model.named_modules():
             leaf_name = name.rsplit(".", 1)[-1]
-            if leaf_name in targets:
+            if name in targets:
+                matched.add(name)
+            elif leaf_name in targets:
                 matched.add(leaf_name)
         return matched
 
-    def _freeze_non_language_multimodal_modules(self) -> None:
+    def _module_path(self, target_module) -> str | None:
+        for name, module in self.model.named_modules():
+            if module is target_module:
+                return name
+        return None
+
+    def _linear_lora_targets_under(self, module_attr: str) -> list[str]:
+        inner_model = self._inner_reconvla_model()
+        module = getattr(inner_model, module_attr, None)
+        if module is None:
+            return []
+        module_path = self._module_path(module)
+        if module_path is None:
+            return []
+
+        targets: list[str] = []
+        for child_name, child_module in module.named_modules():
+            if isinstance(child_module, nn.Linear):
+                targets.append(
+                    module_path
+                    if child_name == ""
+                    else f"{module_path}.{child_name}"
+                )
+        return targets
+
+    def _expand_lora_targets(self, lora_cfg: dict) -> list[str]:
+        target_modules = [str(target) for target in (lora_cfg.get("target_modules") or [])]
+        if bool(lora_cfg.get("train_mm_projector", False)):
+            target_modules.extend(self._linear_lora_targets_under("mm_projector"))
+        if bool(lora_cfg.get("train_mm_inv_projector", False)):
+            target_modules.extend(self._linear_lora_targets_under("mm_inv_projector"))
+        return list(dict.fromkeys(target_modules))
+
+    def _freeze_module_except_lora(self, module) -> None:
+        if module is None or not hasattr(module, "named_parameters"):
+            _freeze_module(module)
+            return
+        for name, param in module.named_parameters():
+            param.requires_grad_("lora_" in name.lower())
+
+    def _freeze_non_language_multimodal_modules(self, lora_cfg: dict) -> None:
         base_model = self._base_reconvla_model()
         inner_model = self._inner_reconvla_model()
         vision_tower = None
@@ -263,8 +307,14 @@ class ReconVLAInterface(nn.Module):
         elif hasattr(inner_model, "get_vision_tower"):
             vision_tower = inner_model.get_vision_tower()
         _freeze_module(vision_tower)
-        for attr in ("mm_projector", "mm_inv_projector"):
-            _freeze_module(getattr(inner_model, attr, None))
+        if bool(lora_cfg.get("train_mm_projector", False)):
+            self._freeze_module_except_lora(getattr(inner_model, "mm_projector", None))
+        else:
+            _freeze_module(getattr(inner_model, "mm_projector", None))
+        if bool(lora_cfg.get("train_mm_inv_projector", False)):
+            self._freeze_module_except_lora(getattr(inner_model, "mm_inv_projector", None))
+        else:
+            _freeze_module(getattr(inner_model, "mm_inv_projector", None))
 
     def lora_trainable_parameter_names(self) -> list[str]:
         return [
@@ -285,7 +335,7 @@ class ReconVLAInterface(nn.Module):
                 "framework.reconvla.lora.enabled=false."
             ) from exc
 
-        target_modules = list(lora_cfg.get("target_modules") or [])
+        target_modules = self._expand_lora_targets(lora_cfg)
         if not target_modules:
             raise ValueError("framework.reconvla.lora.target_modules must be non-empty")
         matched_targets = self._matched_lora_targets(target_modules)
@@ -307,7 +357,7 @@ class ReconVLAInterface(nn.Module):
             bias=str(lora_cfg.get("bias", "none")),
         )
         self.model = get_peft_model(self.model, peft_cfg)
-        self._freeze_non_language_multimodal_modules()
+        self._freeze_non_language_multimodal_modules(lora_cfg)
         trainable_lora = self.lora_trainable_parameter_names()
         if not trainable_lora:
             raise RuntimeError(

@@ -127,6 +127,8 @@ def main() -> None:
                         "up_proj",
                         "down_proj",
                     ],
+                    "train_mm_projector": True,
+                    "train_mm_inv_projector": False,
                 }
             )
         cfg.framework.reconvla.lora.enabled = bool(args.enable_lora)
@@ -167,23 +169,61 @@ def main() -> None:
             model.qwen_vl_interface,
             lambda name, param: param.requires_grad and not _is_lora_param(name),
         )
-        projector_trainable = count_named_parameters(
+        mm_projector_lora_trainable = count_named_parameters(
             model.qwen_vl_interface,
-            lambda name, param: param.requires_grad and "mm_projector" in name,
+            lambda name, param: (
+                param.requires_grad
+                and _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        mm_projector_base_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad
+                and not _is_lora_param(name)
+                and "mm_projector" in name
+                and "mm_inv_projector" not in name
+            ),
+        )
+        mm_inv_projector_lora_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad and _is_lora_param(name) and "mm_inv_projector" in name
+            ),
         )
         action_trainable = sum(
             param.numel() for param in model.action_model.parameters() if param.requires_grad
+        )
+        train_mm_projector = bool(cfg.framework.reconvla.lora.get("train_mm_projector", False))
+        train_mm_inv_projector = bool(
+            cfg.framework.reconvla.lora.get("train_mm_inv_projector", False)
         )
         print(f"trainable_params={trainable / 1e6:.2f}M")
         print(f"action_trainable_params={action_trainable / 1e6:.2f}M")
         print(f"backbone_trainable_params={backbone_trainable}")
         print(f"lora_trainable_params={lora_trainable / 1e6:.2f}M")
         print(f"backbone_base_trainable_params={backbone_base_trainable}")
-        print(f"projector_trainable_params={projector_trainable}")
+        print(f"mm_projector_lora_trainable_params={mm_projector_lora_trainable / 1e6:.2f}M")
+        print(f"mm_projector_base_trainable_params={mm_projector_base_trainable}")
+        print(f"mm_inv_projector_lora_trainable_params={mm_inv_projector_lora_trainable / 1e6:.2f}M")
         if args.enable_lora:
             assert lora_trainable > 0, "LoRA is enabled but no adapter parameters are trainable"
             assert backbone_base_trainable == 0, "non-LoRA backbone parameters are trainable"
-            assert projector_trainable == 0, "projector parameters are trainable"
+            assert mm_projector_base_trainable == 0, "mm_projector base parameters are trainable"
+            if train_mm_projector:
+                assert (
+                    mm_projector_lora_trainable > 0
+                ), "train_mm_projector=true but no mm_projector LoRA parameters are trainable"
+            else:
+                assert (
+                    mm_projector_lora_trainable == 0
+                ), "train_mm_projector=false but mm_projector LoRA parameters are trainable"
+            if not train_mm_inv_projector:
+                assert (
+                    mm_inv_projector_lora_trainable == 0
+                ), "train_mm_inv_projector=false but mm_inv_projector LoRA parameters are trainable"
         else:
             assert backbone_trainable == 0, "backbone is not fully frozen"
         assert action_trainable > 0, "action head has no trainable parameters"

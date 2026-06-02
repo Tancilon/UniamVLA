@@ -194,5 +194,7 @@ def test_auxvla_gr00t_lora_yaml_loads():
     assert cfg.framework.reconvla.lora.enabled is True
     assert cfg.framework.reconvla.lora.r == 16
     assert cfg.framework.reconvla.lora.lora_alpha == 32
+    assert cfg.framework.reconvla.lora.train_mm_projector is True
+    assert cfg.framework.reconvla.lora.train_mm_inv_projector is False
     assert "q_proj" in cfg.framework.reconvla.lora.target_modules
     assert cfg.trainer.freeze_modules is None

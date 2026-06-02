@@ -23,6 +23,8 @@ framework:
       lora_dropout: 0.05
       bias: none
       task_type: CAUSAL_LM
+      train_mm_projector: true
+      train_mm_inv_projector: false
       target_modules:
         - q_proj
         - k_proj

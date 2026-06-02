@@ -126,7 +126,11 @@ class _FakeVisionTower(torch.nn.Module):
 class _FakeInnerReconModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.mm_projector = torch.nn.Linear(2, 2)
+        self.mm_projector = torch.nn.Sequential(
+            torch.nn.Linear(2, 2),
+            torch.nn.GELU(),
+            torch.nn.Linear(2, 2),
+        )
         self.mm_inv_projector = torch.nn.Linear(2, 2)
         self.q_proj = torch.nn.Linear(2, 2)
         self.k_proj = torch.nn.Linear(2, 2)
@@ -211,8 +215,12 @@ def _install_fake_peft(monkeypatch, add_lora_param=True):
         for param in model.parameters():
             param.requires_grad_(False)
         model.peft_config_seen = lora_config
+        targets = set(lora_config.target_modules)
         if add_lora_param:
-            model.lora_A = torch.nn.Parameter(torch.ones(1))
+            for name, module in model.named_modules():
+                leaf_name = name.rsplit(".", 1)[-1]
+                if name in targets or leaf_name in targets:
+                    module.register_parameter("lora_A", torch.nn.Parameter(torch.ones(1)))
         return model
 
     fake_peft.TaskType = _FakeTaskType
@@ -285,6 +293,8 @@ def test_reconvla_interface_applies_lora_and_freezes_multimodal(monkeypatch):
                     bias="none",
                     task_type="CAUSAL_LM",
                     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                    train_mm_projector=False,
+                    train_mm_inv_projector=False,
                 ),
             )
         )
@@ -303,10 +313,57 @@ def test_reconvla_interface_applies_lora_and_freezes_multimodal(monkeypatch):
         "o_proj",
     ]
     trainable = [name for name, param in interface.model.named_parameters() if param.requires_grad]
-    assert trainable == ["lora_A"]
+    assert trainable == [
+        "model.q_proj.lora_A",
+        "model.k_proj.lora_A",
+        "model.v_proj.lora_A",
+        "model.o_proj.lora_A",
+    ]
     assert all(not p.requires_grad for p in interface.model.get_vision_tower().parameters())
     assert all(not p.requires_grad for p in interface.model.get_model().mm_projector.parameters())
     assert all(not p.requires_grad for p in interface.model.get_model().mm_inv_projector.parameters())
+
+
+def test_reconvla_interface_keeps_mm_projector_lora_trainable(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+    _install_fake_peft(monkeypatch)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                lora=_AttrDict(
+                    enabled=True,
+                    r=16,
+                    lora_alpha=32,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=["q_proj"],
+                    train_mm_projector=True,
+                    train_mm_inv_projector=False,
+                ),
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+    interface.apply_language_lora(cfg.framework.reconvla.lora)
+
+    assert "model.mm_projector.0" in interface.model.peft_config_seen.kwargs["target_modules"]
+    assert "model.mm_projector.2" in interface.model.peft_config_seen.kwargs["target_modules"]
+    trainable = [name for name, param in interface.model.named_parameters() if param.requires_grad]
+    assert "model.q_proj.lora_A" in trainable
+    assert "model.mm_projector.0.lora_A" in trainable
+    assert "model.mm_projector.2.lora_A" in trainable
+    assert all(
+        not param.requires_grad
+        for name, param in interface.model.get_model().mm_projector.named_parameters()
+        if "lora_" not in name
+    )
+    assert all(not p.requires_grad for p in interface.model.get_model().mm_inv_projector.parameters())
+    assert all(not p.requires_grad for p in interface.model.get_vision_tower().parameters())
 
 
 def test_reconvla_interface_rejects_lora_without_trainable_adapters(monkeypatch):
