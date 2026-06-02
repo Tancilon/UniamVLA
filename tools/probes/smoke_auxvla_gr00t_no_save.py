@@ -81,6 +81,7 @@ def parse_args():
     parser.add_argument("--config_yaml", default="starVLA/config/training/auxvla_gr00t_libero.yaml")
     parser.add_argument("--data_root_dir", default="datasets/libero2uam")
     parser.add_argument("--data_mix", default="uamvla_libero_goal_h8")
+    parser.add_argument("--action_type", default=None)
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--vision_tower_path", default=None)
     parser.add_argument("--output_dir", default="/tmp/auxvla_gr00t_no_save_smoke")
@@ -102,6 +103,8 @@ def main() -> None:
         cfg.datasets.vla_data.data_root_dir = args.data_root_dir
         cfg.datasets.vla_data.data_mix = args.data_mix
         cfg.datasets.vla_data.per_device_batch_size = 1
+        if args.action_type:
+            cfg.datasets.vla_data.action_type = args.action_type
         cfg.output_dir = args.output_dir
         cfg.trainer.freeze_modules = None if args.enable_lora else "qwen_vl_interface"
         cfg.trainer.visualization.enabled = False
