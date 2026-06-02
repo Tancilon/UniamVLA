@@ -18,9 +18,9 @@ framework:
     disable_internal_recon_loss: true
     lora:
       enabled: true
-      r: 16
-      lora_alpha: 32
-      lora_dropout: 0.05
+      r: 32
+      lora_alpha: 16
+      lora_dropout: 0.0
       bias: none
       task_type: CAUSAL_LM
       train_mm_projector: true
@@ -166,7 +166,7 @@ trainer:
 
   learning_rate:
     base:               1.0e-4
-    qwen_vl_interface:  1.0e-5
+    qwen_vl_interface:  2.0e-5
     action_model:       1.0e-4
 
   lr_scheduler_type: cosine_with_min_lr

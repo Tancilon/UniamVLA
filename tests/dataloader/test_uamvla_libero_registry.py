@@ -192,9 +192,11 @@ def test_auxvla_gr00t_lora_yaml_loads():
     assert cfg.run_id == "auxvla_gr00t_lora_primary_h8"
     assert cfg.framework.name == "AuxVLAGR00T"
     assert cfg.framework.reconvla.lora.enabled is True
-    assert cfg.framework.reconvla.lora.r == 16
-    assert cfg.framework.reconvla.lora.lora_alpha == 32
+    assert cfg.framework.reconvla.lora.r == 32
+    assert cfg.framework.reconvla.lora.lora_alpha == 16
+    assert cfg.framework.reconvla.lora.lora_dropout == 0.0
     assert cfg.framework.reconvla.lora.train_mm_projector is True
     assert cfg.framework.reconvla.lora.train_mm_inv_projector is False
     assert "q_proj" in cfg.framework.reconvla.lora.target_modules
+    assert cfg.trainer.learning_rate.qwen_vl_interface == 2.0e-5
     assert cfg.trainer.freeze_modules is None
