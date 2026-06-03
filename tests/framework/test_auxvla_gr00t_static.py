@@ -97,6 +97,29 @@ class _FakeUamVLAOFT:
     _force_resize_640 = lambda self, image_list: image_list
     _resolve_head_mask = lambda self, name, batch, batch_size, device: batch[f"{name}_mask"]
     _global_step_from_kwargs = staticmethod(lambda kwargs: int(kwargs.get("global_step", 0) or 0))
+    _to_action_numpy = staticmethod(lambda action: np.asarray(action, dtype=np.float32))
+    _to_rgb_pil = staticmethod(
+        lambda image: image.convert("RGB")
+        if isinstance(image, Image.Image)
+        else Image.fromarray(np.asarray(image, dtype=np.uint8)).convert("RGB")
+    )
+    _fit_for_viz = staticmethod(lambda image, height=160: image)
+    _draw_action_comparison = staticmethod(
+        lambda pred_action, gt_action=None: Image.new("RGB", (16, 16), "white")
+    )
+
+    @classmethod
+    def _make_visualization_canvas(cls, images, pred_action, gt_action=None):
+        return Image.new("RGB", (16, 16), "white")
+
+    @classmethod
+    def _pil_to_normalized_chw(cls, image, device=None):
+        tensor = torch.zeros(3, 4, 4)
+        return tensor.to(device) if device is not None else tensor
+
+    @classmethod
+    def _make_visualization_image_batch(cls, examples, device=None):
+        return torch.zeros(len(examples), 1, 3, 4, 4, device=device)
 
     def _collate_aux(self, examples, qwen_inputs):
         return {
@@ -622,3 +645,66 @@ def test_predict_action_casts_hidden_to_action_model_dtype(monkeypatch):
     )
 
     assert out["normalized_actions"].shape == (1, 8, 7)
+
+
+def test_visualize_batch_accepts_distributed_flag_and_uses_reconvla_context(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FloatPredictActionModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.ones(()))
+            self.calls = []
+
+        def predict_action(self, hidden, state):
+            self.calls.append((hidden, state))
+            assert hidden.dtype == self.marker.dtype
+            return torch.zeros(hidden.shape[0], 8, 7, dtype=self.marker.dtype)
+
+    class _FakeVizHead:
+        def __init__(self):
+            self.calls = []
+
+        def visualize(self, hidden_states, batch_dict, mask, num_samples, **kwargs):
+            self.calls.append((hidden_states, batch_dict, mask, num_samples, kwargs))
+            assert torch.equal(mask, torch.tensor([True]))
+            return [Image.new("RGB", (8, 8), "blue")]
+
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.action_model = _FloatPredictActionModel()
+    model.action_horizon = 8
+    recon_head = _FakeVizHead()
+    model.aux_heads = {"recon": recon_head}
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(single_view_mode="primary", synthetic_image_token_id=-200),
+            action_model=_AttrDict(state_dim=0),
+        ),
+    )
+    hidden = torch.ones(1, 6, 16, dtype=torch.bfloat16)
+    recon_inputs = {"input_ids": torch.zeros(1, 6, dtype=torch.long)}
+    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._encode_reconvla_hidden = types.MethodType(
+        lambda self, examples: (recon_inputs, hidden),
+        model,
+    )
+
+    sample = {
+        "image": [Image.new("RGB", (4, 4), "red")],
+        "lang": "open drawer",
+        "action": np.zeros((8, 7), dtype=np.float32),
+    }
+
+    out = module.AuxVLAGR00T.visualize_batch(
+        model,
+        [sample],
+        n_samples=1,
+        distributed_all_ranks=True,
+    )
+
+    assert "viz/auxvla_gr00t/action_0" in out
+    assert "viz/auxvla_gr00t/recon_0" in out
+    assert model.action_model.calls
+    assert recon_head.calls

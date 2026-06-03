@@ -7,7 +7,9 @@ existing GR00T action head and optional UamVLA external aux heads.
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from PIL import Image
 
@@ -503,6 +506,13 @@ class AuxVLAGR00T(baseframework):
     _collate_aux = UamVLAOFT._collate_aux
     _resolve_head_mask = UamVLAOFT._resolve_head_mask
     _force_resize_640 = UamVLAOFT._force_resize_640
+    _to_action_numpy = staticmethod(UamVLAOFT._to_action_numpy)
+    _to_rgb_pil = staticmethod(UamVLAOFT._to_rgb_pil)
+    _fit_for_viz = staticmethod(UamVLAOFT._fit_for_viz)
+    _draw_action_comparison = staticmethod(UamVLAOFT._draw_action_comparison)
+    _make_visualization_canvas = UamVLAOFT.__dict__["_make_visualization_canvas"]
+    _pil_to_normalized_chw = UamVLAOFT.__dict__["_pil_to_normalized_chw"]
+    _make_visualization_image_batch = UamVLAOFT.__dict__["_make_visualization_image_batch"]
 
     def __init__(self, config) -> None:
         baseframework.__init__(self)
@@ -910,3 +920,159 @@ class AuxVLAGR00T(baseframework):
         with torch.autocast("cuda", dtype=torch.float32):
             pred_actions = self.action_model.predict_action(hidden_for_action, state)
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}
+
+    def _visualization_forward_context(
+        self,
+        selected: list[dict],
+    ) -> tuple[list[dict], np.ndarray, torch.Tensor, dict]:
+        """Run one ReconVLA + GR00T inference pass for action and aux visualizers."""
+        examples = self._prepare_examples(selected)
+        recon_inputs, hidden = self._encode_reconvla_hidden(examples)
+        action_dtype = self._action_model_compute_dtype(hidden.dtype)
+        hidden_for_action = hidden.to(dtype=action_dtype)
+        state = self._state_batch_or_none(examples, hidden.device, action_dtype)
+
+        with torch.autocast("cuda", dtype=torch.float32):
+            pred_actions = self.action_model.predict_action(hidden_for_action, state)
+
+        batch_dict = self._collate_aux(examples, recon_inputs)
+        batch_dict["image"] = self._make_visualization_image_batch(
+            examples,
+            device=hidden.device,
+        )
+        batch_dict["instruction"] = [example["lang"] for example in examples]
+
+        return examples, pred_actions.detach().cpu().numpy(), hidden, batch_dict
+
+    @torch.inference_mode()
+    def visualize_batch(
+        self,
+        batch: List[dict],
+        n_samples: int = 1,
+        distributed_all_ranks: bool = False,
+    ) -> dict:
+        """Visualize AuxVLAGR00T action predictions plus enabled aux heads."""
+        if not isinstance(batch, list):
+            batch = [batch]
+        limit = min(max(int(n_samples), 0), len(batch))
+        if limit == 0:
+            return {}
+
+        selected = batch[:limit]
+        was_training = bool(getattr(self, "training", False))
+        self.eval()
+        try:
+            examples, pred_actions, hidden_states, batch_dict = self._visualization_forward_context(selected)
+            if pred_actions.ndim == 2:
+                pred_actions = pred_actions[None, ...]
+
+            try:
+                import wandb
+            except ImportError:
+                wandb = None
+
+            outputs = {}
+            for idx, sample in enumerate(examples):
+                pred = pred_actions[idx]
+                horizon = int(getattr(self, "action_horizon", pred.shape[0]))
+
+                gt_action = None
+                if "action" in sample:
+                    gt_action = self._to_action_numpy(sample["action"])
+                    if gt_action.ndim >= 2:
+                        gt_action = gt_action[-horizon:, : pred.shape[-1]]
+
+                images = sample.get("image", [])
+                if isinstance(images, Image.Image) or not isinstance(images, (list, tuple)):
+                    images = [images]
+
+                canvas = self._make_visualization_canvas(
+                    images=list(images),
+                    pred_action=pred,
+                    gt_action=gt_action,
+                )
+                caption = str(sample.get("lang", ""))
+                outputs[f"viz/auxvla_gr00t/action_{idx}"] = (
+                    wandb.Image(canvas, caption=caption) if wandb is not None else canvas
+                )
+
+            return self._collect_aux_head_visualizations_auxvla_gr00t(
+                hidden_states,
+                batch_dict,
+                num_samples=limit,
+                outputs=outputs,
+                distributed_all_ranks=distributed_all_ranks,
+            )
+        finally:
+            if was_training:
+                self.train()
+
+    def _collect_aux_head_visualizations_auxvla_gr00t(
+        self,
+        hidden_states: torch.Tensor,
+        batch_dict: dict,
+        num_samples: int,
+        outputs: dict,
+        distributed_all_ranks: bool = False,
+    ) -> dict:
+        """Append enabled aux-head visualizations under ``viz/auxvla_gr00t``."""
+        aux_heads = getattr(self, "aux_heads", {})
+        if not aux_heads:
+            return outputs
+
+        batch_size = hidden_states.shape[0]
+        device = hidden_states.device
+        profile = os.environ.get("UAMVLA_AUX_PROFILE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0") or 0)
+        for name, head in aux_heads.items():
+            if not hasattr(head, "visualize"):
+                continue
+            try:
+                mask = self._resolve_head_mask(name, batch_dict, batch_size, device)
+                valid_count = int(mask.to(dtype=torch.bool).sum().item())
+                if distributed_all_ranks and dist.is_initialized():
+                    valid_any = torch.tensor([int(valid_count > 0)], device=device, dtype=torch.int32)
+                    dist.all_reduce(valid_any, op=dist.ReduceOp.MIN)
+                    if int(valid_any.item()) == 0:
+                        if profile:
+                            print(
+                                f"[uamvla-aux-profile][rank{rank}] "
+                                f"step=viz head={name} skip valid={valid_count}/{batch_size}",
+                                flush=True,
+                            )
+                        continue
+                if profile:
+                    print(
+                        f"[uamvla-aux-profile][rank{rank}] "
+                        f"step=viz head={name} start valid={valid_count}/{batch_size}",
+                        flush=True,
+                    )
+                    t_start = time.perf_counter()
+                else:
+                    t_start = None
+                kwargs = {}
+                if name == "pose":
+                    kwargs["camera_params"] = getattr(head, "camera_params", None)
+                images = head.visualize(
+                    hidden_states,
+                    batch_dict,
+                    mask=mask,
+                    num_samples=num_samples,
+                    **kwargs,
+                )
+                for idx, image in enumerate(images or []):
+                    outputs[f"viz/auxvla_gr00t/{name}_{idx}"] = image
+                if profile:
+                    print(
+                        f"[uamvla-aux-profile][rank{rank}] "
+                        f"step=viz head={name} done elapsed={time.perf_counter() - t_start:.3f}s",
+                        flush=True,
+                    )
+            except Exception as exc:
+                logger.warning("AuxVLAGR00T %s visualization failed: %s", name, exc)
+        return outputs
