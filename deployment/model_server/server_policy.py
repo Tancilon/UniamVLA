@@ -3,26 +3,43 @@
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
 import argparse
+import json
 import logging
 import os
 import socket
+from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from deployment.model_server.tools.websocket_policy_server import WebsocketPolicyServer
-from starVLA.model.framework.base_framework import baseframework
+from starVLA.model.framework.base_framework import baseframework, build_framework
+from starVLA.model.framework.share_tools import apply_config_compat
+
+
+def load_policy_from_config(config_yaml: str | os.PathLike):
+    config_yaml = Path(config_yaml)
+    cfg = OmegaConf.load(config_yaml)
+    apply_config_compat(cfg)
+    vla = build_framework(cfg)
+
+    stats_path = config_yaml.parent / "dataset_statistics.json"
+    if stats_path.exists():
+        with open(stats_path, "r", encoding="utf-8") as f:
+            vla.norm_stats = json.load(f)
+    else:
+        logging.warning("No dataset_statistics.json found beside config_yaml: %s", stats_path)
+    return vla
+
+
+def load_policy(args):
+    if getattr(args, "config_yaml", None):
+        return load_policy_from_config(args.config_yaml)
+    return baseframework.from_pretrained(args.ckpt_path)
 
 
 def main(args) -> None:
-    # Example usage:
-    # policy = YourPolicyClass()  # Replace with your actual policy class
-    # server = WebsocketPolicyServer(policy, host="localhost", port=10091)
-    # server.serve_forever()
-
-    vla = baseframework.from_pretrained(  # TODO should auto detect framework from model path
-        args.ckpt_path,
-    )
-
+    vla = load_policy(args)
     if args.use_bf16:  # False
         vla = vla.to(torch.bfloat16)
     vla = vla.to("cuda").eval()
@@ -60,6 +77,12 @@ def main(args) -> None:
 def build_argparser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument(
+        "--config_yaml",
+        type=str,
+        default=None,
+        help="Eval-only config path. When set, build the policy from config and skip checkpoint state loading.",
+    )
     parser.add_argument("--port", type=int, default=10093)
     parser.add_argument("--use_bf16", action="store_true")
     parser.add_argument("--idle_timeout", type=int, default=1800, help="Idle timeout in seconds, -1 means never close")

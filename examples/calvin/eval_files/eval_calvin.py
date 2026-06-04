@@ -124,6 +124,7 @@ class CalvinPolicyClient:
         self.step_count = 0
         self.train_renderer = train_renderer
         self.send_gr00t_state = self._client_uses_gr00t_state(self.client)
+        self.send_reconvla_ar_robot_obs = self._client_uses_reconvla_ar_diagnostic(self.client)
         self._uamvla_gr00t_state_mean = None
         self._uamvla_gr00t_state_std = None
         if self.send_gr00t_state:
@@ -156,6 +157,13 @@ class CalvinPolicyClient:
             state_dim = 0
         state_conditioned_frameworks = {"UamVLAGR00T", "AuxVLAGR00T"}
         return framework_name in state_conditioned_frameworks and state_dim >= 7
+
+    @classmethod
+    def _client_uses_reconvla_ar_diagnostic(cls, client) -> bool:
+        config = getattr(client, "model_config", None)
+        framework_name = cls._nested_config_get(config, "framework", "name")
+        inference_mode = cls._nested_config_get(config, "framework", "reconvla", "inference_mode")
+        return framework_name == "AuxVLAGR00T" and inference_mode == "reconvla_ar_normalized"
 
     @staticmethod
     def _load_uamvla_gr00t_state_stats(
@@ -279,6 +287,9 @@ class CalvinPolicyClient:
         }
         if self.send_gr00t_state:
             example["state"] = self._extract_uamvla_gr00t_state(obs)
+
+        if self.send_reconvla_ar_robot_obs:
+            example["robot_obs"] = np.asarray(obs["robot_obs"], dtype=np.float32).copy()
 
         # Spec parallel of LIBERO state-passthrough: hand the inner ModelClient
         # the raw 15-D CALVIN robot_obs only when ModelClient successfully

@@ -9,11 +9,17 @@ port=${PORT:-5694}
 # NOTE: activate the uamvla conda env before running this script.
 
 # export DEBUG=true
+extra_args=()
+if [[ -n "${CONFIG_YAML:-}" ]]; then
+    extra_args+=(--config_yaml "${CONFIG_YAML}")
+fi
+
 CUDA_VISIBLE_DEVICES=${gpu_id} python deployment/model_server/server_policy.py \
     --ckpt_path "${your_ckpt}" \
     --port "${port}" \
     --use_bf16 \
     --idle_timeout -1 \
+    "${extra_args[@]}" \
     "$@"
 
 # #################################
