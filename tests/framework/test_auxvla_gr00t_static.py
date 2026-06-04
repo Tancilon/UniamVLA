@@ -168,6 +168,71 @@ class _FakeLoRAInterface(torch.nn.Module):
         self.lora_A = torch.nn.Parameter(torch.ones(()))
 
 
+class _FakeARReconInterface(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def generate_normalized_actions(
+        self,
+        images,
+        instructions,
+        robot_obs,
+        input_mode,
+        action_horizon,
+        action_dim,
+    ):
+        self.calls.append(
+            {
+                "images": images,
+                "instructions": instructions,
+                "robot_obs": robot_obs,
+                "input_mode": input_mode,
+                "action_horizon": action_horizon,
+                "action_dim": action_dim,
+            }
+        )
+        batch_size = len(instructions)
+        return np.full(
+            (batch_size, int(action_horizon), int(action_dim)),
+            0.25,
+            dtype=np.float32,
+        )
+
+
+def _make_predict_model(module, inference_mode="gr00t", ar_input_mode="official_compose"):
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            name="AuxVLAGR00T",
+            reconvla=_AttrDict(
+                inference_mode=inference_mode,
+                ar_input_mode=ar_input_mode,
+                single_view_mode="concat_vertical",
+            ),
+            action_model=_AttrDict(
+                action_horizon=5,
+                action_dim=7,
+                state_dim=7,
+            ),
+        )
+    )
+    model.action_horizon = 5
+    model.action_model = _FakeActionModel()
+    model.qwen_vl_interface = _FakeARReconInterface()
+    model._prepare_examples = lambda examples, require_reconvla_target=False: examples
+    model._encode_reconvla_hidden = lambda examples: (
+        {"input_ids": torch.ones(len(examples), 4, dtype=torch.long)},
+        torch.ones(len(examples), 4, 3584, dtype=torch.bfloat16),
+    )
+    model._action_model_compute_dtype = lambda hidden_dtype: torch.float32
+    model._state_batch_or_none = (
+        lambda examples, device, dtype: torch.zeros(len(examples), 1, 7, device=device, dtype=dtype)
+    )
+    return model
+
+
 def test_auxvla_gr00t_registers_framework(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     assert "AuxVLAGR00T" in module._registered_names
@@ -740,6 +805,76 @@ def test_predict_action_casts_hidden_to_action_model_dtype(monkeypatch):
     )
 
     assert out["normalized_actions"].shape == (1, 8, 7)
+
+
+def test_predict_action_defaults_to_gr00t_path(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+    model = _make_predict_model(module, inference_mode="gr00t")
+    example = {
+        "image": [np.zeros((8, 8, 3), dtype=np.uint8), np.zeros((8, 8, 3), dtype=np.uint8)],
+        "lang": "open the drawer",
+        "state": np.zeros((1, 7), dtype=np.float32),
+        "robot_obs": np.zeros(15, dtype=np.float32),
+    }
+
+    out = module.AuxVLAGR00T.predict_action(model, [example])
+
+    assert out["normalized_actions"].shape == (1, 8, 7)
+    assert model.qwen_vl_interface.calls == []
+    assert len(model.action_model.calls) == 1
+
+
+def test_predict_action_reconvla_ar_returns_normalized_chunk(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = _make_predict_model(
+        module,
+        inference_mode="reconvla_ar_normalized",
+        ar_input_mode="official_compose",
+    )
+    example = {
+        "image": [np.zeros((8, 8, 3), dtype=np.uint8), np.ones((8, 8, 3), dtype=np.uint8)],
+        "lang": "move the slider left",
+        "robot_obs": np.arange(15, dtype=np.float32),
+    }
+
+    out = module.AuxVLAGR00T.predict_action(model, [example])
+
+    assert out["normalized_actions"].shape == (1, 5, 7)
+    assert out["normalized_actions"].dtype == np.float32
+    assert np.allclose(out["normalized_actions"], 0.25)
+    assert model.qwen_vl_interface.calls[0]["input_mode"] == "official_compose"
+    assert model.qwen_vl_interface.calls[0]["action_horizon"] == 5
+    assert model.qwen_vl_interface.calls[0]["action_dim"] == 7
+    assert model.qwen_vl_interface.calls[0]["robot_obs"].shape == (1, 15)
+    assert len(model.action_model.calls) == 0
+
+
+def test_predict_action_reconvla_ar_requires_raw_robot_obs(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = _make_predict_model(module, inference_mode="reconvla_ar_normalized")
+    example = {
+        "image": [np.zeros((8, 8, 3), dtype=np.uint8), np.ones((8, 8, 3), dtype=np.uint8)],
+        "lang": "turn on the lightbulb",
+    }
+
+    with pytest.raises(RuntimeError, match="15-D robot_obs"):
+        module.AuxVLAGR00T.predict_action(model, [example])
+
+
+def test_predict_action_reconvla_ar_accepts_uamvla_raw_state(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = _make_predict_model(module, inference_mode="reconvla_ar_normalized")
+    example = {
+        "image": [np.zeros((8, 8, 3), dtype=np.uint8), np.ones((8, 8, 3), dtype=np.uint8)],
+        "lang": "push the block right",
+        "uamvla_raw_state": {"robot_obs": np.arange(15, dtype=np.float32)},
+    }
+
+    out = module.AuxVLAGR00T.predict_action(model, [example])
+
+    assert out["normalized_actions"].shape == (1, 5, 7)
+    assert np.allclose(model.qwen_vl_interface.calls[0]["robot_obs"][0], np.arange(15, dtype=np.float32))
 
 
 def test_visualize_batch_accepts_distributed_flag_and_uses_reconvla_context(monkeypatch):
