@@ -128,6 +128,14 @@ class AuxVLAGR00TDefaultConfig:
             "vision_tower_path": "ckpt/siglip-so400m-patch14-384",
             "attn_implementation": "flash_attention_2",
             "single_view_mode": "primary",
+            "inference_mode": "gr00t",
+            "ar_input_mode": "official_compose",
+            "action_stat_path": "third_party/ReconVLA/reconvla/statistics.yaml",
+            "double_instruction": True,
+            "max_new_tokens": 128,
+            "temperature": 0.0,
+            "top_p": None,
+            "num_beams": 1,
             "synthetic_image_token_id": -200,
             "disable_internal_recon_loss": True,
             "lora": {
@@ -938,6 +946,53 @@ class AuxVLAGR00T(baseframework):
                 log_metrics[self._aux_metric_log_key(name, metric_name)] = metric_value
         return total, log_metrics
 
+    def _reconvla_inference_mode(self) -> str:
+        recon_cfg = self.config.framework.get("reconvla", {})
+        return str(recon_cfg.get("inference_mode", "gr00t"))
+
+    def _reconvla_ar_input_mode(self) -> str:
+        recon_cfg = self.config.framework.get("reconvla", {})
+        return str(recon_cfg.get("ar_input_mode", "official_compose"))
+
+    @staticmethod
+    def _extract_reconvla_ar_robot_obs(example: dict) -> np.ndarray:
+        if "robot_obs" in example:
+            robot_obs = example["robot_obs"]
+        elif (
+            isinstance(example.get("uamvla_raw_state"), dict)
+            and "robot_obs" in example["uamvla_raw_state"]
+        ):
+            robot_obs = example["uamvla_raw_state"]["robot_obs"]
+        else:
+            raise RuntimeError(
+                "AuxVLAGR00T reconvla_ar_normalized inference requires raw 15-D robot_obs "
+                "at `example['robot_obs']` or `example['uamvla_raw_state']['robot_obs']`."
+            )
+
+        robot_obs = np.asarray(robot_obs, dtype=np.float32).copy().reshape(-1)
+        if robot_obs.shape[0] != 15:
+            raise RuntimeError(
+                "AuxVLAGR00T reconvla_ar_normalized inference requires raw 15-D robot_obs, "
+                f"got shape {robot_obs.shape}."
+            )
+        return robot_obs
+
+    def _reconvla_ar_robot_obs_batch(self, examples: List[dict]) -> np.ndarray:
+        return np.stack(
+            [self._extract_reconvla_ar_robot_obs(example) for example in examples],
+            axis=0,
+        ).astype(np.float32)
+
+    def _reconvla_ar_images(self, examples: List[dict], input_mode: str) -> list:
+        if input_mode == "official_compose":
+            return [example["image"] for example in examples]
+        if input_mode == "auxvla_compose":
+            return self._single_view_images(examples)
+        raise ValueError(
+            f"Unsupported framework.reconvla.ar_input_mode={input_mode!r}. "
+            "Expected `official_compose` or `auxvla_compose`."
+        )
+
     def forward(self, examples: List[dict], **kwargs) -> dict:
         examples = self._prepare_examples(
             examples,
@@ -973,6 +1028,32 @@ class AuxVLAGR00T(baseframework):
         if not isinstance(examples, list):
             examples = [examples]
         examples = self._prepare_examples(examples)
+
+        inference_mode = self._reconvla_inference_mode()
+        if inference_mode == "reconvla_ar_normalized":
+            input_mode = self._reconvla_ar_input_mode()
+            robot_obs = self._reconvla_ar_robot_obs_batch(examples)
+            pred_actions = self.qwen_vl_interface.generate_normalized_actions(
+                images=self._reconvla_ar_images(examples, input_mode),
+                instructions=[example["lang"] for example in examples],
+                robot_obs=robot_obs,
+                input_mode=input_mode,
+                action_horizon=int(
+                    self.config.framework.action_model.get(
+                        "action_horizon",
+                        self.action_horizon,
+                    )
+                ),
+                action_dim=int(self.config.framework.action_model.get("action_dim", 7)),
+            )
+            return {"normalized_actions": np.asarray(pred_actions, dtype=np.float32)}
+
+        if inference_mode != "gr00t":
+            raise ValueError(
+                f"Unsupported framework.reconvla.inference_mode={inference_mode!r}. "
+                "Expected `gr00t` or `reconvla_ar_normalized`."
+            )
+
         _recon_inputs, hidden = self._encode_reconvla_hidden(examples)
         action_dtype = self._action_model_compute_dtype(hidden.dtype)
         hidden_for_action = hidden.to(dtype=action_dtype)
