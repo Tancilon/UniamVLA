@@ -517,6 +517,20 @@ class UamVLAOFT(Qwenvl_OFT):
             "static_cam_extrinsic": static_cam_extrinsic,
         }
 
+        if "uamvla_raw_state" in sample:
+            out["uamvla_raw_state"] = sample["uamvla_raw_state"]
+            robot_obs = sample["uamvla_raw_state"].get("robot_obs")
+            if robot_obs is not None:
+                out["robot_obs"] = np.asarray(robot_obs, dtype=np.float32).reshape(-1)
+
+        if "uamvla_raw_action" in sample:
+            raw_action = sample["uamvla_raw_action"]
+            if not torch.is_tensor(raw_action):
+                raw_action = torch.as_tensor(np.asarray(raw_action), dtype=torch.float32)
+            else:
+                raw_action = raw_action.to(dtype=torch.float32)
+            out["uamvla_raw_action"] = raw_action
+
         # ── Sidecar IO ──────────────────────────────────────────────
         traj = int(sample["__trajectory_id"])
         base = int(sample["__base_index"])

@@ -8,7 +8,10 @@ Key design choices (per design spec §4.4):
   Only robot_obs is normalized; pose / cam_extrinsic pass through raw.
 """
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
-from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.base import (
+    ComposedModalityTransform,
+    PreserveRawModalityTransform,
+)
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
     StateActionToTensor,
     StateActionTransform,
@@ -56,6 +59,10 @@ class UamVLACalvinDataConfig:
 
     def transform(self):
         return ComposedModalityTransform(transforms=[
+            PreserveRawModalityTransform(
+                apply_to=["state.robot_obs", *self.action_keys],
+                output_key="uamvla_raw_reconvla",
+            ),
             # action: min_max normalize all 7 dims except gripper
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
@@ -93,6 +100,9 @@ DATASET_NAMED_MIXTURES = {
     # Used for baseline B training + downstream eval.
     "uamvla_calvin_abcd": [
         ("lerobot_calvin_abcd", 1.0, "uamvla_calvin_franka"),
+    ],
+    "uamvla_calvin_abc": [
+        ("lerobot_calvin_abc", 1.0, "uamvla_calvin_franka"),
     ],
     # D-only preprocessed dataset (datasets/calvin2uam/lerobot_calvin_d).
     "uamvla_calvin_d": [
