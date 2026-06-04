@@ -24,6 +24,11 @@ def parse_args():
     )
     parser.add_argument("--single-view-mode", default="concat_vertical")
     parser.add_argument("--action-horizon", type=int, default=5)
+    parser.add_argument(
+        "--enable-lora",
+        action="store_true",
+        help="Keep framework.reconvla.lora.enabled=true in the diagnostic config.",
+    )
     return parser.parse_args()
 
 
@@ -52,6 +57,9 @@ def main():
     cfg.framework.reconvla.temperature = 0.0
     cfg.framework.reconvla.top_p = None
     cfg.framework.reconvla.num_beams = 1
+    if "lora" not in cfg.framework.reconvla:
+        cfg.framework.reconvla.lora = {}
+    cfg.framework.reconvla.lora.enabled = bool(args.enable_lora)
     cfg.framework.action_model.action_horizon = int(args.action_horizon)
     cfg.framework.action_model.future_action_window_size = int(args.action_horizon) - 1
 
