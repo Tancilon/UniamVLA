@@ -877,6 +877,70 @@ def test_predict_action_reconvla_ar_accepts_uamvla_raw_state(monkeypatch):
     assert np.allclose(model.qwen_vl_interface.calls[0]["robot_obs"][0], np.arange(15, dtype=np.float32))
 
 
+def test_reconvla_ar_decode_trims_and_pads_action_tokens(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+
+    class _FakeTokenizer:
+        vocab_size = 1000
+        pad_token_id = 0
+        eos_token_id = 2
+
+    class _FakeActionTokenizer:
+        action_token_begin_idx = 744
+
+        def decode_token_ids_to_actions(self, ids):
+            ids = np.asarray(ids, dtype=np.int64)
+            return (ids.astype(np.float32) - 900.0) / 100.0
+
+    interface = object.__new__(module.ReconVLAInterface)
+    torch.nn.Module.__init__(interface)
+    interface.tokenizer = _FakeTokenizer()
+    interface.action_tokenizer = _FakeActionTokenizer()
+
+    short = module.ReconVLAInterface._decode_action_ids_to_chunk(
+        interface,
+        np.asarray([900, 901, 902], dtype=np.int64),
+        action_horizon=2,
+        action_dim=3,
+    )
+    long = module.ReconVLAInterface._decode_action_ids_to_chunk(
+        interface,
+        np.asarray([900, 901, 902, 903, 904, 905, 906, 907], dtype=np.int64),
+        action_horizon=2,
+        action_dim=3,
+    )
+
+    assert short.shape == (2, 3)
+    assert np.allclose(short[0], [0.0, 0.01, 0.02])
+    assert np.allclose(short[1], [0.0, 0.0, 0.0])
+    assert long.shape == (2, 3)
+    assert np.allclose(long.reshape(-1), [0.0, 0.01, 0.02, 0.03, 0.04, 0.05])
+
+
+def test_reconvla_ar_filters_generated_action_tokens(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+
+    class _FakeTokenizer:
+        vocab_size = 1000
+        pad_token_id = 0
+        eos_token_id = 2
+
+    class _FakeActionTokenizer:
+        action_token_begin_idx = 744
+
+    interface = object.__new__(module.ReconVLAInterface)
+    torch.nn.Module.__init__(interface)
+    interface.tokenizer = _FakeTokenizer()
+    interface.action_tokenizer = _FakeActionTokenizer()
+
+    tokens = module.ReconVLAInterface._valid_action_token_ids(
+        interface,
+        torch.tensor([1, 743, 744, 800, 999, 1000, 2, 0], dtype=torch.long),
+    )
+
+    assert tokens.tolist() == [744, 800, 999]
+
+
 def test_visualize_batch_accepts_distributed_flag_and_uses_reconvla_context(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())

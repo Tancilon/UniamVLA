@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 _RECONVLA_CALVIN_TARGET_SIZE = 384
 _RECONVLA_CALVIN_CROP_NUMERATOR = 14
 _RECONVLA_CALVIN_CROP_DENOMINATOR = 27
+_RECONVLA_AR_IMAGE_SIZE = 334
+_RECONVLA_AR_OBS_ANCHOR_TOKEN_ID = 35560
+_RECONVLA_AR_SYSTEM_PROMPT = (
+    "A chat between a curious human and an artificial intelligence robot. "
+    "The robot provides actions to follow out the user's instructions."
+)
 
 
 def _repo_root() -> Path:
@@ -200,6 +206,9 @@ class ReconVLAInterface(nn.Module):
         super().__init__()
         _ensure_reconvla_pythonpath()
         from recon.model.language_model.recon_qwen import ReconQwen2ForCausalLM
+        from recon.action_tokenizer import ActionTokenizer, encode_robot_obs
+        from recon.constants import DEFAULT_IMAGE_TOKEN
+        from recon import conversation as conversation_lib
         import recon.mm_utils as recon_mm_utils
         from transformers import AutoConfig, AutoTokenizer
 
@@ -209,6 +218,9 @@ class ReconVLAInterface(nn.Module):
         self.image_token_id = int(recon_cfg.get("synthetic_image_token_id", -200))
         self._tokenizer_image_token = recon_mm_utils.tokenizer_image_token
         self._process_images = getattr(recon_mm_utils, "process_images", None)
+        self._default_image_token = DEFAULT_IMAGE_TOKEN
+        self._conversation_lib = conversation_lib
+        self._encode_robot_obs = encode_robot_obs
 
         load_kwargs = {
             "torch_dtype": torch.bfloat16,
@@ -219,6 +231,7 @@ class ReconVLAInterface(nn.Module):
             load_kwargs["attn_implementation"] = attn_implementation
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=False)
+        self.action_tokenizer = ActionTokenizer(self.tokenizer)
         self.processor = SimpleNamespace(tokenizer=self.tokenizer)
         model_config = AutoConfig.from_pretrained(self.model_path)
         vision_tower_path = self._resolve_vision_tower_path(recon_cfg, model_config)
@@ -238,6 +251,7 @@ class ReconVLAInterface(nn.Module):
         self.image_processor = vision_tower.image_processor
         self.image_embed_len = int(getattr(self.model.config, "image_embed_len", 729))
         self.lora_enabled = False
+        self._logged_ar_decode_stats = False
 
     def _resolve_vision_tower_path(self, recon_cfg, model_config):
         configured = recon_cfg.get("vision_tower_path", None) or recon_cfg.get("mm_vision_tower", None)
@@ -426,6 +440,265 @@ class ReconVLAInterface(nn.Module):
         if image_size is None:
             image_size = (pixel_values.shape[-1], pixel_values.shape[-2])
         return pixel_values, tuple(image_size)
+
+    def _reconvla_ar_cfg(self) -> dict:
+        return _cfg_to_plain_dict(self.config.framework.get("reconvla", {}))
+
+    def _action_stat_path(self) -> Path:
+        recon_cfg = self._reconvla_ar_cfg()
+        stat_path = Path(
+            str(recon_cfg.get("action_stat_path", "third_party/ReconVLA/reconvla/statistics.yaml"))
+        )
+        if not stat_path.is_absolute():
+            stat_path = _repo_root() / stat_path
+        if not stat_path.exists():
+            raise FileNotFoundError(
+                f"framework.reconvla.action_stat_path does not exist: {stat_path}"
+            )
+        return stat_path
+
+    @staticmethod
+    def _compose_official_ar_image(image_list) -> Image.Image:
+        if not isinstance(image_list, (list, tuple)) or len(image_list) < 2:
+            raise RuntimeError(
+                "ReconVLA AR official_compose requires primary and wrist images in `example['image']`."
+            )
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        top = _to_rgb_pil(image_list[0]).resize(
+            (_RECONVLA_AR_IMAGE_SIZE, _RECONVLA_AR_IMAGE_SIZE // 2),
+            resample,
+        )
+        bottom = _to_rgb_pil(image_list[1]).resize(
+            (_RECONVLA_AR_IMAGE_SIZE, _RECONVLA_AR_IMAGE_SIZE // 2),
+            resample,
+        )
+        combined = Image.new("RGB", (_RECONVLA_AR_IMAGE_SIZE, _RECONVLA_AR_IMAGE_SIZE))
+        combined.paste(top, (0, 0))
+        combined.paste(bottom, (0, _RECONVLA_AR_IMAGE_SIZE // 2))
+        return combined
+
+    @staticmethod
+    def _single_ar_image(image_list) -> Image.Image:
+        if isinstance(image_list, (list, tuple)):
+            if len(image_list) != 1:
+                raise RuntimeError(
+                    f"ReconVLA AR auxvla_compose expects one composed image, got {len(image_list)}."
+                )
+            return _to_rgb_pil(image_list[0])
+        return _to_rgb_pil(image_list)
+
+    def _ar_image_for_mode(self, image_list, input_mode: str) -> Image.Image:
+        if input_mode == "official_compose":
+            return self._compose_official_ar_image(image_list)
+        if input_mode == "auxvla_compose":
+            return self._single_ar_image(image_list)
+        raise ValueError(
+            f"Unsupported ReconVLA AR input_mode={input_mode!r}. "
+            "Expected `official_compose` or `auxvla_compose`."
+        )
+
+    def _encode_ar_robot_obs(self, robot_obs: np.ndarray) -> tuple[torch.Tensor, str]:
+        robot_obs = np.asarray(robot_obs, dtype=np.float32).reshape(-1)
+        if robot_obs.shape[0] != 15:
+            raise RuntimeError(f"ReconVLA AR requires 15-D robot_obs, got shape {robot_obs.shape}.")
+        robot_obs_text = " ".join(str(float(value)) for value in robot_obs)
+        obs_tokens, obs_text = self._encode_robot_obs(
+            robot_obs_text,
+            self.action_tokenizer,
+            str(self._action_stat_path()),
+        )
+        return torch.as_tensor(obs_tokens, dtype=torch.long), obs_text
+
+    def _build_ar_prompt_ids(self, instruction: str, robot_obs: np.ndarray) -> torch.Tensor:
+        recon_cfg = self._reconvla_ar_cfg()
+        obs_tokens, obs_text = self._encode_ar_robot_obs(robot_obs)
+        if bool(recon_cfg.get("double_instruction", True)):
+            user_text = (
+                f"{instruction}\n{self._default_image_token}\n"
+                f"{instruction}\n{obs_text}"
+            )
+        else:
+            user_text = f"{self._default_image_token}\n{instruction}\n{obs_text}"
+
+        conv = self._conversation_lib.default_conversation.copy()
+        conv.system = _RECONVLA_AR_SYSTEM_PROMPT
+        conv.append_message(conv.roles[0], user_text)
+        conv.append_message(conv.roles[1], None)
+        prompt = conv.get_prompt()
+
+        input_ids = self._tokenizer_image_token(
+            prompt,
+            self.tokenizer,
+            return_tensors="pt",
+        )
+        if not torch.is_tensor(input_ids):
+            input_ids = torch.as_tensor(input_ids, dtype=torch.long)
+        if input_ids.ndim == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        anchor = (input_ids == _RECONVLA_AR_OBS_ANCHOR_TOKEN_ID).nonzero(as_tuple=True)
+        if len(anchor) >= 2 and anchor[1].numel() > 0:
+            anchor_idx = int(anchor[1][0].item())
+            start_obs = max(anchor_idx - 15, 0)
+            input_ids = torch.cat(
+                (
+                    input_ids[:, :start_obs],
+                    obs_tokens.unsqueeze(0),
+                    input_ids[:, anchor_idx:],
+                ),
+                dim=1,
+            )
+        else:
+            logger.warning(
+                "ReconVLA AR prompt did not contain obs anchor token id %d; "
+                "using text obs without token splice.",
+                _RECONVLA_AR_OBS_ANCHOR_TOKEN_ID,
+            )
+        return input_ids.squeeze(0)
+
+    def build_reconvla_ar_inputs(
+        self,
+        images,
+        instructions,
+        robot_obs,
+        input_mode: str,
+    ) -> dict:
+        if len(images) != len(instructions):
+            raise AssertionError("Images and instructions must have the same length")
+        robot_obs = np.asarray(robot_obs, dtype=np.float32)
+        if robot_obs.shape != (len(instructions), 15):
+            raise RuntimeError(
+                f"ReconVLA AR robot_obs must have shape ({len(instructions)}, 15), got {robot_obs.shape}."
+            )
+
+        input_ids = []
+        image_tensors = []
+        for sample_images, instruction, sample_robot_obs in zip(images, instructions, robot_obs):
+            ar_image = self._ar_image_for_mode(sample_images, input_mode)
+            pixel_values = self.image_processor.preprocess(
+                ar_image,
+                return_tensors="pt",
+            )["pixel_values"][0]
+            input_ids.append(self._build_ar_prompt_ids(str(instruction), sample_robot_obs))
+            image_tensors.append(pixel_values)
+
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        padded_input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids,
+            batch_first=True,
+            padding_value=pad_token_id,
+        )
+        images_tensor = torch.stack(image_tensors, dim=0)
+        device = self.device
+        return {
+            "input_ids": padded_input_ids.to(device),
+            "images": images_tensor.to(device),
+        }
+
+    def _valid_action_token_ids(self, token_ids: torch.Tensor) -> np.ndarray:
+        ids = token_ids.detach().cpu().to(torch.long).numpy().reshape(-1)
+        begin = int(getattr(self.action_tokenizer, "action_token_begin_idx"))
+        vocab_size = int(getattr(self.tokenizer, "vocab_size"))
+        valid = (ids >= begin) & (ids < vocab_size)
+        return ids[valid].astype(np.int64)
+
+    def _decode_action_ids_to_chunk(
+        self,
+        action_token_ids: np.ndarray,
+        action_horizon: int,
+        action_dim: int,
+    ) -> np.ndarray:
+        expected = int(action_horizon) * int(action_dim)
+        action_token_ids = np.asarray(action_token_ids, dtype=np.int64)
+        if action_token_ids.size == 0:
+            decoded = np.zeros((0,), dtype=np.float32)
+        else:
+            decoded = np.asarray(
+                self.action_tokenizer.decode_token_ids_to_actions(action_token_ids),
+                dtype=np.float32,
+            ).reshape(-1)
+        if decoded.shape[0] < expected:
+            logger.warning(
+                "ReconVLA AR generated %d action values, expected %d; padding with zeros.",
+                decoded.shape[0],
+                expected,
+            )
+            decoded = np.pad(decoded, (0, expected - decoded.shape[0]), mode="constant")
+        elif decoded.shape[0] > expected:
+            logger.warning(
+                "ReconVLA AR generated %d action values, expected %d; trimming.",
+                decoded.shape[0],
+                expected,
+            )
+            decoded = decoded[:expected]
+        return decoded.reshape(int(action_horizon), int(action_dim)).astype(np.float32)
+
+    def _generated_token_suffix(self, sequences: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        if sequences.ndim != 2:
+            raise RuntimeError(f"ReconVLA AR generate returned sequences with shape {tuple(sequences.shape)}.")
+        input_len = input_ids.shape[1]
+        if sequences.shape[1] > input_len and torch.equal(
+            sequences[:, :input_len].detach().cpu(),
+            input_ids.detach().cpu(),
+        ):
+            return sequences[:, input_len:]
+        return sequences
+
+    def generate_normalized_actions(
+        self,
+        images,
+        instructions,
+        robot_obs,
+        input_mode: str,
+        action_horizon: int,
+        action_dim: int,
+    ) -> np.ndarray:
+        ar_inputs = self.build_reconvla_ar_inputs(
+            images=images,
+            instructions=instructions,
+            robot_obs=robot_obs,
+            input_mode=input_mode,
+        )
+        recon_cfg = self._reconvla_ar_cfg()
+        temperature = float(recon_cfg.get("temperature", 0.0) or 0.0)
+        top_p = recon_cfg.get("top_p", None)
+
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                ar_inputs["input_ids"],
+                images=ar_inputs["images"].to(dtype=torch.float16, device=self.device, non_blocking=True),
+                do_sample=temperature > 0,
+                temperature=temperature,
+                top_p=top_p,
+                num_beams=int(recon_cfg.get("num_beams", 1)),
+                max_new_tokens=int(recon_cfg.get("max_new_tokens", 128)),
+                use_cache=True,
+                output_attentions=True,
+                return_dict_in_generate=True,
+            )
+
+        sequences = outputs["sequences"] if isinstance(outputs, dict) else outputs.sequences
+        generated = self._generated_token_suffix(sequences, ar_inputs["input_ids"])
+        chunks = []
+        for batch_idx in range(generated.shape[0]):
+            action_ids = self._valid_action_token_ids(generated[batch_idx])
+            chunk = self._decode_action_ids_to_chunk(action_ids, action_horizon, action_dim)
+            chunks.append(chunk)
+        actions = np.stack(chunks, axis=0).astype(np.float32)
+        if not self._logged_ar_decode_stats:
+            self._logged_ar_decode_stats = True
+            logger.info(
+                "ReconVLA AR decoded normalized actions: input_mode=%s action_stat_path=%s "
+                "shape=%s min=%.4f max=%.4f",
+                input_mode,
+                self._action_stat_path(),
+                actions.shape,
+                float(actions.min()) if actions.size else 0.0,
+                float(actions.max()) if actions.size else 0.0,
+            )
+        return actions
 
     def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
         if solutions is not None:
