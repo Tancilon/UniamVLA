@@ -987,6 +987,59 @@ def test_predict_action_reconvla_ar_accepts_uamvla_raw_state(monkeypatch):
     assert np.allclose(model.qwen_vl_interface.calls[0]["robot_obs"][0], np.arange(15, dtype=np.float32))
 
 
+def test_reconvla_ar_training_requires_raw_robot_obs(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+
+    robot_obs = module.AuxVLAGR00T._ar_training_robot_obs(
+        model,
+        {"uamvla_raw_state": {"robot_obs": np.arange(15, dtype=np.float32)}},
+    )
+
+    assert robot_obs.shape == (15,)
+    assert robot_obs.dtype == np.float32
+    with pytest.raises(RuntimeError, match="15-D robot_obs"):
+        module.AuxVLAGR00T._ar_training_robot_obs(model, {})
+
+
+def test_reconvla_ar_training_builds_35_action_labels(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    interface = object.__new__(module.ReconVLAInterface)
+    torch.nn.Module.__init__(interface)
+
+    class _FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 2
+
+    interface.tokenizer = _FakeTokenizer()
+    interface.model = torch.nn.Linear(1, 1)
+    interface.build_reconvla_ar_inputs = lambda **kwargs: {
+        "input_ids": torch.tensor([[10, 11, 12]], dtype=torch.long),
+        "images": torch.ones(1, 3, 334, 334),
+    }
+    interface.preprocess_target_image = lambda image: torch.full((3, 384, 384), float(image))
+    interface.encode_ar_action_tokens = lambda action: torch.arange(100, 135, dtype=torch.long)
+
+    batch = module.ReconVLAInterface.build_reconvla_ar_training_inputs(
+        interface,
+        images=[[np.zeros((8, 8, 3), dtype=np.uint8), np.ones((8, 8, 3), dtype=np.uint8)]],
+        target_images=[2],
+        instructions=["open drawer"],
+        robot_obs=np.zeros((1, 15), dtype=np.float32),
+        actions=np.ones((1, 35), dtype=np.float32),
+        input_mode="official_compose",
+    )
+
+    assert batch["input_ids"].shape == (1, 38)
+    assert torch.equal(batch["input_ids"][0, -35:], torch.arange(100, 135))
+    assert torch.equal(batch["labels"][0, :3], torch.full((3,), -100, dtype=torch.long))
+    assert torch.equal(batch["labels"][0, -35:], torch.arange(100, 135))
+    assert batch["attention_mask"].dtype == torch.bool
+    assert batch["attention_mask"].all()
+    assert batch["images"].shape == (1, 3, 334, 334)
+    assert batch["target_images"].shape == (1, 3, 384, 384)
+
+
 def test_reconvla_ar_decode_trims_and_pads_action_tokens(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
 

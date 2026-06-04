@@ -222,7 +222,7 @@ class ReconVLAInterface(nn.Module):
         super().__init__()
         _ensure_reconvla_pythonpath()
         from recon.model.language_model.recon_qwen import ReconQwen2ForCausalLM
-        from recon.action_tokenizer import ActionTokenizer, encode_robot_obs
+        from recon.action_tokenizer import ActionTokenizer, encode_actions, encode_robot_obs
         from recon.constants import DEFAULT_IMAGE_TOKEN
         from recon import conversation as conversation_lib
         import recon.mm_utils as recon_mm_utils
@@ -236,6 +236,7 @@ class ReconVLAInterface(nn.Module):
         self._process_images = getattr(recon_mm_utils, "process_images", None)
         self._default_image_token = DEFAULT_IMAGE_TOKEN
         self._conversation_lib = conversation_lib
+        self._encode_actions = encode_actions
         self._encode_robot_obs = encode_robot_obs
 
         load_kwargs = {
@@ -606,11 +607,121 @@ class ReconVLAInterface(nn.Module):
             batch_first=True,
             padding_value=pad_token_id,
         )
+        attention_mask = padded_input_ids.ne(pad_token_id)
         images_tensor = torch.stack(image_tensors, dim=0)
         device = self.device
         return {
             "input_ids": padded_input_ids.to(device),
+            "attention_mask": attention_mask.to(device),
             "images": images_tensor.to(device),
+        }
+
+    def preprocess_target_image(self, image) -> torch.Tensor:
+        target_image = _to_rgb_pil(image)
+        return self.image_processor.preprocess(
+            target_image,
+            return_tensors="pt",
+        )["pixel_values"][0]
+
+    def encode_ar_action_tokens(self, action: np.ndarray) -> torch.Tensor:
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        action_text = " ".join(str(float(value)) for value in action)
+        recon_cfg = self._reconvla_ar_cfg()
+        source = str(recon_cfg.get("action_token_source", "raw_with_reconvla_statistics"))
+        if source == "raw_with_reconvla_statistics":
+            token_ids, _actions_lang = self._encode_actions(
+                action_text,
+                self.action_tokenizer,
+                str(self._action_stat_path()),
+            )
+        elif source == "starvla_normalized_direct":
+            token_ids, _actions_lang = self.action_tokenizer(action)
+        else:
+            raise ValueError(
+                f"Unsupported framework.reconvla.action_token_source={source!r}. "
+                "Expected `raw_with_reconvla_statistics` or `starvla_normalized_direct`."
+            )
+        token_ids = torch.as_tensor(token_ids, dtype=torch.long)
+        if token_ids.numel() != action.shape[0]:
+            raise RuntimeError(
+                "ReconVLA AR action tokenizer returned "
+                f"{token_ids.numel()} tokens for {action.shape[0]} action values."
+            )
+        return token_ids
+
+    def build_reconvla_ar_training_inputs(
+        self,
+        images,
+        target_images,
+        instructions,
+        robot_obs,
+        actions,
+        input_mode: str,
+    ) -> dict:
+        ar_inputs = self.build_reconvla_ar_inputs(
+            images=images,
+            instructions=instructions,
+            robot_obs=robot_obs,
+            input_mode=input_mode,
+        )
+        if len(target_images) != len(instructions):
+            raise AssertionError("Target images and instructions must have the same length")
+
+        actions = np.asarray(actions, dtype=np.float32)
+        if actions.ndim != 2 or actions.shape[0] != len(instructions):
+            raise RuntimeError(
+                "ReconVLA AR training actions must have shape "
+                f"({len(instructions)}, action_horizon * action_dim), got {actions.shape}."
+            )
+
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+        prompt_ids = ar_inputs["input_ids"].detach().cpu()
+        prompt_attention = ar_inputs.get("attention_mask")
+        if prompt_attention is None:
+            prompt_attention = ar_inputs["input_ids"].ne(pad_token_id)
+        prompt_attention = prompt_attention.detach().cpu().to(dtype=torch.bool)
+
+        seqs = []
+        labels = []
+        for batch_idx, action in enumerate(actions):
+            valid_prompt_ids = prompt_ids[batch_idx][prompt_attention[batch_idx]]
+            action_token_ids = self.encode_ar_action_tokens(action)
+            label = torch.cat(
+                (
+                    torch.full_like(valid_prompt_ids, -100),
+                    action_token_ids,
+                ),
+                dim=0,
+            )
+            seqs.append(torch.cat((valid_prompt_ids, action_token_ids), dim=0))
+            labels.append(label)
+
+        padded_input_ids = torch.nn.utils.rnn.pad_sequence(
+            seqs,
+            batch_first=True,
+            padding_value=int(pad_token_id),
+        )
+        padded_labels = torch.nn.utils.rnn.pad_sequence(
+            labels,
+            batch_first=True,
+            padding_value=-100,
+        )
+        attention_mask = padded_input_ids.ne(int(pad_token_id))
+        target_tensor = torch.stack(
+            [self.preprocess_target_image(image) for image in target_images],
+            dim=0,
+        )
+        device = self.device
+        return {
+            "input_ids": padded_input_ids.to(device),
+            "labels": padded_labels.to(device),
+            "attention_mask": attention_mask.to(device),
+            "images": ar_inputs["images"].to(device),
+            "target_images": target_tensor.to(device),
         }
 
     def _valid_action_token_ids(self, token_ids: torch.Tensor) -> np.ndarray:
@@ -1312,6 +1423,49 @@ class AuxVLAGR00T(baseframework):
     def _reconvla_ar_robot_obs_batch(self, examples: List[dict]) -> np.ndarray:
         return np.stack(
             [self._extract_reconvla_ar_robot_obs(example) for example in examples],
+            axis=0,
+        ).astype(np.float32)
+
+    def _ar_training_robot_obs(self, example: dict) -> np.ndarray:
+        return self._extract_reconvla_ar_robot_obs(example)
+
+    def _ar_training_action_array(self, example: dict) -> np.ndarray:
+        action_dim = int(self.config.framework.action_model.get("action_dim", 7))
+        action_horizon = int(
+            self.config.framework.action_model.get(
+                "action_horizon",
+                self.action_horizon,
+            )
+        )
+        expected = action_horizon * action_dim
+        if "uamvla_raw_action" not in example:
+            raise RuntimeError(
+                "ReconVLA AR training requires raw unnormalized actions at "
+                "`example['uamvla_raw_action']`. Check the CALVIN data transform "
+                "PreserveRawModalityTransform."
+            )
+
+        raw_action = example["uamvla_raw_action"]
+        if torch.is_tensor(raw_action):
+            action = raw_action.detach().float().cpu().numpy()
+        else:
+            action = np.asarray(raw_action, dtype=np.float32)
+        action = action.reshape(-1, action_dim)
+        if action.shape[0] < action_horizon:
+            raise RuntimeError(
+                f"ReconVLA AR training expected at least {action_horizon} action steps, "
+                f"got shape {action.shape}."
+            )
+        action = action[:action_horizon].reshape(-1).astype(np.float32)
+        if action.shape[0] != expected:
+            raise RuntimeError(
+                f"Expected {expected} action values for ReconVLA AR labels, got {action.shape[0]}."
+            )
+        return action
+
+    def _ar_training_action_batch(self, examples: List[dict]) -> np.ndarray:
+        return np.stack(
+            [self._ar_training_action_array(example) for example in examples],
             axis=0,
         ).astype(np.float32)
 

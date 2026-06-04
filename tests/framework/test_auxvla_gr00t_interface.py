@@ -5,8 +5,10 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 
 class _AttrDict(dict):
@@ -63,6 +65,29 @@ def _load_module(monkeypatch):
         _resolve_head_mask = lambda self, name, batch, batch_size, device: None
         _force_resize_640 = lambda self, image_list: image_list
         _global_step_from_kwargs = staticmethod(lambda kwargs: 0)
+        _to_action_numpy = staticmethod(lambda action: np.asarray(action, dtype=np.float32))
+        _to_rgb_pil = staticmethod(
+            lambda image: image.convert("RGB")
+            if isinstance(image, Image.Image)
+            else Image.fromarray(np.asarray(image, dtype=np.uint8)).convert("RGB")
+        )
+        _fit_for_viz = staticmethod(lambda image, height=160: image)
+        _draw_action_comparison = staticmethod(
+            lambda pred_action, gt_action=None: Image.new("RGB", (16, 16), "white")
+        )
+
+        @classmethod
+        def _make_visualization_canvas(cls, images, pred_action, gt_action=None):
+            return Image.new("RGB", (16, 16), "white")
+
+        @classmethod
+        def _pil_to_normalized_chw(cls, image, device=None):
+            tensor = torch.zeros(3, 4, 4)
+            return tensor.to(device) if device is not None else tensor
+
+        @classmethod
+        def _make_visualization_image_batch(cls, examples, device=None):
+            return torch.zeros(len(examples), 1, 3, 4, 4, device=device)
 
     uamvla_oft = types.ModuleType("starVLA.model.framework.VLM4A.UamVLAOFT")
     uamvla_oft.UamVLAOFT = _UamVLAOFT
@@ -79,6 +104,9 @@ def _load_module(monkeypatch):
 
 class _FakeTokenizer:
     pad_token_id = 0
+    eos_token_id = 2
+    vocab_size = 1000
+    model_max_length = 2048
 
     def __init__(self):
         self.calls = []
@@ -89,6 +117,9 @@ class _FakeTokenizer:
         tokenizer.path = path
         tokenizer.use_fast = use_fast
         return tokenizer
+
+    def decode(self, token_ids):
+        return " ".join(str(token_id) for token_id in token_ids)
 
 
 class _FakeAutoConfig:
@@ -197,6 +228,64 @@ def _install_reconvla_fakes(monkeypatch):
         )
     )
     monkeypatch.setitem(sys.modules, fake_mm_utils.__name__, fake_mm_utils)
+
+    fake_action_tokenizer = types.ModuleType("recon.action_tokenizer")
+
+    class _FakeActionTokenizer:
+        action_token_begin_idx = 744
+
+        def __init__(self, tokenizer):
+            self.tokenizer = tokenizer
+
+        def __call__(self, action):
+            action = np.asarray(action).reshape(-1)
+            token_ids = [900 + idx for idx in range(action.shape[0])]
+            return token_ids, " ".join(str(token_id) for token_id in token_ids)
+
+    fake_action_tokenizer.ActionTokenizer = _FakeActionTokenizer
+    fake_action_tokenizer.encode_actions = (
+        lambda sentence, action_tokenizer, statistics=None: action_tokenizer(
+            np.asarray([float(value) for value in sentence.split(" ")], dtype=np.float32)
+        )
+    )
+    fake_action_tokenizer.encode_robot_obs = (
+        lambda sentence, action_tokenizer, statistics=None: (
+            list(range(200, 215)),
+            sentence,
+        )
+    )
+    monkeypatch.setitem(sys.modules, fake_action_tokenizer.__name__, fake_action_tokenizer)
+
+    fake_constants = types.ModuleType("recon.constants")
+    fake_constants.DEFAULT_IMAGE_TOKEN = "<image>"
+    monkeypatch.setitem(sys.modules, fake_constants.__name__, fake_constants)
+
+    fake_conversation = types.ModuleType("recon.conversation")
+
+    class _FakeConversation:
+        roles = ("USER", "ASSISTANT")
+
+        def __init__(self):
+            self.system = ""
+            self.messages = []
+
+        def copy(self):
+            return _FakeConversation()
+
+        def append_message(self, role, message):
+            self.messages.append((role, message))
+
+        def get_prompt(self):
+            return "\n".join(
+                [self.system]
+                + [
+                    f"{role}: {'' if message is None else message}"
+                    for role, message in self.messages
+                ]
+            )
+
+    fake_conversation.default_conversation = _FakeConversation()
+    monkeypatch.setitem(sys.modules, fake_conversation.__name__, fake_conversation)
     return fake_mm_utils
 
 
