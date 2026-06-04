@@ -170,6 +170,12 @@ class _FakeInnerReconModel(torch.nn.Module):
         self.gate_proj = torch.nn.Linear(2, 2)
         self.up_proj = torch.nn.Linear(2, 2)
         self.down_proj = torch.nn.Linear(2, 2)
+        self.initialize_calls = []
+
+    def initialize_vision_modules(self, model_args, fsdp=None):
+        self.initialize_calls.append((model_args, fsdp))
+        self.pixel_decoder = torch.nn.Linear(2, 2)
+        self.mm_inv_projector = torch.nn.Linear(2, 2)
 
 
 class _FakeReconModel(torch.nn.Module):
@@ -342,6 +348,35 @@ def test_reconvla_interface_loads_and_disables_internal_recon(monkeypatch):
     assert interface.image_embed_len == 729
     assert interface.model.from_pretrained_kwargs["attn_implementation"] == "sdpa"
     assert interface.model.from_pretrained_kwargs["ignore_mismatched_sizes"] is False
+
+
+def test_reconvla_interface_initializes_internal_recon_modules(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+    loaded_prefixes = []
+    monkeypatch.setattr(
+        module.ReconVLAInterface,
+        "_load_reconvla_checkpoint_prefixes",
+        lambda self, prefixes: loaded_prefixes.append(prefixes),
+    )
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                mm_pixel_decoder="ckpt/pretrained_vae",
+                disable_internal_recon_loss=False,
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+
+    inner_model = interface.model.get_model()
+    assert interface.model.config.recon_enable is True
+    assert interface.model.config.reconstruct_image is False
+    assert inner_model.initialize_calls
+    assert inner_model.initialize_calls[0][0].mm_pixel_decoder == "ckpt/pretrained_vae"
+    assert loaded_prefixes == [("model.mm_inv_projector.", "model.pixel_decoder.")]
 
 
 def test_reconvla_interface_overrides_local_vision_tower_path(monkeypatch):

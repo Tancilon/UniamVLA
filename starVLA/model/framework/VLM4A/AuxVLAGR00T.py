@@ -7,6 +7,7 @@ existing GR00T action head and optional UamVLA external aux heads.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import sys
 import time
@@ -254,6 +255,10 @@ class ReconVLAInterface(nn.Module):
         vision_tower_path = self._resolve_vision_tower_path(recon_cfg, model_config)
         if vision_tower_path is not None:
             model_config.mm_vision_tower = vision_tower_path
+        if not bool(recon_cfg.get("disable_internal_recon_loss", True)):
+            pixel_decoder_path = self._resolve_pixel_decoder_path(recon_cfg, model_config)
+            if pixel_decoder_path is not None:
+                model_config.mm_pixel_decoder = pixel_decoder_path
         load_kwargs["config"] = model_config
         self.model = ReconQwen2ForCausalLM.from_pretrained(self.model_path, **load_kwargs)
         self.model.config.use_cache = False
@@ -266,6 +271,7 @@ class ReconVLAInterface(nn.Module):
             self.model.config.reconstruct_image = bool(
                 recon_cfg.get("reconstruct_image", False)
             )
+            self._ensure_internal_recon_modules(recon_cfg)
 
         vision_tower = self.model.get_vision_tower()
         if not getattr(vision_tower, "is_loaded", True):
@@ -297,6 +303,136 @@ class ReconVLAInterface(nn.Module):
             if candidate.exists():
                 return str(candidate)
         return None
+
+    def _resolve_pixel_decoder_path(self, recon_cfg, model_config):
+        configured = recon_cfg.get("mm_pixel_decoder", None) or recon_cfg.get("pixel_decoder_path", None)
+        original = configured or getattr(model_config, "mm_pixel_decoder", None)
+        if not original:
+            return None
+        original_str = str(original)
+        original_path = Path(original_str)
+        if original_path.is_absolute():
+            return original_str if original_path.exists() else None
+        if original_path.exists():
+            return original_str
+
+        relative = original_str[2:] if original_str.startswith("./") else original_str
+        candidates = [
+            Path(self.model_path).parent / relative,
+            Path(self.model_path) / relative,
+            _repo_root() / relative,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def _ensure_internal_recon_modules(self, recon_cfg) -> None:
+        inner_model = self._inner_reconvla_model()
+        has_recon_modules = hasattr(inner_model, "pixel_decoder") and hasattr(
+            inner_model,
+            "mm_inv_projector",
+        )
+        if not has_recon_modules:
+            if not hasattr(inner_model, "initialize_vision_modules"):
+                raise RuntimeError(
+                    "ReconVLA internal recon is enabled, but the loaded model cannot "
+                    "initialize pixel_decoder/mm_inv_projector modules."
+                )
+            model_args = SimpleNamespace(
+                vision_tower=getattr(self.model.config, "mm_vision_tower", None),
+                mm_vision_select_layer=getattr(self.model.config, "mm_vision_select_layer", -1),
+                mm_vision_select_feature=getattr(
+                    self.model.config,
+                    "mm_vision_select_feature",
+                    "patch",
+                ),
+                pretrain_mm_mlp_adapter=None,
+                mm_patch_merge_type=getattr(self.model.config, "mm_patch_merge_type", "flat"),
+                reconstruct_image_savefolder=str(
+                    recon_cfg.get("reconstruct_image_savefolder", "./reconstructed_images")
+                ),
+                mm_pixel_decoder=getattr(self.model.config, "mm_pixel_decoder", None),
+                pretrain_mm_inv_mlp_adapter=None,
+                mm_projector_type=getattr(self.model.config, "mm_projector_type", "linear"),
+                mm_inv_projector_type=getattr(self.model.config, "mm_inv_projector_type", "linear"),
+            )
+            if not model_args.mm_pixel_decoder:
+                raise RuntimeError(
+                    "ReconVLA internal recon is enabled, but mm_pixel_decoder is not configured."
+                )
+            inner_model.initialize_vision_modules(model_args=model_args, fsdp=None)
+        self._load_reconvla_checkpoint_prefixes(
+            ("model.mm_inv_projector.", "model.pixel_decoder."),
+        )
+        self.model.config.recon_enable = True
+
+    def _checkpoint_weight_map(self) -> dict[str, str]:
+        checkpoint_dir = Path(self.model_path)
+        for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+            index_path = checkpoint_dir / index_name
+            if index_path.exists():
+                with index_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                return dict(payload.get("weight_map", {}))
+        safetensor_files = sorted(checkpoint_dir.glob("*.safetensors"))
+        if safetensor_files:
+            return {"*": safetensor_files[0].name}
+        bin_file = checkpoint_dir / "pytorch_model.bin"
+        if bin_file.exists():
+            return {"*": bin_file.name}
+        raise FileNotFoundError(f"No checkpoint weights found under {checkpoint_dir}")
+
+    def _load_reconvla_checkpoint_prefixes(self, prefixes: tuple[str, ...]) -> None:
+        checkpoint_dir = Path(self.model_path)
+        weight_map = self._checkpoint_weight_map()
+        if "*" in weight_map:
+            shard_names = [weight_map["*"]]
+        else:
+            shard_names = sorted(
+                {
+                    shard_name
+                    for name, shard_name in weight_map.items()
+                    if name.startswith(prefixes)
+                }
+            )
+        if not shard_names:
+            raise RuntimeError(
+                "ReconVLA checkpoint does not contain weights for prefixes "
+                f"{prefixes}."
+            )
+
+        selected_state = {}
+        for shard_name in shard_names:
+            shard_path = checkpoint_dir / shard_name
+            if shard_path.suffix == ".safetensors":
+                from safetensors.torch import load_file
+
+                shard = load_file(str(shard_path), device="cpu")
+            else:
+                shard = torch.load(str(shard_path), map_location="cpu")
+            for name, tensor in shard.items():
+                if name.startswith(prefixes):
+                    selected_state[name] = tensor
+
+        current_state = self.model.state_dict()
+        expected_names = [
+            name for name in current_state if name.startswith(prefixes)
+        ]
+        missing = [name for name in expected_names if name not in selected_state]
+        unexpected = [name for name in selected_state if name not in current_state]
+        if missing or unexpected:
+            raise RuntimeError(
+                "ReconVLA internal recon checkpoint prefix load mismatch: "
+                f"missing={missing[:8]} unexpected={unexpected[:8]}"
+            )
+        self.model.load_state_dict(selected_state, strict=False)
+        logger.info(
+            "Loaded %d ReconVLA internal recon tensors from %s for prefixes=%s",
+            len(selected_state),
+            self.model_path,
+            prefixes,
+        )
 
     def _base_reconvla_model(self):
         if hasattr(self.model, "get_base_model"):
