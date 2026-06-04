@@ -29,6 +29,10 @@ from starVLA.model.tools import FRAMEWORK_REGISTRY
 
 logger = logging.getLogger(__name__)
 
+_RECONVLA_CALVIN_TARGET_SIZE = 384
+_RECONVLA_CALVIN_CROP_NUMERATOR = 14
+_RECONVLA_CALVIN_CROP_DENOMINATOR = 27
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -699,13 +703,66 @@ class AuxVLAGR00T(baseframework):
     def _qwen_patches_per_view(self) -> int:
         return self._qwen_vision_layout()["patches_per_view"]
 
-    def _prepare_examples(self, examples: List[dict]) -> List[dict]:
-        return [
+    def _compose_reconvla_style_image_target(self, example: dict) -> dict:
+        """Build ReconVLA CALVIN target_image: top crop + bottom wrist image."""
+        if "image_target" not in example:
+            raise RuntimeError(
+                "AuxVLAGR00T recon training requires `image_target` sidecar crop "
+                "to compose ReconVLA-style crop-plus-wrist target."
+            )
+        image_list = example.get("image")
+        if not isinstance(image_list, (list, tuple)) or len(image_list) < 2:
+            raise RuntimeError(
+                "AuxVLAGR00T recon training requires a wrist image at "
+                "`example['image'][1]` to compose ReconVLA-style target."
+            )
+
+        crop = example["image_target"]
+        if not torch.is_tensor(crop):
+            crop = torch.as_tensor(np.asarray(crop), dtype=torch.float32)
+        if crop.ndim != 3 or crop.shape[0] not in {1, 3, 4}:
+            raise RuntimeError(
+                "AuxVLAGR00T recon target crop must be CHW with 1, 3, or 4 "
+                f"channels, got shape {tuple(crop.shape)}."
+            )
+
+        target_size = _RECONVLA_CALVIN_TARGET_SIZE
+        crop_height = (
+            target_size
+            * _RECONVLA_CALVIN_CROP_NUMERATOR
+            // _RECONVLA_CALVIN_CROP_DENOMINATOR
+        )
+        wrist_height = target_size - crop_height
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+
+        crop_img = _to_rgb_pil(crop).resize((target_size, crop_height), resample)
+        wrist_img = _to_rgb_pil(image_list[1]).resize((target_size, wrist_height), resample)
+        combined = Image.new("RGB", (target_size, target_size))
+        combined.paste(crop_img, (0, 0))
+        combined.paste(wrist_img, (0, crop_height))
+
+        arr = np.array(combined, dtype=np.uint8)
+        out = dict(example)
+        out["image_target"] = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
+        return out
+
+    def _prepare_examples(
+        self,
+        examples: List[dict],
+        require_reconvla_target: bool = False,
+    ) -> List[dict]:
+        prepared = [
             self._unpack_lerobot_sample(example)
             if "__trajectory_id" in example
             else example
             for example in examples
         ]
+        if require_reconvla_target:
+            prepared = [
+                self._compose_reconvla_style_image_target(example)
+                for example in prepared
+            ]
+        return prepared
 
     def _unpack_lerobot_sample(self, sample: dict) -> dict:
         out = UamVLAOFT._unpack_lerobot_sample(self, sample)
@@ -882,7 +939,10 @@ class AuxVLAGR00T(baseframework):
         return total, log_metrics
 
     def forward(self, examples: List[dict], **kwargs) -> dict:
-        examples = self._prepare_examples(examples)
+        examples = self._prepare_examples(
+            examples,
+            require_reconvla_target="recon" in getattr(self, "aux_heads", {}),
+        )
         recon_inputs, hidden = self._encode_reconvla_hidden(examples)
 
         with torch.autocast("cuda", dtype=torch.float32):
@@ -926,7 +986,10 @@ class AuxVLAGR00T(baseframework):
         selected: list[dict],
     ) -> tuple[list[dict], np.ndarray, torch.Tensor, dict]:
         """Run one ReconVLA + GR00T inference pass for action and aux visualizers."""
-        examples = self._prepare_examples(selected)
+        examples = self._prepare_examples(
+            selected,
+            require_reconvla_target="recon" in getattr(self, "aux_heads", {}),
+        )
         recon_inputs, hidden = self._encode_reconvla_hidden(examples)
         action_dtype = self._action_model_compute_dtype(hidden.dtype)
         hidden_for_action = hidden.to(dtype=action_dtype)

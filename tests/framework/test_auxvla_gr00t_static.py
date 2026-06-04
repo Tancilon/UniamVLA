@@ -449,6 +449,89 @@ def test_select_single_view_rejects_missing_wrist(monkeypatch):
         module.AuxVLAGR00T._select_single_view(model, [object()], "wrist")
 
 
+def test_reconvla_style_image_target_composes_crop_and_wrist(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+
+    crop = torch.zeros(3, 2, 2)
+    crop[0].fill_(1.0)
+    primary = Image.new("RGB", (2, 2), (0, 255, 0))
+    wrist = Image.new("RGB", (2, 2), (0, 0, 255))
+    example = {
+        "image": [primary, wrist],
+        "image_target": crop,
+    }
+
+    out = module.AuxVLAGR00T._compose_reconvla_style_image_target(model, example)
+
+    assert out is not example
+    assert out["image_target"].shape == (3, 384, 384)
+    assert out["image_target"].dtype == torch.float32
+    assert out["image_target"].min().item() >= 0.0
+    assert out["image_target"].max().item() <= 1.0
+
+    crop_height = 384 * 14 // 27
+    top = out["image_target"][:, :crop_height]
+    bottom = out["image_target"][:, crop_height:]
+    assert top[0].mean().item() > 0.99
+    assert top[1].mean().item() < 0.01
+    assert top[2].mean().item() < 0.01
+    assert bottom[0].mean().item() < 0.01
+    assert bottom[1].mean().item() < 0.01
+    assert bottom[2].mean().item() > 0.99
+    assert torch.equal(example["image_target"], crop)
+
+
+def test_reconvla_style_image_target_requires_crop(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    example = {
+        "image": [
+            Image.new("RGB", (2, 2), "red"),
+            Image.new("RGB", (2, 2), "blue"),
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="image_target"):
+        module.AuxVLAGR00T._compose_reconvla_style_image_target(model, example)
+
+
+def test_reconvla_style_image_target_requires_wrist(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    example = {
+        "image": [Image.new("RGB", (2, 2), "red")],
+        "image_target": torch.zeros(3, 2, 2),
+    }
+
+    with pytest.raises(RuntimeError, match="wrist"):
+        module.AuxVLAGR00T._compose_reconvla_style_image_target(model, example)
+
+
+def test_prepare_examples_can_require_reconvla_target(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    crop = torch.ones(3, 2, 2)
+    sample = {
+        "image": [
+            Image.new("RGB", (2, 2), "black"),
+            Image.new("RGB", (2, 2), "blue"),
+        ],
+        "image_target": crop,
+        "lang": "open drawer",
+        "action": torch.zeros(8, 7),
+    }
+
+    out = module.AuxVLAGR00T._prepare_examples(
+        model,
+        [sample],
+        require_reconvla_target=True,
+    )
+
+    assert out[0]["image_target"].shape == (3, 384, 384)
+    assert sample["image_target"].shape == (3, 2, 2)
+
+
 def test_forward_routes_reconvla_hidden_to_gr00t_action_and_aux_suite(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
@@ -488,7 +571,10 @@ def test_forward_routes_reconvla_hidden_to_gr00t_action_and_aux_suite(monkeypatc
             action_model=_AttrDict(repeated_diffusion_steps=2, state_dim=7),
         ),
     )
-    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
 
     sample = {
         "image": [object(), object()],
@@ -547,7 +633,10 @@ def test_forward_casts_action_inputs_to_action_model_dtype(monkeypatch):
             action_model=_AttrDict(repeated_diffusion_steps=2, state_dim=7),
         ),
     )
-    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
 
     sample = {
         "image": [object()],
@@ -587,7 +676,10 @@ def test_predict_action_uses_single_view_without_aux(monkeypatch):
             action_model=_AttrDict(state_dim=0),
         ),
     )
-    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
 
     out = module.AuxVLAGR00T.predict_action(
         model,
@@ -633,7 +725,10 @@ def test_predict_action_casts_hidden_to_action_model_dtype(monkeypatch):
             action_model=_AttrDict(state_dim=7),
         ),
     )
-    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
 
     out = module.AuxVLAGR00T.predict_action(
         model,
@@ -685,7 +780,10 @@ def test_visualize_batch_accepts_distributed_flag_and_uses_reconvla_context(monk
     )
     hidden = torch.ones(1, 6, 16, dtype=torch.bfloat16)
     recon_inputs = {"input_ids": torch.zeros(1, 6, dtype=torch.long)}
-    model._prepare_examples = types.MethodType(lambda self, examples: examples, model)
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
     model._encode_reconvla_hidden = types.MethodType(
         lambda self, examples: (recon_inputs, hidden),
         model,
