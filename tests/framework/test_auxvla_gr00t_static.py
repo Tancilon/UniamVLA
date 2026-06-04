@@ -356,6 +356,39 @@ def test_auxvla_init_applies_reconvla_lora_when_enabled(monkeypatch):
     assert cfg.framework.action_model.diffusion_model_cfg.cross_attention_dim == 3584
 
 
+def test_auxvla_init_freezes_action_model_for_reconvla_ar_training(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    _FakeReconInterfaceForInit.instances = []
+    monkeypatch.setattr(module, "ReconVLAInterface", _FakeReconInterfaceForInit)
+
+    class _ParamActionModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()))
+
+    action_model = _ParamActionModel()
+    action_header = sys.modules["starVLA.model.modules.action_model.GR00T_ActionHeader"]
+    monkeypatch.setattr(action_header, "get_action_model", lambda config: action_model)
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                training_mode="reconvla_ar_recon",
+                lora=_AttrDict(enabled=False),
+            ),
+            action_model=_AttrDict(
+                diffusion_model_cfg=_AttrDict(cross_attention_dim=0),
+                action_horizon=5,
+            ),
+        ),
+        datasets=_AttrDict(vla_data=_AttrDict()),
+    )
+
+    model = module.AuxVLAGR00T(cfg)
+
+    assert model.action_model is action_model
+    assert all(not param.requires_grad for param in model.action_model.parameters())
+
+
 def test_reconvla_lora_init_lora_weights_is_forwarded_to_peft(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     captured = {}
@@ -823,6 +856,98 @@ def test_forward_casts_action_inputs_to_action_model_dtype(monkeypatch):
     out = module.AuxVLAGR00T.forward(model, [sample])
 
     assert out["action_loss"].item() == 1.0
+
+
+def test_forward_reconvla_ar_recon_uses_qwen_loss_and_skips_gr00t(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+
+    class _FakeReconInterface:
+        def __init__(self):
+            self.training_inputs_calls = []
+            self.forward_kwargs = None
+
+        def build_reconvla_ar_training_inputs(
+            self,
+            images,
+            target_images,
+            instructions,
+            robot_obs,
+            actions,
+            input_mode,
+        ):
+            self.training_inputs_calls.append(
+                {
+                    "images": images,
+                    "target_images": target_images,
+                    "instructions": instructions,
+                    "robot_obs": robot_obs,
+                    "actions": actions,
+                    "input_mode": input_mode,
+                }
+            )
+            return {
+                "input_ids": torch.tensor([[10, 11, 100, 101]], dtype=torch.long),
+                "labels": torch.tensor([[-100, -100, 100, 101]], dtype=torch.long),
+                "attention_mask": torch.ones(1, 4, dtype=torch.bool),
+                "images": torch.ones(1, 3, 334, 334),
+                "target_images": torch.ones(1, 3, 384, 384),
+            }
+
+        def __call__(self, **kwargs):
+            self.forward_kwargs = kwargs
+            return types.SimpleNamespace(
+                loss=torch.tensor(3.0, requires_grad=True),
+                vm_loss=torch.tensor(0.25),
+            )
+
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = _FakeReconInterface()
+    model.action_model = _FakeActionModel()
+    model.action_horizon = 5
+    model.aux_heads = {}
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                training_mode="reconvla_ar_recon",
+                ar_input_mode="official_compose",
+            ),
+            action_model=_AttrDict(
+                action_horizon=5,
+                action_dim=7,
+                state_dim=7,
+            ),
+        ),
+    )
+    prepare_calls = []
+
+    def _prepare_examples(examples, require_reconvla_target=False):
+        prepare_calls.append(require_reconvla_target)
+        return examples
+
+    model._prepare_examples = _prepare_examples
+    sample = {
+        "image": [object(), object()],
+        "image_target": torch.zeros(3, 384, 384),
+        "lang": "open drawer",
+        "uamvla_raw_state": {"robot_obs": np.arange(15, dtype=np.float32)},
+        "uamvla_raw_action": np.arange(6 * 7, dtype=np.float32).reshape(6, 7),
+    }
+
+    out = module.AuxVLAGR00T.forward(model, [sample], global_step=7)
+
+    assert prepare_calls == [True]
+    assert out["action_loss"].item() == 3.0
+    assert out["action_loss_ar"].item() == 3.0
+    assert out["reconvla_vm_loss"].item() == 0.25
+    assert len(model.action_model.calls) == 0
+    call = model.qwen_vl_interface.training_inputs_calls[0]
+    assert call["instructions"] == ["open drawer"]
+    assert call["robot_obs"].shape == (1, 15)
+    assert call["actions"].shape == (1, 35)
+    assert call["input_mode"] == "official_compose"
+    assert model.qwen_vl_interface.forward_kwargs["labels"].shape == (1, 4)
+    assert model.qwen_vl_interface.forward_kwargs["target_images"].shape == (1, 3, 384, 384)
 
 
 def test_predict_action_uses_single_view_without_aux(monkeypatch):

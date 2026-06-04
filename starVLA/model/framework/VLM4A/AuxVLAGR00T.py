@@ -261,6 +261,11 @@ class ReconVLAInterface(nn.Module):
         if bool(recon_cfg.get("disable_internal_recon_loss", True)):
             self.model.config.recon_enable = False
             self.model.config.reconstruct_image = False
+        else:
+            self.model.config.recon_enable = True
+            self.model.config.reconstruct_image = bool(
+                recon_cfg.get("reconstruct_image", False)
+            )
 
         vision_tower = self.model.get_vision_tower()
         if not getattr(vision_tower, "is_loaded", True):
@@ -950,6 +955,8 @@ class AuxVLAGR00T(baseframework):
         self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = hidden_size
         self.action_model = get_gr00t_action_model(config=self.config)
         self.action_horizon = int(self.config.framework.action_model.action_horizon)
+        if self._reconvla_training_mode() == "reconvla_ar_recon":
+            _freeze_module(self.action_model)
 
     def _reconvla_lora_enabled(self) -> bool:
         qwen_interface = getattr(self, "qwen_vl_interface", None)
@@ -959,6 +966,10 @@ class AuxVLAGR00T(baseframework):
         recon_cfg = _cfg_get(framework_cfg, "reconvla", {})
         lora_cfg = _cfg_get(recon_cfg, "lora", {})
         return bool(_cfg_get(lora_cfg, "enabled", False))
+
+    def _reconvla_training_mode(self) -> str:
+        recon_cfg = self.config.framework.get("reconvla", {})
+        return str(recon_cfg.get("training_mode", "gr00t"))
 
     def _trainer_freeze_patterns(self) -> list[str]:
         trainer_cfg = _cfg_get(getattr(self, "config", None), "trainer", {})
@@ -1479,7 +1490,79 @@ class AuxVLAGR00T(baseframework):
             "Expected `official_compose` or `auxvla_compose`."
         )
 
+    @staticmethod
+    def _output_attr(outputs, name: str, default=None):
+        if isinstance(outputs, dict):
+            return outputs.get(name, default)
+        return getattr(outputs, name, default)
+
+    def _move_ar_training_inputs_to_model(self, ar_inputs: dict) -> dict:
+        device = getattr(self.qwen_vl_interface, "device", None)
+        if device is None:
+            device = next(
+                (
+                    value.device
+                    for value in ar_inputs.values()
+                    if torch.is_tensor(value)
+                ),
+                torch.device("cpu"),
+            )
+        moved = {}
+        for key, value in ar_inputs.items():
+            if not torch.is_tensor(value):
+                moved[key] = value
+                continue
+            if torch.is_floating_point(value):
+                moved[key] = value.to(device=device, dtype=torch.bfloat16, non_blocking=True)
+            else:
+                moved[key] = value.to(device=device, non_blocking=True)
+        return moved
+
+    def _forward_reconvla_ar_recon(self, examples: List[dict], **kwargs) -> dict:
+        input_mode = self._reconvla_ar_input_mode()
+        prepared = self._prepare_examples(examples, require_reconvla_target=True)
+        ar_inputs = self.qwen_vl_interface.build_reconvla_ar_training_inputs(
+            images=self._reconvla_ar_images(prepared, input_mode),
+            target_images=[example["image_target"] for example in prepared],
+            instructions=[example["lang"] for example in prepared],
+            robot_obs=np.stack(
+                [self._ar_training_robot_obs(example) for example in prepared],
+                axis=0,
+            ).astype(np.float32),
+            actions=self._ar_training_action_batch(prepared),
+            input_mode=input_mode,
+        )
+        ar_inputs = self._move_ar_training_inputs_to_model(ar_inputs)
+        outputs = self.qwen_vl_interface(
+            **ar_inputs,
+            use_cache=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        total = self._output_attr(outputs, "loss")
+        if total is None:
+            raise RuntimeError("ReconVLA AR training forward did not return `loss`.")
+        vm_loss = self._output_attr(outputs, "vm_loss", None)
+        labels = ar_inputs["labels"]
+        log_metrics = {
+            "action_loss_ar": total.detach(),
+            "reconvla_action_token_count": labels.ne(-100).sum().detach(),
+        }
+        if vm_loss is not None:
+            log_metrics["reconvla_vm_loss"] = vm_loss.detach()
+            log_metrics["reconvla_lm_loss_est"] = (total.detach() - vm_loss.detach())
+        return {"action_loss": total, **log_metrics}
+
     def forward(self, examples: List[dict], **kwargs) -> dict:
+        training_mode = self._reconvla_training_mode()
+        if training_mode == "reconvla_ar_recon":
+            return self._forward_reconvla_ar_recon(examples, **kwargs)
+        if training_mode != "gr00t":
+            raise ValueError(
+                f"Unsupported framework.reconvla.training_mode={training_mode!r}. "
+                "Expected `gr00t` or `reconvla_ar_recon`."
+            )
+
         examples = self._prepare_examples(
             examples,
             require_reconvla_target="recon" in getattr(self, "aux_heads", {}),
