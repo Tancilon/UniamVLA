@@ -238,6 +238,39 @@ def test_auxvla_gr00t_registers_framework(monkeypatch):
     assert "AuxVLAGR00T" in module._registered_names
 
 
+def test_reconvla_model_config_falls_back_for_unregistered_ross_qwen2(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+
+    import transformers
+
+    class _FallbackConfig:
+        source = "fallback"
+
+    class _FakeConfigClass:
+        @classmethod
+        def from_pretrained(cls, model_path):
+            assert model_path == "ckpt/checkpoint-5554"
+            return _FallbackConfig()
+
+    class _FakeModelClass:
+        config_class = _FakeConfigClass
+
+    def _raise_unknown_model_type(model_path):
+        raise ValueError(
+            "The checkpoint you are trying to load has model type `ross_qwen2` "
+            "but Transformers does not recognize this architecture."
+        )
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", _raise_unknown_model_type)
+
+    cfg = module.ReconVLAInterface._load_model_config(
+        "ckpt/checkpoint-5554",
+        _FakeModelClass,
+    )
+
+    assert cfg.source == "fallback"
+
+
 def test_auxvla_lora_defaults_are_disabled(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
 

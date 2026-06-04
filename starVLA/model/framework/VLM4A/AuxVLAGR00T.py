@@ -202,6 +202,22 @@ class AuxVLAGR00TDefaultConfig:
 
 
 class ReconVLAInterface(nn.Module):
+    @staticmethod
+    def _load_model_config(model_path: str, model_class):
+        from transformers import AutoConfig
+
+        try:
+            return AutoConfig.from_pretrained(model_path)
+        except ValueError as exc:
+            logger.warning(
+                "AutoConfig could not load ReconVLA config from %s; falling back to "
+                "%s.config_class.from_pretrained. Original error: %s",
+                model_path,
+                model_class.__name__,
+                exc,
+            )
+            return model_class.config_class.from_pretrained(model_path)
+
     def __init__(self, config):
         super().__init__()
         _ensure_reconvla_pythonpath()
@@ -210,7 +226,7 @@ class ReconVLAInterface(nn.Module):
         from recon.constants import DEFAULT_IMAGE_TOKEN
         from recon import conversation as conversation_lib
         import recon.mm_utils as recon_mm_utils
-        from transformers import AutoConfig, AutoTokenizer
+        from transformers import AutoTokenizer
 
         self.config = config
         recon_cfg = config.framework.get("reconvla", {})
@@ -233,7 +249,7 @@ class ReconVLAInterface(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=False)
         self.action_tokenizer = ActionTokenizer(self.tokenizer)
         self.processor = SimpleNamespace(tokenizer=self.tokenizer)
-        model_config = AutoConfig.from_pretrained(self.model_path)
+        model_config = self._load_model_config(self.model_path, ReconQwen2ForCausalLM)
         vision_tower_path = self._resolve_vision_tower_path(recon_cfg, model_config)
         if vision_tower_path is not None:
             model_config.mm_vision_tower = vision_tower_path
