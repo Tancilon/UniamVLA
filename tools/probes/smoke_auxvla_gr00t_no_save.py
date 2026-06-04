@@ -105,6 +105,13 @@ def grad_examples_named(module: torch.nn.Module, predicate, limit: int = 8) -> l
     return examples
 
 
+def recon_head_enabled(cfg) -> bool:
+    aux_heads = getattr(cfg.framework, "aux_heads", None)
+    if aux_heads is None or "recon" not in aux_heads:
+        return False
+    return bool(aux_heads.recon.get("enabled", False))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config_yaml", default="starVLA/config/training/auxvla_gr00t_libero.yaml")
@@ -279,7 +286,18 @@ def main() -> None:
 
         dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
         batch = next(iter(dataloader))
-        examples = model._prepare_examples(batch)
+        examples = model._prepare_examples(
+            batch,
+            require_reconvla_target=recon_head_enabled(cfg),
+        )
+        if "image_target" in examples[0]:
+            image_targets = torch.stack([example["image_target"] for example in examples])
+            print(f"prepared_image_target_shape={tuple(image_targets.shape)}")
+            if recon_head_enabled(cfg):
+                assert tuple(image_targets.shape) == (1, 3, 384, 384), (
+                    "Recon-enabled AuxVLAGR00T smoke expects online "
+                    f"crop-plus-wrist image_target, got {tuple(image_targets.shape)}"
+                )
 
         if args.enable_lora:
             recon_inputs, hidden = model._encode_reconvla_hidden(examples)
