@@ -489,8 +489,43 @@ class ReconVLAInterface(nn.Module):
                 )
         return targets
 
+    def _all_linear_lora_targets_except(self, lora_cfg: dict) -> list[str]:
+        excluded_keywords = {
+            str(keyword)
+            for keyword in lora_cfg.get("exclude_modules", [])
+            if str(keyword)
+        }
+        targets: list[str] = []
+        for name, module in self.model.named_modules():
+            if not name or not isinstance(module, nn.Linear):
+                continue
+            if any(keyword in name for keyword in excluded_keywords):
+                continue
+            if (
+                "mm_projector" in name
+                and "mm_inv_projector" not in name
+                and not bool(lora_cfg.get("train_mm_projector", False))
+            ):
+                continue
+            if "mm_inv_projector" in name and not bool(
+                lora_cfg.get("train_mm_inv_projector", False)
+            ):
+                continue
+            targets.append(name)
+        return targets
+
     def _expand_lora_targets(self, lora_cfg: dict) -> list[str]:
-        target_modules = [str(target) for target in (lora_cfg.get("target_modules") or [])]
+        raw_target_modules = lora_cfg.get("target_modules") or []
+        if isinstance(raw_target_modules, str):
+            raw_target_modules = [raw_target_modules]
+
+        target_modules: list[str] = []
+        for target in raw_target_modules:
+            target = str(target)
+            if target == "all-linear-except-frozen":
+                target_modules.extend(self._all_linear_lora_targets_except(lora_cfg))
+            else:
+                target_modules.append(target)
         if bool(lora_cfg.get("train_mm_projector", False)):
             target_modules.extend(self._linear_lora_targets_under("mm_projector"))
         if bool(lora_cfg.get("train_mm_inv_projector", False)):
@@ -549,7 +584,8 @@ class ReconVLAInterface(nn.Module):
             raise ValueError(
                 "No ReconVLA modules matched LoRA target_modules="
                 f"{target_modules}. Expected Qwen2/Ross names like q_proj, k_proj, "
-                "v_proj, o_proj, gate_proj, up_proj, down_proj."
+                "v_proj, o_proj, gate_proj, up_proj, down_proj, or "
+                "all-linear-except-frozen."
             )
 
         task_type_name = str(lora_cfg.get("task_type", "CAUSAL_LM"))

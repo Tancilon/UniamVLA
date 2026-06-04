@@ -20,6 +20,8 @@ def test_auxvla_reconvla_ar_recon_config_matches_official_recipe():
     assert cfg.framework.reconvla.lora.init_lora_weights == "gaussian"
     assert cfg.framework.reconvla.lora.train_mm_projector is True
     assert cfg.framework.reconvla.lora.train_mm_inv_projector is True
+    assert cfg.framework.reconvla.lora.target_modules == ["all-linear-except-frozen"]
+    assert cfg.framework.reconvla.lora.exclude_modules == ["vision_tower", "pixel_decoder"]
     assert cfg.framework.action_model.action_horizon == 5
     assert cfg.framework.action_model.future_action_window_size == 4
     assert cfg.datasets.vla_data.data_mix == "uamvla_calvin_abc"

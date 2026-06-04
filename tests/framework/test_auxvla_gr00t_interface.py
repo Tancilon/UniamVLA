@@ -189,6 +189,7 @@ class _FakeReconModel(torch.nn.Module):
         )
         self.vision_tower = _FakeVisionTower()
         self.model = _FakeInnerReconModel()
+        self.lm_head = torch.nn.Linear(2, 2)
         self.forward_kwargs = None
 
     @classmethod
@@ -487,6 +488,50 @@ def test_reconvla_interface_keeps_mm_projector_lora_trainable(monkeypatch):
         if "lora_" not in name
     )
     assert all(not p.requires_grad for p in interface.model.get_model().mm_inv_projector.parameters())
+    assert all(not p.requires_grad for p in interface.model.get_vision_tower().parameters())
+
+
+def test_reconvla_interface_expands_all_linear_except_frozen_lora(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_reconvla_fakes(monkeypatch)
+    _install_fake_peft(monkeypatch)
+
+    cfg = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(
+                model_path="ckpt/pretrain-checkpoint-10388",
+                lora=_AttrDict(
+                    enabled=True,
+                    r=16,
+                    lora_alpha=32,
+                    lora_dropout=0.05,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules=["all-linear-except-frozen"],
+                    exclude_modules=["vision_tower", "pixel_decoder"],
+                    train_mm_projector=True,
+                    train_mm_inv_projector=True,
+                ),
+            )
+        )
+    )
+
+    interface = module.ReconVLAInterface(cfg)
+    interface.apply_language_lora(cfg.framework.reconvla.lora)
+
+    target_modules = interface.model.peft_config_seen.kwargs["target_modules"]
+    assert "model.q_proj" in target_modules
+    assert "model.gate_proj" in target_modules
+    assert "model.mm_projector.0" in target_modules
+    assert "model.mm_inv_projector" in target_modules
+    assert "lm_head" in target_modules
+    assert "vision_tower.proj" not in target_modules
+
+    trainable = [name for name, param in interface.model.named_parameters() if param.requires_grad]
+    assert "model.q_proj.lora_A" in trainable
+    assert "model.mm_projector.0.lora_A" in trainable
+    assert "model.mm_inv_projector.lora_A" in trainable
+    assert "lm_head.lora_A" in trainable
     assert all(not p.requires_grad for p in interface.model.get_vision_tower().parameters())
 
 

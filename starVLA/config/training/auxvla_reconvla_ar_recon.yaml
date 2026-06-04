@@ -38,14 +38,11 @@ framework:
       task_type: CAUSAL_LM
       train_mm_projector: true
       train_mm_inv_projector: true
+      exclude_modules:
+        - vision_tower
+        - pixel_decoder
       target_modules:
-        - q_proj
-        - k_proj
-        - v_proj
-        - o_proj
-        - gate_proj
-        - up_proj
-        - down_proj
+        - all-linear-except-frozen
   action_model:
     action_model_type: DiT-B
     action_hidden_dim: 1024

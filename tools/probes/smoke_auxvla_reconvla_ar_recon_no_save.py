@@ -139,14 +139,12 @@ def force_ar_recon_smoke_cfg(cfg, args):
     cfg.framework.reconvla.lora.task_type = "CAUSAL_LM"
     cfg.framework.reconvla.lora.train_mm_projector = True
     cfg.framework.reconvla.lora.train_mm_inv_projector = True
+    cfg.framework.reconvla.lora.exclude_modules = [
+        "vision_tower",
+        "pixel_decoder",
+    ]
     cfg.framework.reconvla.lora.target_modules = [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
+        "all-linear-except-frozen",
     ]
     cfg.trainer.freeze_modules = None
     cfg.trainer.visualization.enabled = False
@@ -206,6 +204,24 @@ def main() -> None:
                 param.requires_grad and _is_lora_param(name) and "mm_inv_projector" in name
             ),
         )
+        lm_head_lora_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad and _is_lora_param(name) and "lm_head" in name
+            ),
+        )
+        vision_tower_lora_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad and _is_lora_param(name) and "vision_tower" in name
+            ),
+        )
+        pixel_decoder_lora_trainable = count_named_parameters(
+            model.qwen_vl_interface,
+            lambda name, param: (
+                param.requires_grad and _is_lora_param(name) and "pixel_decoder" in name
+            ),
+        )
         print(f"action_trainable_params={action_trainable / 1e6:.2f}M")
         print(f"lora_trainable_params={lora_trainable / 1e6:.2f}M")
         print(f"backbone_base_trainable_params={backbone_base_trainable}")
@@ -214,11 +230,17 @@ def main() -> None:
             "mm_inv_projector_lora_trainable_params="
             f"{mm_inv_projector_lora_trainable / 1e6:.2f}M"
         )
+        print(f"lm_head_lora_trainable_params={lm_head_lora_trainable / 1e6:.2f}M")
+        print(f"vision_tower_lora_trainable_params={vision_tower_lora_trainable}")
+        print(f"pixel_decoder_lora_trainable_params={pixel_decoder_lora_trainable}")
         assert action_trainable == 0, "GR00T action head should be frozen in AR training mode"
         assert lora_trainable > 0, "LoRA is enabled but no adapter parameters are trainable"
         assert backbone_base_trainable == 0, "non-LoRA backbone parameters are trainable"
         assert mm_projector_lora_trainable > 0, "mm_projector LoRA parameters are not trainable"
         assert mm_inv_projector_lora_trainable > 0, "mm_inv_projector LoRA parameters are not trainable"
+        assert lm_head_lora_trainable > 0, "lm_head LoRA parameters are not trainable"
+        assert vision_tower_lora_trainable == 0, "vision_tower should not have trainable LoRA"
+        assert pixel_decoder_lora_trainable == 0, "pixel_decoder should not have trainable LoRA"
 
         dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
         batch = next(iter(dataloader))
@@ -273,6 +295,11 @@ def main() -> None:
             device,
             lambda name, param: _is_lora_param(name) and "mm_inv_projector" in name,
         )
+        lm_head_lora_grad_norm = grad_norm_named(
+            model.qwen_vl_interface,
+            device,
+            lambda name, param: _is_lora_param(name) and "lm_head" in name,
+        )
         backbone_grad_count = grad_count_named(
             model.qwen_vl_interface,
             lambda name, param: not _is_lora_param(name),
@@ -286,6 +313,7 @@ def main() -> None:
         print(f"lora_grad_norm={lora_grad_norm.item():.6f}")
         print(f"mm_projector_lora_grad_norm={mm_projector_lora_grad_norm.item():.6f}")
         print(f"mm_inv_projector_lora_grad_norm={mm_inv_projector_lora_grad_norm.item():.6f}")
+        print(f"lm_head_lora_grad_norm={lm_head_lora_grad_norm.item():.6f}")
         print(
             "mm_inv_projector_lora_grad_examples="
             f"{named_grad_examples(model.qwen_vl_interface, lambda name, param: _is_lora_param(name) and 'mm_inv_projector' in name)}"
@@ -297,6 +325,7 @@ def main() -> None:
         assert lora_grad_norm.item() > 0, "LoRA adapters did not receive gradients"
         assert mm_projector_lora_grad_norm.item() > 0, "mm_projector LoRA gradients are zero"
         assert mm_inv_projector_lora_grad_norm.item() > 0, "mm_inv_projector LoRA gradients are zero"
+        assert lm_head_lora_grad_norm.item() > 0, "lm_head LoRA gradients are zero"
         assert backbone_grad_count == 0, "frozen non-LoRA backbone parameters received gradients"
         assert action_grad_count == 0, "frozen GR00T action head received gradients"
         print("SMOKE_OK")
