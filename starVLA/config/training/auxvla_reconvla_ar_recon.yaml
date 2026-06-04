@@ -1,0 +1,152 @@
+run_id: auxvla_reconvla_ar_recon_calvin_abc_h5
+run_root_dir: playground/Checkpoints
+seed: 42
+trackers: [jsonl, wandb]
+wandb_project: uamvla
+wandb_entity: tancilon1-fudan-university-school-of-management
+is_debug: false
+version_id: "0.1"
+
+framework:
+  name: AuxVLAGR00T
+  reconvla:
+    model_path: ckpt/pretrain-checkpoint-10388
+    vision_tower_path: ckpt/siglip-so400m-patch14-384
+    mm_pixel_decoder: ckpt/pretrained_vae
+    attn_implementation: flash_attention_2
+    single_view_mode: concat_vertical
+    training_mode: reconvla_ar_recon
+    inference_mode: reconvla_ar_normalized
+    ar_input_mode: official_compose
+    action_token_source: raw_with_reconvla_statistics
+    action_stat_path: third_party/ReconVLA/reconvla/statistics.yaml
+    double_instruction: true
+    max_new_tokens: 128
+    temperature: 0.0
+    top_p: null
+    num_beams: 1
+    synthetic_image_token_id: -200
+    disable_internal_recon_loss: false
+    reconstruct_image: false
+    lora:
+      enabled: true
+      r: 32
+      lora_alpha: 16
+      lora_dropout: 0.0
+      init_lora_weights: gaussian
+      bias: none
+      task_type: CAUSAL_LM
+      train_mm_projector: true
+      train_mm_inv_projector: true
+      target_modules:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - gate_proj
+        - up_proj
+        - down_proj
+  action_model:
+    action_model_type: DiT-B
+    action_hidden_dim: 1024
+    hidden_size: 1024
+    add_pos_embed: true
+    max_seq_len: 1024
+    action_dim: 7
+    state_dim: 7
+    action_horizon: 5
+    future_action_window_size: 4
+    past_action_window_size: 0
+    repeated_diffusion_steps: 1
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 10
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 3584
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: ada_norm
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+  obs_image_size: [384, 384]
+  vae:
+    path: ckpt/pretrained_vae
+  aux_loss_control:
+    enabled: false
+    aux_budget: 1.0
+  aux_heads:
+    pose:
+      enabled: false
+    future:
+      enabled: false
+    recon:
+      enabled: false
+    depth:
+      enabled: false
+    action_conditioned_future:
+      enabled: false
+    grounding:
+      enabled: false
+    affordance:
+      enabled: false
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: datasets/calvin2uam
+    data_mix: uamvla_calvin_abc
+    action_type: calvin_rel_action
+    per_device_batch_size: 1
+    obs: ["video.primary_image", "video.wrist_image"]
+    include_state: true
+    image_resize: 384
+    obs_image_size: 384
+    aux_state_slice:
+      target_pose_rot6d: [15, 21]
+      target_pose_trans: [21, 24]
+      static_cam_rot6d:  [24, 30]
+      static_cam_trans:  [30, 33]
+
+trainer:
+  epochs: 5
+  max_train_steps: 50000
+  num_warmup_steps: 1000
+  save_interval: 5000
+  eval_interval: 999999
+  visualization:
+    enabled: false
+    train_every_n_steps: 2000
+    num_samples: 1
+
+  learning_rate:
+    base:               1.0e-4
+    qwen_vl_interface:  2.0e-5
+    action_model:       0.0
+
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-6
+
+  freeze_modules: null
+  max_grad_norm: 1.0
+  logging_frequency: 50
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 1.0e-8
+
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true
