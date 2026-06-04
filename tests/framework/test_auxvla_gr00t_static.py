@@ -950,6 +950,23 @@ def test_forward_reconvla_ar_recon_uses_qwen_loss_and_skips_gr00t(monkeypatch):
     assert model.qwen_vl_interface.forward_kwargs["target_images"].shape == (1, 3, 384, 384)
 
 
+def test_reconvla_ar_recon_keeps_target_images_float32_for_pixel_decoder(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    model = object.__new__(module.AuxVLAGR00T)
+    torch.nn.Module.__init__(model)
+    model.qwen_vl_interface = types.SimpleNamespace()
+    ar_inputs = {
+        "input_ids": torch.ones(1, 4, dtype=torch.long),
+        "images": torch.ones(1, 3, 384, 384, dtype=torch.float32),
+        "target_images": torch.ones(1, 3, 384, 384, dtype=torch.float32),
+    }
+
+    moved = module.AuxVLAGR00T._move_ar_training_inputs_to_model(model, ar_inputs)
+
+    assert moved["images"].dtype == torch.bfloat16
+    assert moved["target_images"].dtype == torch.float32
+
+
 def test_predict_action_uses_single_view_without_aux(monkeypatch):
     module = _load_auxvla_module(monkeypatch)
     monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())

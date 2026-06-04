@@ -1648,6 +1648,9 @@ class AuxVLAGR00T(baseframework):
             if not torch.is_tensor(value):
                 moved[key] = value
                 continue
+            if key == "target_images":
+                moved[key] = value.to(device=device, dtype=torch.float32, non_blocking=True)
+                continue
             if torch.is_floating_point(value):
                 moved[key] = value.to(device=device, dtype=torch.bfloat16, non_blocking=True)
             else:
