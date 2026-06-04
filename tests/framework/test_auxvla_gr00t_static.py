@@ -131,13 +131,16 @@ class _FakeUamVLAOFT:
 class _FakeActionModel:
     def __init__(self):
         self.calls = []
+        self.encoder_attention_masks = []
 
-    def __call__(self, vl_embs, actions, state):
+    def __call__(self, vl_embs, actions, state, encoder_attention_mask=None):
         self.calls.append((vl_embs, actions, state))
+        self.encoder_attention_masks.append(encoder_attention_mask)
         return torch.tensor(2.0)
 
-    def predict_action(self, hidden, state):
+    def predict_action(self, hidden, state, encoder_attention_mask=None):
         self.calls.append((hidden, None, state))
+        self.encoder_attention_masks.append(encoder_attention_mask)
         return torch.zeros(hidden.shape[0], 8, 7)
 
 
@@ -689,6 +692,80 @@ def test_forward_routes_reconvla_hidden_to_gr00t_action_and_aux_suite(monkeypatc
     assert actions.shape == (2, 8, 7)
     assert state.shape == (2, 1, 7)
     assert model.aux_suite.calls[0][4] == 9
+
+
+def test_forward_passes_expanded_encoder_attention_mask_to_gr00t(monkeypatch):
+    module = _load_auxvla_module(monkeypatch)
+    monkeypatch.setattr(module.torch, "autocast", lambda *args, **kwargs: contextlib.nullcontext())
+
+    class _FakeReconInterface:
+        image_token_id = -200
+        image_embed_len = 4
+
+        def build_qwenvl_inputs(self, images, instructions):
+            assert instructions == ["open drawer", "close drawer"]
+            return {
+                "input_ids": torch.zeros(2, 3, dtype=torch.long),
+                "attention_mask": torch.tensor(
+                    [
+                        [True, True, True],
+                        [True, True, False],
+                    ],
+                    dtype=torch.bool,
+                ),
+            }
+
+        def __call__(self, **kwargs):
+            hidden = torch.ones(2, 6, 16)
+            return types.SimpleNamespace(hidden_states=[hidden], boi_ids=[0, 0], eoi_ids=[3, 3])
+
+    model = object.__new__(module.AuxVLAGR00T)
+    model.qwen_vl_interface = _FakeReconInterface()
+    model.action_model = _FakeActionModel()
+    model.action_horizon = 8
+    model.aux_heads = {}
+    model.config = _AttrDict(
+        framework=_AttrDict(
+            reconvla=_AttrDict(single_view_mode="primary", synthetic_image_token_id=-200),
+            action_model=_AttrDict(repeated_diffusion_steps=2, state_dim=0),
+        ),
+    )
+    model._prepare_examples = types.MethodType(
+        lambda self, examples, require_reconvla_target=False: examples,
+        model,
+    )
+
+    samples = [
+        {
+            "image": [object()],
+            "lang": "open drawer",
+            "action": np.arange(10 * 7, dtype=np.float32).reshape(10, 7),
+        },
+        {
+            "image": [object()],
+            "lang": "close drawer",
+            "action": np.arange(10 * 7, dtype=np.float32).reshape(10, 7),
+        },
+    ]
+
+    module.AuxVLAGR00T.forward(model, samples)
+
+    mask = model.action_model.encoder_attention_masks[0]
+    assert mask.shape == (4, 6)
+    assert torch.equal(
+        mask == 0,
+        torch.tensor(
+            [
+                [True, True, True, True, True, True],
+                [True, True, True, True, True, False],
+                [True, True, True, True, True, True],
+                [True, True, True, True, True, False],
+            ],
+            device=mask.device,
+        ),
+    )
+    assert mask[1, -1].item() < -1000.0
+    assert mask[3, -1].item() < -1000.0
 
 
 def test_forward_casts_action_inputs_to_action_model_dtype(monkeypatch):

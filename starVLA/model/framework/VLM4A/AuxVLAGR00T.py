@@ -1161,6 +1161,42 @@ class AuxVLAGR00T(baseframework):
         mode = recon_cfg.get("single_view_mode", "primary")
         return [[self._select_single_view(example["image"], mode)] for example in examples]
 
+    @staticmethod
+    def _expanded_encoder_attention_mask(
+        attention_mask: torch.Tensor | None,
+        hidden: torch.Tensor,
+        boi_ids,
+        eoi_ids,
+    ) -> torch.Tensor | None:
+        if attention_mask is None:
+            return None
+        valid_lengths = attention_mask.to(dtype=torch.bool).sum(dim=1)
+        expanded_valid = torch.zeros(
+            hidden.shape[:2],
+            dtype=torch.bool,
+            device=hidden.device,
+        )
+        for batch_idx, valid_len in enumerate(valid_lengths.tolist()):
+            boi = boi_ids[batch_idx] if boi_ids is not None else None
+            eoi = eoi_ids[batch_idx] if eoi_ids is not None else None
+            if boi is None or eoi is None:
+                expanded_len = int(valid_len)
+            else:
+                boi_i = int(boi.item() if torch.is_tensor(boi) else boi)
+                eoi_i = int(eoi.item() if torch.is_tensor(eoi) else eoi)
+                image_len = max(eoi_i - boi_i + 1, 0)
+                expanded_len = int(valid_len) - 1 + image_len
+            expanded_len = max(0, min(expanded_len, hidden.shape[1]))
+            expanded_valid[batch_idx, :expanded_len] = True
+
+        attention_bias = torch.zeros(
+            expanded_valid.shape,
+            dtype=hidden.dtype,
+            device=hidden.device,
+        )
+        attention_bias.masked_fill_(~expanded_valid, torch.finfo(hidden.dtype).min)
+        return attention_bias
+
     def _encode_reconvla_hidden(self, examples: List[dict]):
         batch_images = self._single_view_images(examples)
         instructions = [example["lang"] for example in examples]
@@ -1187,7 +1223,14 @@ class AuxVLAGR00T(baseframework):
             image_token_id=image_token_id,
             device=hidden.device,
         )
+        encoder_attention_mask = self._expanded_encoder_attention_mask(
+            recon_inputs.get("attention_mask"),
+            hidden,
+            outputs.boi_ids,
+            outputs.eoi_ids,
+        )
         recon_inputs["aux_input_ids"] = aux_input_ids
+        recon_inputs["encoder_attention_mask"] = encoder_attention_mask
         recon_inputs["model_input_ids"] = recon_inputs["input_ids"]
         recon_inputs["input_ids"] = aux_input_ids
         return recon_inputs, hidden
@@ -1298,7 +1341,23 @@ class AuxVLAGR00T(baseframework):
             actions_repeated = actions_target.repeat(repeat, 1, 1)
             hidden_repeated = hidden_for_action.repeat(repeat, 1, 1)
             state_repeated = state.repeat(repeat, 1, 1) if state is not None else None
-            total = self.action_model(hidden_repeated, actions_repeated, state_repeated)
+            encoder_attention_mask = recon_inputs.get("encoder_attention_mask")
+            if encoder_attention_mask is not None:
+                encoder_attention_mask = encoder_attention_mask.to(dtype=hidden_for_action.dtype)
+            encoder_attention_mask_repeated = (
+                encoder_attention_mask.repeat(repeat, 1)
+                if encoder_attention_mask is not None
+                else None
+            )
+            if encoder_attention_mask_repeated is not None:
+                total = self.action_model(
+                    hidden_repeated,
+                    actions_repeated,
+                    state_repeated,
+                    encoder_attention_mask=encoder_attention_mask_repeated,
+                )
+            else:
+                total = self.action_model(hidden_repeated, actions_repeated, state_repeated)
 
         log_metrics = {"action_loss_fm": total.detach()}
         batch_dict = self._collate_aux(examples, recon_inputs)
@@ -1347,8 +1406,18 @@ class AuxVLAGR00T(baseframework):
         action_dtype = self._action_model_compute_dtype(hidden.dtype)
         hidden_for_action = hidden.to(dtype=action_dtype)
         state = self._state_batch_or_none(examples, hidden.device, action_dtype)
+        encoder_attention_mask = _recon_inputs.get("encoder_attention_mask")
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = encoder_attention_mask.to(dtype=action_dtype)
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(hidden_for_action, state)
+            if encoder_attention_mask is not None:
+                pred_actions = self.action_model.predict_action(
+                    hidden_for_action,
+                    state,
+                    encoder_attention_mask=encoder_attention_mask,
+                )
+            else:
+                pred_actions = self.action_model.predict_action(hidden_for_action, state)
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}
 
     def _visualization_forward_context(
@@ -1364,9 +1433,19 @@ class AuxVLAGR00T(baseframework):
         action_dtype = self._action_model_compute_dtype(hidden.dtype)
         hidden_for_action = hidden.to(dtype=action_dtype)
         state = self._state_batch_or_none(examples, hidden.device, action_dtype)
+        encoder_attention_mask = recon_inputs.get("encoder_attention_mask")
+        if encoder_attention_mask is not None:
+            encoder_attention_mask = encoder_attention_mask.to(dtype=action_dtype)
 
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(hidden_for_action, state)
+            if encoder_attention_mask is not None:
+                pred_actions = self.action_model.predict_action(
+                    hidden_for_action,
+                    state,
+                    encoder_attention_mask=encoder_attention_mask,
+                )
+            else:
+                pred_actions = self.action_model.predict_action(hidden_for_action, state)
 
         batch_dict = self._collate_aux(examples, recon_inputs)
         batch_dict["image"] = self._make_visualization_image_batch(
