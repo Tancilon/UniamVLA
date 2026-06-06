@@ -124,7 +124,7 @@ datasets:
     dataset_py: lerobot_datasets
     data_root_dir: datasets/calvin2uam
     data_mix: uamvla_calvin_d_h8
-    action_type: calvin_rel_action
+    action_type: delta_qpos
     per_device_batch_size: 1
     obs: ["video.primary_image", "video.wrist_image"]
     include_state: true

@@ -258,5 +258,3 @@ logs/*
 code
 datasets/
 ckpt/
-
-.wandb/

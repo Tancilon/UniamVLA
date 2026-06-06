@@ -1416,28 +1416,6 @@ class LeRobotSingleDataset(Dataset):
             state = np.concatenate(state, axis=1).astype(np.float16)
             sample["state"] = state
 
-        raw_reconvla = data.get("uamvla_raw_reconvla")
-        if isinstance(raw_reconvla, dict):
-            if "state.robot_obs" in raw_reconvla:
-                sample["uamvla_raw_state"] = {
-                    "robot_obs": np.asarray(
-                        raw_reconvla["state.robot_obs"],
-                        dtype=np.float32,
-                    )
-                }
-
-            raw_action_parts = []
-            for action_key in self.modality_keys["action"]:
-                if action_key in raw_reconvla:
-                    raw_action_parts.append(
-                        np.asarray(raw_reconvla[action_key], dtype=np.float32)
-                    )
-            if raw_action_parts:
-                sample["uamvla_raw_action"] = np.concatenate(
-                    raw_action_parts,
-                    axis=1,
-                ).astype(np.float32)
-
         # Patch (2026-05-13): pass through sidecar lookup keys for UamVLAOFT.
         # Other frameworks ignore these; they only carry int ids, no semantic
         # meaning for action/image/lang/state pipelines.

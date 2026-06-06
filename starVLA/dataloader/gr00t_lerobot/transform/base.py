@@ -16,7 +16,6 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from ..schema import DatasetMetadata
@@ -89,28 +88,6 @@ class InvertibleModalityTransform(ModalityTransform):
     @abstractmethod
     def unapply(self, data: dict[str, Any]) -> dict[str, Any]:
         """Reverse the transformation to the data corresponding to keys matching the `apply_to` regular expression and return the processed data."""
-
-
-class PreserveRawModalityTransform(ModalityTransform):
-    """Copy raw modality values before later transforms normalize them."""
-
-    output_key: str = Field(
-        default="uamvla_raw_reconvla",
-        description="Destination key containing raw values keyed by original modality key.",
-    )
-
-    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
-        raw: dict[str, Any] = dict(data.get(self.output_key, {}))
-        for key in self.apply_to:
-            if key not in data:
-                continue
-            value = data[key]
-            if hasattr(value, "detach"):
-                raw[key] = value.detach().clone()
-            else:
-                raw[key] = np.asarray(value).copy()
-        data[self.output_key] = raw
-        return data
 
 
 class ComposedModalityTransform(ModalityTransform):

@@ -302,42 +302,11 @@ class VLATrainer(TrainerUtils):
         del state_dict
         self.accelerator.wait_for_everyone()
 
-    def _get_vla_dataset_size(self) -> int:
-        """Return the global number of VLA training examples when available."""
-        dataset = getattr(self.vla_train_dataloader, "dataset", None)
-        if dataset is not None:
-            try:
-                dataset_size = len(dataset)
-                if dataset_size > 0:
-                    return dataset_size
-            except TypeError:
-                pass
-
-        dataloader_size = len(self.vla_train_dataloader)
-        per_device_batch_size = getattr(
-            getattr(getattr(self.config, "datasets", None), "vla_data", None),
-            "per_device_batch_size",
-            1,
-        )
-        num_processes = getattr(self.accelerator, "num_processes", 1)
-        return dataloader_size * per_device_batch_size * num_processes
-
-    def _calculate_logged_epoch(self) -> float:
-        """Calculate epoch progress from optimizer steps and global batch size."""
-        dataset_size = self._get_vla_dataset_size()
-        if dataset_size <= 0:
-            return 0.0
-        return self.completed_steps * self.total_batch_size / dataset_size
-
     def _log_metrics(self, metrics):
         """Record training metrics."""
-        if not getattr(self.accelerator, "sync_gradients", True):
-            return
-
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        if self.completed_steps % self.config.trainer.logging_frequency == 0 and rank == 0:
+        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
             metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
-            metrics["epoch"] = round(self._calculate_logged_epoch(), 2)
+            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
             wandb.log(metrics, step=self.completed_steps)
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
@@ -438,8 +407,7 @@ class VLATrainer(TrainerUtils):
             step_metrics = self._train_step(batch_vla)
             t_end_model = time.perf_counter()
 
-            did_optimizer_step = self.accelerator.sync_gradients
-            if did_optimizer_step:
+            if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
                 self._maybe_visualize_training_batch(batch_vla)
@@ -452,19 +420,18 @@ class VLATrainer(TrainerUtils):
                     }
                 )
 
-            if did_optimizer_step:
-                if self.completed_steps > 0 and self.completed_steps % self.config.trainer.eval_interval == 0:
-                    step_metrics = self.eval_action_model(step_metrics)
+            if self.completed_steps > 0 and self.completed_steps % self.config.trainer.eval_interval == 0:
+                step_metrics = self.eval_action_model(step_metrics)
 
-                step_metrics["data_time"] = t_end_data - t_start_data
-                step_metrics["model_time"] = t_end_model - t_start_model
-                self._log_metrics(step_metrics)
+            step_metrics["data_time"] = t_end_data - t_start_data
+            step_metrics["model_time"] = t_end_model - t_start_model
+            self._log_metrics(step_metrics)
 
-                if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
-                    self._save_checkpoint()
+            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+                self._save_checkpoint()
 
-                if self.completed_steps >= self.config.trainer.max_train_steps:
-                    break
+            if self.completed_steps >= self.config.trainer.max_train_steps:
+                break
 
         self._finalize_training()
 

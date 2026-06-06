@@ -17,7 +17,6 @@ from .base import (
     ComposedModalityTransform,
     InvertibleModalityTransform,
     ModalityTransform,
-    PreserveRawModalityTransform,
 )
 from .concat import ConcatTransform
 # from .state_action import (

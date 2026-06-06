@@ -171,32 +171,3 @@ def test_uamvla_gr00t_libero_yaml_loads():
     assert cfg.framework.action_model.state_dim == 7
     assert cfg.framework.action_model.action_horizon == 8
     assert cfg.datasets.vla_data.aux_state_slice.target_pose_rot6d == [15, 21]
-
-
-def test_auxvla_gr00t_libero_yaml_loads():
-    cfg = OmegaConf.load("starVLA/config/training/auxvla_gr00t_libero.yaml")
-    assert cfg.framework.name == "AuxVLAGR00T"
-    assert cfg.framework.reconvla.model_path == "ckpt/pretrain-checkpoint-10388"
-    assert cfg.framework.reconvla.vision_tower_path == "ckpt/siglip-so400m-patch14-384"
-    assert cfg.framework.reconvla.single_view_mode == "primary"
-    assert cfg.framework.reconvla.synthetic_image_token_id == -200
-    assert cfg.framework.reconvla.disable_internal_recon_loss is True
-    assert cfg.datasets.vla_data.data_mix == "uamvla_libero_all_h8"
-    assert cfg.datasets.vla_data.obs == ["video.primary_image", "video.wrist_image"]
-    assert cfg.framework.action_model.action_horizon == 8
-    assert cfg.framework.aux_heads.recon.enabled is False
-
-
-def test_auxvla_gr00t_lora_yaml_loads():
-    cfg = OmegaConf.load("starVLA/config/training/auxvla_gr00t_lora.yaml")
-    assert cfg.run_id == "auxvla_gr00t_lora_primary_h8"
-    assert cfg.framework.name == "AuxVLAGR00T"
-    assert cfg.framework.reconvla.lora.enabled is True
-    assert cfg.framework.reconvla.lora.r == 32
-    assert cfg.framework.reconvla.lora.lora_alpha == 16
-    assert cfg.framework.reconvla.lora.lora_dropout == 0.0
-    assert cfg.framework.reconvla.lora.train_mm_projector is True
-    assert cfg.framework.reconvla.lora.train_mm_inv_projector is False
-    assert "q_proj" in cfg.framework.reconvla.lora.target_modules
-    assert cfg.trainer.learning_rate.qwen_vl_interface == 2.0e-5
-    assert cfg.trainer.freeze_modules is None
