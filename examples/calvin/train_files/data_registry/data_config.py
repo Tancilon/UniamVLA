@@ -78,17 +78,72 @@ class UamVLACalvinH8DataConfig(UamVLACalvinDataConfig):
     action_indices = list(range(action_horizon))
 
 
+class CalvinABCLeRobotV21H8DataConfig:
+    """HF LeRobot v2.1 CALVIN ABC-D config with 8-step action chunks."""
+
+    video_keys = ["video.primary_image", "video.wrist_image"]
+    state_keys = [
+        "state.x",
+        "state.y",
+        "state.z",
+        "state.roll",
+        "state.pitch",
+        "state.yaw",
+        "state.pad",
+        "state.gripper",
+    ]
+    action_keys = [
+        "action.x",
+        "action.y",
+        "action.z",
+        "action.roll",
+        "action.pitch",
+        "action.yaw",
+        "action.gripper",
+    ]
+    language_keys = ["annotation.human.action.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(8))
+    state_indices = [0]
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
+            "state": ModalityConfig(delta_indices=self.state_indices, modality_keys=self.state_keys),
+            "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
+            "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
+        }
+
+    def transform(self):
+        return ComposedModalityTransform(transforms=[
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={k: "min_max" for k in self.action_keys[:-1]},
+            ),
+        ])
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "uamvla_calvin_franka": UamVLACalvinDataConfig(),
     "uamvla_calvin_franka_h8": UamVLACalvinH8DataConfig(),
+    "calvin_abc_d_franka_h8": CalvinABCLeRobotV21H8DataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "uamvla_calvin_franka": EmbodimentTag.FRANKA,
     "uamvla_calvin_franka_h8": EmbodimentTag.FRANKA,
+    "calvin_abc_d_franka_h8": EmbodimentTag.FRANKA,
 }
 
 DATASET_NAMED_MIXTURES = {
+    # Hugging Face CollisionCode/calvin_abc_d_lerobot_v2.1 dataset.
+    "calvin_abc_d": [
+        ("calvin_abc_d_lerobot_v2.1", 1.0, "calvin_abc_d_franka_h8"),
+    ],
+    "calvin_abc_d_h8": [
+        ("calvin_abc_d_lerobot_v2.1", 1.0, "calvin_abc_d_franka_h8"),
+    ],
     # Full preprocessed dataset (datasets/calvin2uam/lerobot_calvin_abcd).
     # Used for baseline B training + downstream eval.
     "uamvla_calvin_abcd": [
