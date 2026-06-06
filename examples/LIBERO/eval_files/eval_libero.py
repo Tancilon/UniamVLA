@@ -102,8 +102,11 @@ def eval_libero(args: Args) -> None:
         host=args.host,
         port=args.port,
         image_size=args.resize_size,
-        gripper_binarize_threshold=0.0,
-        gripper_interpretation="libero_sign",
+        # Match the 8a92f700-era LIBERO eval gripper convention:
+        # model output > 0.5 means open, then _binarize_gripper_open maps
+        # open -> LIBERO env action -1 and closed -> +1.
+        gripper_binarize_threshold=0.5,
+        gripper_interpretation="positive_open",
     )
 
     # UamVLAGR00T state branch: training applies mean_std norm to state.robot_obs
