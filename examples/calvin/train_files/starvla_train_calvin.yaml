@@ -2,8 +2,8 @@ run_id: starvla
 run_root_dir: results/Checkpoints
 seed: 42
 trackers: [jsonl, wandb]
-wandb_entity: your_wandb_entity
-wandb_project: llavavla
+wandb_entity: tancilon1-fudan-university-school-of-management
+wandb_project: uamvla
 is_debug: false
 version_id: "0.21"
 
