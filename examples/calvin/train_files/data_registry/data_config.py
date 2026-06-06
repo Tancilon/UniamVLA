@@ -137,6 +137,12 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
+    # Three-scene CALVIN ABC LeRobot v2.1 datasets under datasets/.
+    "calvin_abc_lerobot_h8": [
+        ("task_ABC_D_scene_A_lerobot", 1.0, "calvin_abc_d_franka_h8"),
+        ("task_ABC_D_scene_B_lerobot", 1.0, "calvin_abc_d_franka_h8"),
+        ("task_ABC_D_scene_C_lerobot", 1.0, "calvin_abc_d_franka_h8"),
+    ],
     # Hugging Face CollisionCode/calvin_abc_d_lerobot_v2.1 dataset.
     "calvin_abc_d": [
         ("calvin_abc_d_lerobot_v2.1", 1.0, "calvin_abc_d_franka_h8"),
