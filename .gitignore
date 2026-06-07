@@ -259,3 +259,5 @@ logs/*
 code
 datasets/
 ckpt/
+
+.sii/

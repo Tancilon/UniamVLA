@@ -1381,3 +1381,279 @@ class UamVLAOFT(Qwenvl_OFT):
             pred_actions = self.action_model.predict_action(action_queries)
 
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}
+
+
+# add
+@FRAMEWORK_REGISTRY.register("UamVLAOFTStarVLA26")
+class UamVLAOFTStarVLA26(UamVLAOFT):
+    """
+    UamVLAOFT variant for StarVLA-first CALVIN state.
+
+    Expected packed state layout:
+        state[0:8]    = StarVLA8
+            x, y, z, roll, pitch, yaw, pad, gripper
+
+        state[8:14]   = target_pose_rot6d
+        state[14:17]  = target_pose_trans
+        state[17:23]  = static_cam_rot6d
+        state[23:26]  = static_cam_trans
+
+    Total:
+        8 + 6 + 3 + 6 + 3 = 26D
+
+    Difference from original UamVLAOFT:
+        original assumes:
+            raw robot_obs15 + aux18 = 33D
+
+        this class assumes:
+            StarVLA8 + aux18 = 26D
+    """
+
+    DEFAULT_AUX_STATE_SLICE = {
+        "target_pose_rot6d": (8, 14),
+        "target_pose_trans": (14, 17),
+        "static_cam_rot6d": (17, 23),
+        "static_cam_trans": (23, 26),
+    }
+
+    EXPECTED_STATE_DIM = 26
+    STARVLA_STATE_SLICE = (0, 8)
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Force 26D StarVLA-first state layout.
+        # This avoids accidentally using the old 33D raw15+aux18 layout.
+        self.aux_state_slice = dict(self.DEFAULT_AUX_STATE_SLICE)
+        self.expected_state_dim = self.EXPECTED_STATE_DIM
+        self.starvla_state_slice = self.STARVLA_STATE_SLICE
+
+        # Optional config override, but default is always 26D.
+        vla_cfg = getattr(getattr(self.config, "datasets", None), "vla_data", None)
+        if vla_cfg is not None:
+            user_slice = getattr(vla_cfg, "aux_state_slice", None)
+            if isinstance(user_slice, dict) and len(user_slice) > 0:
+                self.aux_state_slice = {
+                    k: tuple(v) for k, v in user_slice.items()
+                }
+
+        print(
+            "[UamVLAOFTStarVLA26] using state layout: "
+            "StarVLA8 + aux18 = 26D; "
+            f"aux_state_slice={self.aux_state_slice}"
+        )
+
+    @staticmethod
+    def _as_1d_float_tensor(x):
+        if x is None:
+            return None
+
+        if torch.is_tensor(x):
+            t = x.to(dtype=torch.float32)
+        else:
+            t = torch.as_tensor(np.asarray(x), dtype=torch.float32)
+
+        # Common LeRobot packed state shape is (1, D).
+        if t.ndim == 2 and t.shape[0] == 1:
+            t = t.squeeze(0)
+
+        return t.reshape(-1)
+
+    @staticmethod
+    def _as_action_tensor(x):
+        if x is None:
+            return None
+
+        if torch.is_tensor(x):
+            t = x.to(dtype=torch.float32)
+        else:
+            t = torch.as_tensor(np.asarray(x), dtype=torch.float32)
+
+        # Accept single-step action as (7,), but prefer dataloader to output (H, 7).
+        if t.ndim == 1:
+            t = t.unsqueeze(0)
+
+        return t
+
+    @staticmethod
+    def _slice_if_valid(state: torch.Tensor, span, expected_dim: int):
+        if span is None:
+            return None
+
+        start, end = int(span[0]), int(span[1])
+
+        if start < 0:
+            return None
+        if end <= start:
+            return None
+        if end > state.numel():
+            return None
+
+        value = state[start:end]
+
+        if value.numel() != expected_dim:
+            return None
+
+        return value
+
+    def _unpack_lerobot_sample(self, sample):
+        """
+        Convert packed LeRobot sample into UamVLAOFT internal sample.
+
+        This version is intentionally compatible with:
+            - StarVLA8-only state: 8D
+            - StarVLA8 + aux18 state: 26D
+
+        For 8D state:
+            only action loss can be trained.
+
+        For 26D state:
+            pose_gt and static_cam_extrinsic are created from state[8:26].
+        """
+        from starVLA.model.modules.uamvla.components.pose.pose_utils import (
+            rotation_6d_to_matrix,
+        )
+        # 1. Image
+        image = sample.get("image", None)
+        if image is None:
+            image = sample.get("video.primary_image", None)
+        if image is None:
+            image = sample.get("primary_image", None)
+
+        if image is None:
+            raise KeyError(
+                "UamVLAOFTStarVLA26 expects sample['image'] "
+                "or sample['video.primary_image']."
+            )
+
+        # 2. Language
+        lang = sample.get("lang", None)
+        if lang is None:
+            lang = sample.get("language", None)
+        if lang is None:
+            lang = sample.get("annotation.human.action.task_description", "")
+
+        # 3. Action
+        action = sample.get("action", None)
+        if action is None:
+            action = sample.get("actions", None)
+
+        if action is None:
+            raise KeyError(
+                "UamVLAOFTStarVLA26 expects sample['action'] or sample['actions']."
+            )
+
+        action = self._as_action_tensor(action)
+
+        out = {
+            "image": image,
+            "lang": lang,
+            "action": action,
+        }
+
+        # 4. State: supports 8D or 26D.
+        state = sample.get("state", None)
+        state = self._as_1d_float_tensor(state)
+
+        if state is not None:
+            out["uamvla_state"] = state
+
+            if state.numel() < 8:
+                raise ValueError(
+                    f"Expected StarVLA state with at least 8 dims, "
+                    f"but got state shape {tuple(state.shape)}."
+                )
+
+            # Keep StarVLA8 separately for debugging / visualization.
+            out["starvla_state"] = state[0:8]
+
+            # 26D path: create pose/camera supervision.
+            s = self.aux_state_slice
+
+            pose_rot6d = self._slice_if_valid(
+                state,
+                s.get("target_pose_rot6d"),
+                6,
+            )
+            pose_trans = self._slice_if_valid(
+                state,
+                s.get("target_pose_trans"),
+                3,
+            )
+            cam_rot6d = self._slice_if_valid(
+                state,
+                s.get("static_cam_rot6d"),
+                6,
+            )
+            cam_trans = self._slice_if_valid(
+                state,
+                s.get("static_cam_trans"),
+                3,
+            )
+
+            if pose_rot6d is not None and pose_trans is not None:
+                out["pose_gt"] = {
+                    "rotation": rotation_6d_to_matrix(pose_rot6d),
+                    "translation": pose_trans,
+                }
+
+            if cam_rot6d is not None and cam_trans is not None:
+                out["static_cam_extrinsic"] = {
+                    "rotation": rotation_6d_to_matrix(cam_rot6d),
+                    "translation": cam_trans,
+                }
+
+        # 5. Sidecar IO is optional.
+        #
+        # If your dataset does not have:
+        #   __trajectory_id
+        #   __base_index
+        #   point_clouds/
+        #   image_targets/
+        #   depths/
+        #   grounding_masks/
+        #   affordance_heatmaps/
+        #
+        # then we should not force sidecar loading here.
+        enable_sidecar_io = True
+        try:
+            vla_cfg = self.config.datasets.vla_data
+            enable_sidecar_io = bool(getattr(vla_cfg, "enable_sidecar_io", True))
+        except Exception:
+            enable_sidecar_io = True
+
+        has_sidecar_index = (
+            "__trajectory_id" in sample
+            and "__base_index" in sample
+        )
+
+        if not enable_sidecar_io or not has_sidecar_index:
+            return out
+
+        # Reuse original UamVLAOFT sidecar loading if the parent implementation
+        # provides helper methods. Keep this part conservative so action-only /
+        # pose-only training will not break.
+        try:
+            traj = int(sample["__trajectory_id"])
+            base = int(sample["__base_index"])
+
+            out["__trajectory_id"] = traj
+            out["__base_index"] = base
+
+            if "__dataset_name" in sample:
+                out["__dataset_name"] = sample["__dataset_name"]
+
+            # If the original class has a sidecar-enrichment helper, use it.
+            # Otherwise this class still works for action-only and state-aux training.
+            if hasattr(self, "_load_uamvla_sidecars"):
+                sidecar_data = self._load_uamvla_sidecars(sample, traj, base)
+                if isinstance(sidecar_data, dict):
+                    out.update(sidecar_data)
+
+        except Exception as exc:
+            # Do not kill action-only training because of missing sidecar files.
+            if getattr(self, "strict_sidecar_io", False):
+                raise
+            out["sidecar_error"] = str(exc)
+
+        return out

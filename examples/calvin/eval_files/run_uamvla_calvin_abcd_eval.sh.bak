@@ -1,0 +1,48 @@
+#!/bin/bash
+set -euo pipefail
+
+export PYTHONPATH=$(pwd):${PYTHONPATH:-}
+export calvin_python=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/miniconda3/envs/calvin_env/bin/python
+
+host="127.0.0.1"
+base_port=5694
+unnorm_key="franka_calvin"
+
+your_ckpt=playground/Checkpoints/uamvla_calvin_abcd_phase1/checkpoints/steps_150000_pytorch_model.pt
+
+# 这个必须是和训练预处理数据同源的原始 CALVIN 根目录，且包含 validation/
+dataset_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/datasets/task_ABC_D
+calvin_config_path=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/code/UamVLA/third_party/calvin/calvin_models/conf
+eval_sequences_path=examples/calvin/eval_files/eval_sequences.json
+
+project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
+eval_log_dir="${project_root}/logs/calvin_eval/${folder_name}"
+mkdir -p "${eval_log_dir}"
+
+echo "Checking checkpoint files:"
+ls "${your_ckpt}"
+ls "playground/Checkpoints/uamvla_calvin_abcd_phase1/statistics.yaml"
+ls "playground/Checkpoints/uamvla_calvin_abcd_phase1/dataset_statistics.json"
+
+echo "Checking training preprocessed data:"
+ls "datasets/uamvla_calvin/task_ABC_D/data.jsonl"
+ls "datasets/uamvla_calvin/task_ABC_D/statistics.yaml"
+
+echo "Checking raw CALVIN eval data:"
+ls "${dataset_path}/validation"
+
+${calvin_python} ./examples/calvin/eval_files/eval_calvin.py \
+    --args.host "${host}" \
+    --args.port ${base_port} \
+    --args.resize_size 256 \
+    --args.replan_steps 8 \
+    --args.use_train_renderer \
+    --args.gripper_binarize_threshold 0.0 \
+    --args.pretrained-path "${your_ckpt}" \
+    --args.unnorm-key "${unnorm_key}" \
+    --args.dataset_path "${dataset_path}" \
+    --args.calvin_config_path "${calvin_config_path}" \
+    --args.eval_sequences_path "${eval_sequences_path}" \
+    --args.eval_log_dir "${eval_log_dir}" \
+    "$@"

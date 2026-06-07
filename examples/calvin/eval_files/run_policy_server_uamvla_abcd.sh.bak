@@ -1,0 +1,19 @@
+#!/bin/bash
+set -euo pipefail
+
+export PYTHONPATH=$(pwd):${PYTHONPATH:-}
+export star_vla_python=/inspire/ssd/project/space-intelligence-multimodality/liuzhenyang-240108540154/dengqi/miniconda3/envs/uamvla/bin/python
+
+your_ckpt=playground/Checkpoints/uamvla_calvin_abcd_phase1/checkpoints/steps_150000_pytorch_model.pt
+gpu_id=0
+port=5694
+
+ls "${your_ckpt}"
+ls "playground/Checkpoints/uamvla_calvin_abcd_phase1/statistics.yaml"
+ls "playground/Checkpoints/uamvla_calvin_abcd_phase1/dataset_statistics.json"
+
+CUDA_VISIBLE_DEVICES=${gpu_id} WANDB_MODE=offline ${star_vla_python} deployment/model_server/server_policy.py \
+    --ckpt_path "${your_ckpt}" \
+    --port ${port} \
+    --use_bf16 \
+    "$@"

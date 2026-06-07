@@ -1065,6 +1065,158 @@ class VLAArenaFrankaDataConfig:
 
 
 ###########################################################################################
+class CalvinStarVLAUAMStateH8DataConfig:
+    """
+    CALVIN StarVLA-first + UAM extra state.
+
+    Real LeRobot columns:
+      image
+      wrist_image
+      state                         # 8D StarVLA state
+      actions                       # 7D action
+      state.target_pose_rot6d        # 6D
+      state.target_pose_trans        # 3D
+      state.static_cam_rot6d         # 6D
+      state.static_cam_trans         # 3D
+      task_index
+
+    Logical dataloader keys:
+      video.primary_image -> image
+      video.wrist_image   -> wrist_image
+      action.*            -> actions slices
+      state.x/...         -> state slices
+      state.target_pose_* -> extra state columns
+      state.static_cam_*  -> extra state columns
+    """
+
+    video_keys = [
+        "video.primary_image",
+        "video.wrist_image",
+    ]
+
+    starvla_state_keys = [
+        "state.x",
+        "state.y",
+        "state.z",
+        "state.roll",
+        "state.pitch",
+        "state.yaw",
+        "state.pad",
+        "state.gripper",
+    ]
+
+    aux_state_keys = [
+        "state.target_pose_rot6d",
+        "state.target_pose_trans",
+        "state.static_cam_rot6d",
+        "state.static_cam_trans",
+    ]
+
+    state_keys = starvla_state_keys + aux_state_keys
+
+    action_keys = [
+        "action.x",
+        "action.y",
+        "action.z",
+        "action.roll",
+        "action.pitch",
+        "action.yaw",
+        "action.gripper",
+    ]
+
+    language_keys = [
+        "annotation.human.action.task_description",
+    ]
+
+    observation_indices = [0]
+    action_horizon = 8
+    action_indices = list(range(action_horizon))
+
+    # Final concatenated state order:
+    #   0:8    StarVLA state
+    #   8:14   target_pose_rot6d
+    #   14:17  target_pose_trans
+    #   17:23  static_cam_rot6d
+    #   23:26  static_cam_trans
+    state_dim = 26
+
+    aux_state_slice = {
+        "target_pose_rot6d": (8, 14),
+        "target_pose_trans": (14, 17),
+        "static_cam_rot6d": (17, 23),
+        "static_cam_trans": (23, 26),
+    }
+
+    def modality_config(self):
+        video_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.video_keys,
+        )
+
+        state_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.state_keys,
+        )
+
+        action_modality = ModalityConfig(
+            delta_indices=self.action_indices,
+            modality_keys=self.action_keys,
+        )
+
+        language_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.language_keys,
+        )
+
+        return {
+            "video": video_modality,
+            "state": state_modality,
+            "action": action_modality,
+            "language": language_modality,
+        }
+
+    def transform(self):
+        transforms = [
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={
+                    "action.x": "q99",
+                    "action.y": "q99",
+                    "action.z": "q99",
+                    "action.roll": "q99",
+                    "action.pitch": "q99",
+                    "action.yaw": "q99",
+                    # action.gripper 暂时不归一化，避免 -1/1 gripper 被错误二值化
+                },
+            ),
+
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={
+                    "state.x": "q99",
+                    "state.y": "q99",
+                    "state.z": "q99",
+                    "state.roll": "q99",
+                    "state.pitch": "q99",
+                    "state.yaw": "q99",
+                    "state.pad": "q99",
+                    "state.gripper": "q99",
+
+                    # rot6d 本身一般在 [-1, 1] 附近，可以不归一化；
+                    # trans 是真实坐标，建议 q99。
+                    "state.target_pose_trans": "q99",
+                    "state.static_cam_trans": "q99",
+                },
+            ),
+        ]
+
+        return ComposedModalityTransform(transforms=transforms)
+
+
+
+
 
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
@@ -1080,5 +1232,6 @@ ROBOT_TYPE_CONFIG_MAP = {
     "vla_arena_franka": VLAArenaFrankaDataConfig(),
 
     "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
+    "calvin_starvla_uam_state_h8": CalvinStarVLAUAMStateH8DataConfig(),
 }
 

@@ -11,6 +11,11 @@ from typing import Dict, List, Tuple
 # Dataset mixture name mapped to a list of tuples containing:
 ## {nakename: [(data_name, sampling_weight, robot_type)] }
 DATASET_NAMED_MIXTURES = {
+    "calvin_abc_scene_mix_starvla_uam_state_h8" : [
+        ("task_ABC_D_scene_A_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_B_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_C_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
+    ],
 
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
