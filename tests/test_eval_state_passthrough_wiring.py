@@ -276,6 +276,58 @@ def test_unnormalize_actions_allows_gripper_threshold_override():
     assert calvin_out[:, 6].tolist() == [1.0, 0.0, 1.0]
 
 
+def test_unnormalize_actions_supports_q99_bounds():
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    stats = {
+        "q01": [-0.5, -0.25, -1.0, -2.0, -4.0, -8.0, -1.0],
+        "q99": [0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 1.0],
+        "min": [-1.0] * 7,
+        "max": [1.0] * 7,
+        "mask": [True] * 6 + [False],
+    }
+    normalized = np.array(
+        [
+            [-1.0, 0.0, 1.0, 0.5, -0.5, 0.25, 0.75],
+        ],
+        dtype=np.float32,
+    )
+
+    out = ModelClient.unnormalize_actions(
+        normalized.copy(),
+        stats,
+        normalization_mode="q99",
+        gripper_binarize_threshold=0.0,
+    )
+
+    np.testing.assert_allclose(
+        out,
+        np.array([[-0.5, 0.25, 1.0, 1.0, -2.0, 2.0, 1.0]], dtype=np.float32),
+    )
+
+
+def test_action_normalization_auto_uses_q99_for_starvla_calvin_mix():
+    from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+
+    stats = {
+        "q01": [-0.5] * 7,
+        "q99": [0.5] * 7,
+        "min": [-1.0] * 7,
+        "max": [1.0] * 7,
+    }
+    model_config = {
+        "datasets": {
+            "vla_data": {
+                "data_mix": "calvin_d_scene_mix_starvla_uam_state_h8",
+            },
+        },
+    }
+
+    mode = ModelClient._resolve_action_normalization_mode("auto", model_config, stats)
+
+    assert mode == "q99"
+
+
 def test_unnormalize_actions_can_interpret_libero_gripper_sign_as_open():
     """LIBERO datasets store gripper as action sign (-1=open, +1=close).
 

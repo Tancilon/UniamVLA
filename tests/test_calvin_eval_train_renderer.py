@@ -185,6 +185,80 @@ def test_calvin_policy_client_normalizes_uamvla_gr00t_robot_state(monkeypatch, t
     np.testing.assert_allclose(sent_state, expected_state)
 
 
+def test_calvin_policy_client_normalizes_uamgr00t_starvla_state_with_q99_indices(monkeypatch, tmp_path):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class UamGR00TModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.unnorm_key = "franka"
+            self.model_config = {
+                "framework": {
+                    "name": "UamGR00T",
+                    "action_model": {"state_dim": 7},
+                },
+                "datasets": {
+                    "vla_data": {
+                        "gr00t_state_indices": [0, 1, 2, 3, 4, 5, 7],
+                    },
+                },
+            }
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", UamGR00TModelClient)
+
+    run_dir = tmp_path / "run"
+    ckpt_path = run_dir / "final_model" / "pytorch_model.pt"
+    ckpt_path.parent.mkdir(parents=True)
+    ckpt_path.write_bytes(b"")
+    with open(run_dir / "dataset_statistics.json", "w") as f:
+        json.dump(
+            {
+                "franka": {
+                    "state": {
+                        "q01": [0.0] * 26,
+                        "q99": [10.0] * 26,
+                    },
+                    "action": {
+                        "q01": [-0.5] * 7,
+                        "q99": [0.5] * 7,
+                        "min": [-1.0] * 7,
+                        "max": [1.0] * 7,
+                        "mask": [True] * 6 + [False],
+                    },
+                }
+            },
+            f,
+        )
+
+    policy = eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        pretrained_path=str(ckpt_path),
+        unnorm_key="franka",
+    )
+
+    robot_obs = np.array(
+        [0.0, 5.0, 10.0, 2.5, 7.5, 10.0, 123.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        dtype=np.float32,
+    )
+    obs = {
+        "rgb_obs": {
+            "rgb_static": np.zeros((200, 200, 3), dtype=np.uint8),
+            "rgb_gripper": np.zeros((84, 84, 3), dtype=np.uint8),
+        },
+        "robot_obs": robot_obs,
+    }
+    policy.step(obs, "push the drawer")
+
+    sent_state = policy.client.last_example["state"]
+    assert sent_state.shape == (1, 7)
+    expected_state = np.array(
+        [[-1.0, 0.0, 1.0, -0.5, 0.5, 1.0, -0.8]],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(sent_state, expected_state)
+
+
 def test_calvin_policy_client_does_not_pass_robot_state_to_other_frameworks(monkeypatch):
     eval_calvin = _load_eval_calvin(monkeypatch)
 

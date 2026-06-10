@@ -97,6 +97,7 @@ class ModelClient:
         adaptive_ensemble_alpha=0.1,
         gripper_binarize_threshold: float = 0.5,
         gripper_interpretation: str = "positive_open",
+        action_normalization_mode: str = "min_max",
         action_query_interval: Optional[int] = None,
         host="0.0.0.0",
         port=10095,
@@ -132,6 +133,11 @@ class ModelClient:
                 "{'positive_open', 'libero_sign'}"
             )
         self.gripper_interpretation = gripper_interpretation
+        self.action_normalization_mode = self._resolve_action_normalization_mode(
+            action_normalization_mode,
+            self.model_config,
+            self.action_norm_stats,
+        )
         self.sticky_action_is_on = False
         self.gripper_action_repeat = 0
         self.sticky_gripper_action = 0.0
@@ -298,6 +304,7 @@ class ModelClient:
             self.raw_actions = self.unnormalize_actions(
                 normalized_actions=normalized_actions,
                 action_norm_stats=self.action_norm_stats,
+                normalization_mode=self.action_normalization_mode,
                 gripper_binarize_threshold=self.gripper_binarize_threshold,
                 gripper_interpretation=self.gripper_interpretation,
             )
@@ -319,11 +326,18 @@ class ModelClient:
     def unnormalize_actions(
         normalized_actions: np.ndarray,
         action_norm_stats: Dict[str, np.ndarray],
+        normalization_mode: str = "min_max",
         gripper_binarize_threshold: float = 0.5,
         gripper_interpretation: str = "positive_open",
     ) -> np.ndarray:
-        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
-        action_high, action_low = np.array(action_norm_stats["max"]), np.array(action_norm_stats["min"])
+        action_high, action_low = ModelClient._get_normalization_bounds(
+            action_norm_stats,
+            normalization_mode=normalization_mode,
+        )
+        mask = np.asarray(
+            action_norm_stats.get("mask", np.ones_like(action_low, dtype=bool)),
+            dtype=bool,
+        )
         normalized_actions = np.clip(normalized_actions, -1, 1)
         if gripper_interpretation == "positive_open":
             normalized_actions[:, 6] = np.where(
@@ -349,6 +363,50 @@ class ModelClient:
         )
 
         return actions
+
+    @staticmethod
+    def _get_normalization_bounds(
+        norm_stats: Dict[str, np.ndarray],
+        normalization_mode: str = "min_max",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if normalization_mode == "q99":
+            if "q01" not in norm_stats or "q99" not in norm_stats:
+                raise KeyError(
+                    "Normalization mode `q99` requires statistics keys `q01` and `q99`."
+                )
+            return np.array(norm_stats["q99"]), np.array(norm_stats["q01"])
+        if normalization_mode == "min_max":
+            if "min" not in norm_stats or "max" not in norm_stats:
+                raise KeyError(
+                    "Normalization mode `min_max` requires statistics keys `min` and `max`."
+                )
+            return np.array(norm_stats["max"]), np.array(norm_stats["min"])
+        raise ValueError(
+            f"Unsupported normalization_mode: {normalization_mode}. "
+            "Expected one of ['min_max', 'q99']."
+        )
+
+    @staticmethod
+    def _resolve_action_normalization_mode(
+        requested_mode: str,
+        model_config: dict,
+        action_norm_stats: Dict[str, np.ndarray],
+    ) -> str:
+        if requested_mode != "auto":
+            # Validate eagerly so a typo fails before the long-running eval loop.
+            ModelClient._get_normalization_bounds(
+                action_norm_stats,
+                normalization_mode=requested_mode,
+            )
+            return requested_mode
+
+        datasets_cfg = (model_config or {}).get("datasets", {})
+        vla_cfg = datasets_cfg.get("vla_data", {}) if isinstance(datasets_cfg, dict) else {}
+        data_mix = str(vla_cfg.get("data_mix", ""))
+        if "starvla_uam_state_h8" in data_mix:
+            ModelClient._get_normalization_bounds(action_norm_stats, normalization_mode="q99")
+            return "q99"
+        return "min_max"
 
     @staticmethod
     def get_action_stats(unnorm_key: str, policy_ckpt_path) -> dict:

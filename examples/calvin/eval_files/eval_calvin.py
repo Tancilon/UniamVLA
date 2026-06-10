@@ -75,6 +75,7 @@ class Args:
     unnorm_key: str = ""
     use_train_renderer: bool = True
     gripper_binarize_threshold: float = 0.0
+    action_normalization_mode: str = "auto"
 
     #################################################################################################################
     # Calvin environment-specific parameters
@@ -109,6 +110,7 @@ class CalvinPolicyClient:
         unnorm_key: str = "",
         train_renderer=None,
         gripper_binarize_threshold: float = 0.0,
+        action_normalization_mode: str = "auto",
     ):
         self.client = ModelClient(
             policy_ckpt_path=pretrained_path,
@@ -117,21 +119,31 @@ class CalvinPolicyClient:
             image_size=[resize_size, resize_size],
             unnorm_key=(unnorm_key or None),
             gripper_binarize_threshold=gripper_binarize_threshold,
+            action_normalization_mode=action_normalization_mode,
             action_query_interval=replan_steps if replan_steps > 0 else None,
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
         self.step_count = 0
         self.train_renderer = train_renderer
+        self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(
+            getattr(self.client, "model_config", None)
+        )
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
-        self._uamvla_gr00t_state_mean = None
-        self._uamvla_gr00t_state_std = None
+        self._uamvla_gr00t_state_norm_mode = None
+        self._uamvla_gr00t_state_stat_a = None
+        self._uamvla_gr00t_state_stat_b = None
         if self.send_uamvla_gr00t_state:
             stats_key = getattr(self.client, "unnorm_key", None) or unnorm_key or None
             (
-                self._uamvla_gr00t_state_mean,
-                self._uamvla_gr00t_state_std,
-            ) = self._load_uamvla_gr00t_state_stats(pretrained_path, stats_key)
+                self._uamvla_gr00t_state_norm_mode,
+                self._uamvla_gr00t_state_stat_a,
+                self._uamvla_gr00t_state_stat_b,
+            ) = self._load_uamvla_gr00t_state_stats(
+                pretrained_path,
+                stats_key,
+                self._uamvla_gr00t_state_indices,
+            )
 
     @staticmethod
     def _nested_config_get(config, *keys):
@@ -150,28 +162,44 @@ class CalvinPolicyClient:
         config = getattr(client, "model_config", None)
         framework_name = cls._nested_config_get(config, "framework", "name")
         state_dim = cls._nested_config_get(config, "framework", "action_model", "state_dim")
+        indices = cls._gr00t_state_indices_from_config(config)
         try:
             state_dim = int(state_dim or 0)
         except (TypeError, ValueError):
             state_dim = 0
-        return framework_name == "UamVLAGR00T" and state_dim >= 7
+        return framework_name in {"UamGR00T", "UamVLAGR00T"} and state_dim >= len(indices)
+
+    @classmethod
+    def _gr00t_state_indices_from_config(cls, config) -> list[int]:
+        indices = cls._nested_config_get(config, "datasets", "vla_data", "gr00t_state_indices")
+        if indices is None:
+            indices = cls._nested_config_get(
+                config,
+                "framework",
+                "action_model",
+                "gr00t_state_indices",
+            )
+        if indices is None:
+            return list(range(7))
+        return [int(i) for i in indices]
 
     @staticmethod
     def _load_uamvla_gr00t_state_stats(
         pretrained_path: str,
         unnorm_key: Optional[str],
-    ) -> Tuple[np.ndarray, np.ndarray]:
+        state_indices: list[int],
+    ) -> Tuple[str, np.ndarray, np.ndarray]:
         checkpoint_path = Path(pretrained_path)
         if len(checkpoint_path.parents) < 2:
             raise FileNotFoundError(
-                "UamVLAGR00T CALVIN eval requires a checkpoint path inside a "
+                "UamGR00T CALVIN eval requires a checkpoint path inside a "
                 f"training run directory, got {pretrained_path!r}."
             )
 
         stats_path = checkpoint_path.parents[1] / "dataset_statistics.json"
         if not stats_path.exists():
             raise FileNotFoundError(
-                "UamVLAGR00T CALVIN eval requires state normalization stats at "
+                "UamGR00T CALVIN eval requires state normalization stats at "
                 f"{stats_path}. Expected dataset_statistics.json from the "
                 "training run directory."
             )
@@ -195,42 +223,84 @@ class CalvinPolicyClient:
             )
 
         state_stats = dataset_stats[stats_key].get("state")
-        if not isinstance(state_stats, dict) or "mean" not in state_stats or "std" not in state_stats:
+        if not isinstance(state_stats, dict):
             raise KeyError(
                 f"{stats_path} entry {stats_key!r} must contain "
-                "state.mean and state.std for UamVLAGR00T CALVIN eval."
+                "state normalization stats for UamGR00T CALVIN eval."
             )
 
-        mean = np.asarray(state_stats["mean"], dtype=np.float32).reshape(-1)
-        std = np.asarray(state_stats["std"], dtype=np.float32).reshape(-1)
-        if mean.shape[0] < 7 or std.shape[0] < 7:
-            raise ValueError(
-                f"Expected at least 7 state mean/std values in {stats_path} "
-                f"for key {stats_key!r}, got mean={mean.shape}, std={std.shape}."
+        if "q01" in state_stats and "q99" in state_stats:
+            mode = "q99"
+            stat_a = np.asarray(state_stats["q01"], dtype=np.float32).reshape(-1)
+            stat_b = np.asarray(state_stats["q99"], dtype=np.float32).reshape(-1)
+        elif "mean" in state_stats and "std" in state_stats:
+            mode = "mean_std"
+            stat_a = np.asarray(state_stats["mean"], dtype=np.float32).reshape(-1)
+            stat_b = np.asarray(state_stats["std"], dtype=np.float32).reshape(-1)
+        else:
+            raise KeyError(
+                f"{stats_path} entry {stats_key!r} must contain either "
+                "state.q01/state.q99 or state.mean/state.std."
             )
-        return mean[:7], std[:7]
+
+        if not state_indices:
+            raise ValueError("gr00t_state_indices must contain at least one index.")
+        max_index = max(state_indices)
+        if stat_a.shape[0] <= max_index or stat_b.shape[0] <= max_index:
+            raise ValueError(
+                f"Expected state stats with at least {max_index + 1} values in "
+                f"{stats_path} for key {stats_key!r}, got "
+                f"stat_a={stat_a.shape}, stat_b={stat_b.shape}."
+            )
+        return mode, stat_a[state_indices], stat_b[state_indices]
 
     @staticmethod
-    def _extract_raw_uamvla_gr00t_state(obs: dict) -> np.ndarray:
+    def _extract_raw_uamvla_gr00t_state(obs: dict, state_indices: list[int]) -> np.ndarray:
         robot_obs = np.asarray(obs["robot_obs"], dtype=np.float32).reshape(-1)
-        if robot_obs.shape[0] < 7:
-            raise ValueError(f"Expected CALVIN robot_obs with at least 7 dims, got {robot_obs.shape}.")
-        return robot_obs[:7].reshape(1, 7)
+        if not state_indices:
+            raise ValueError("gr00t_state_indices must contain at least one index.")
+        max_index = max(state_indices)
+        if robot_obs.shape[0] <= max_index:
+            raise ValueError(
+                f"Expected CALVIN robot_obs with at least {max_index + 1} dims, "
+                f"got {robot_obs.shape}."
+            )
+        return robot_obs[state_indices].reshape(1, len(state_indices))
 
     def _extract_uamvla_gr00t_state(self, obs: dict) -> np.ndarray:
-        state = self._extract_raw_uamvla_gr00t_state(obs).reshape(-1)
-        if self._uamvla_gr00t_state_mean is None or self._uamvla_gr00t_state_std is None:
+        state = self._extract_raw_uamvla_gr00t_state(
+            obs,
+            self._uamvla_gr00t_state_indices,
+        ).reshape(-1)
+        if (
+            self._uamvla_gr00t_state_norm_mode is None
+            or self._uamvla_gr00t_state_stat_a is None
+            or self._uamvla_gr00t_state_stat_b is None
+        ):
             raise RuntimeError(
-                "UamVLAGR00T state normalization stats were not initialized."
+                "UamGR00T state normalization stats were not initialized."
             )
 
-        mean = self._uamvla_gr00t_state_mean
-        std = self._uamvla_gr00t_state_std
         normalized = np.zeros_like(state, dtype=np.float32)
-        mask = std != 0
-        normalized[mask] = (state[mask] - mean[mask]) / std[mask]
-        normalized[~mask] = state[~mask]
-        return normalized.reshape(1, 7)
+        if self._uamvla_gr00t_state_norm_mode == "q99":
+            q01 = self._uamvla_gr00t_state_stat_a
+            q99 = self._uamvla_gr00t_state_stat_b
+            mask = q01 != q99
+            normalized[mask] = 2 * (state[mask] - q01[mask]) / (q99[mask] - q01[mask]) - 1
+            normalized[~mask] = state[~mask]
+            normalized = np.clip(normalized, -1, 1)
+        elif self._uamvla_gr00t_state_norm_mode == "mean_std":
+            mean = self._uamvla_gr00t_state_stat_a
+            std = self._uamvla_gr00t_state_stat_b
+            mask = std != 0
+            normalized[mask] = (state[mask] - mean[mask]) / std[mask]
+            normalized[~mask] = state[~mask]
+        else:
+            raise ValueError(
+                f"Unsupported UamGR00T state normalization mode: "
+                f"{self._uamvla_gr00t_state_norm_mode!r}"
+            )
+        return normalized.reshape(1, len(self._uamvla_gr00t_state_indices))
 
     def reset(self):
         """Reset action plan buffer."""
@@ -592,6 +662,7 @@ def main(args: Args):
         unnorm_key=args.unnorm_key,
         train_renderer=train_renderer,
         gripper_binarize_threshold=args.gripper_binarize_threshold,
+        action_normalization_mode=args.action_normalization_mode,
     )
 
     evaluate_policy_ddp(
