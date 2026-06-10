@@ -16,6 +16,9 @@ DATASET_NAMED_MIXTURES = {
         ("task_ABC_D_scene_B_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
         ("task_ABC_D_scene_C_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
     ],
+    "calvin_d_scene_mix_starvla_uam_state_h8" : [
+        ("task_ABC_D_scene_D_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
+    ],
 
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
