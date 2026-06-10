@@ -15,6 +15,8 @@ Usage:
         --args.num_sequences 1000
 """
 
+from __future__ import annotations
+
 import copy
 import dataclasses
 import json

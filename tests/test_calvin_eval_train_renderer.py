@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 
@@ -61,6 +62,13 @@ def _load_eval_calvin(monkeypatch):
     _install_eval_calvin_import_stubs(monkeypatch)
     sys.modules.pop("examples.calvin.eval_files.eval_calvin", None)
     return importlib.import_module("examples.calvin.eval_files.eval_calvin")
+
+
+def test_eval_calvin_defers_annotations_for_python38_compat():
+    source_path = Path("examples/calvin/eval_files/eval_calvin.py")
+    first_lines = source_path.read_text().splitlines()[:25]
+
+    assert "from __future__ import annotations" in first_lines
 
 
 class _FakeModelClient:
