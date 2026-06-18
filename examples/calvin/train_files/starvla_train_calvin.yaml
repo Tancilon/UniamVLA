@@ -7,9 +7,9 @@ is_debug: false
 version_id: "0.21"
 
 framework:
-  name: QwenPI
+  name: QwenGR00T
   qwenvl:
-    base_vlm: ./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct-Action
+    base_vlm: ckpt/Qwen3-VL-4B-Instruct
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
   dino:
@@ -57,8 +57,8 @@ datasets:
   vla_data:
     dataset_py: lerobot_datasets
     include_state: false
-    data_root_dir: playground/Datasets/calvin
-    data_mix: calvin_task_D_D # libero_goal
+    data_root_dir: datasets
+    data_mix: calvin_d_scene_mix_starvla_uam_state_h8 # libero_goal
     action_type: delta_qpos
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
     per_device_batch_size: 16

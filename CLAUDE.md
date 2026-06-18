@@ -1,3 +1,53 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Architecture Overview
+
+**StarVLA** is a modular Vision-Language-Action (VLA) framework for robotic manipulation. The core package lives in `starVLA/`.
+
+**Key architectural layers** (each independently smoke-testable):
+- `starVLA/model/modules/vlm/` — VLM wrappers (Qwen2.5-VL, Gemma4, etc.)
+- `starVLA/model/modules/action_head/` — Action heads (OFT parallel, PI flow-matching diffusion, FAST autoregressive tokens)
+- `starVLA/model/framework/` — Assembled VLA frameworks combining VLM + action head (e.g., `QwenOFT.py`, `Gemma4PI.py`)
+- `starVLA/dataloader/` — Dataset loaders (LeRobot, LLaVA-JSON, GR00T format); dataloaders return raw dicts, no model-specific preprocessing
+- `starVLA/training/` — Trainers: `train_starvla.py` (SFT), `train_starvla_cotrain.py` (multi-benchmark co-training), `train_starvlm.py` (VLM-only)
+- `starVLA/config/` — YAML configs for training and DeepSpeed (ZeRO-2/3)
+
+**Config system**: single global config object; all fields overridable via CLI (`--trainer.learning_rate 1e-4`). YAML + CLI overrides feed into `omegaconf`/`tyro`.
+
+**Benchmark examples** live in `examples/<benchmark>/` with `train_files/run_*.sh` and `eval_files/run_*.sh` launchers. Supported benchmarks: LIBERO, SimplerEnv, RoboCasa, RoboTwin, DOMINO, BEHAVIOR, Calvin.
+
+## Common Commands
+
+**Install**:
+```bash
+pip install -e .
+```
+
+**Smoke-test a module** (e.g., framework):
+```bash
+CUDA_VISIBLE_DEVICES=0 python starVLA/model/framework/Gemma4PI.py --config_yaml starVLA/config/training/<config>.yaml
+```
+
+**Training** (standard SFT):
+```bash
+mkdir -p logs && set -o pipefail
+WANDB_MODE=offline accelerate launch \
+  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes 8 \
+  starVLA/training/train_starvla.py \
+  --config_yaml ./starVLA/config/training/<config>.yaml \
+  "$@" \
+  2>&1 | tee "logs/train_$(date +%Y%m%d_%H%M%S).log"
+```
+
+**Resume training**: append `--trainer.is_resume true` via `"$@"` passthrough — no script editing needed.
+
+**Docs**: see `docs/starVLA_guideline.md` for the full setup → training → eval walkthrough.
+
+---
+
 # Project Rules for Claude
 
 ## Git Commit Rules

@@ -404,8 +404,8 @@ class ModelClient:
         vla_cfg = datasets_cfg.get("vla_data", {}) if isinstance(datasets_cfg, dict) else {}
         data_mix = str(vla_cfg.get("data_mix", ""))
         if "starvla_uam_state_h8" in data_mix:
-            ModelClient._get_normalization_bounds(action_norm_stats, normalization_mode="q99")
-            return "q99"
+            ModelClient._get_normalization_bounds(action_norm_stats, normalization_mode="min_max")
+            return "min_max"
         return "min_max"
 
     @staticmethod

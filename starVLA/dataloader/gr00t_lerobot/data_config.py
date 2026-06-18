@@ -1177,40 +1177,44 @@ class CalvinStarVLAUAMStateH8DataConfig:
 
     def transform(self):
         transforms = [
+            # action transforms
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
-                apply_to=self.action_keys,
-                normalization_modes={
-                    "action.x": "q99",
-                    "action.y": "q99",
-                    "action.z": "q99",
-                    "action.roll": "q99",
-                    "action.pitch": "q99",
-                    "action.yaw": "q99",
-                    # action.gripper 暂时不归一化，避免 -1/1 gripper 被错误二值化
-                },
-            ),
-
-            StateActionToTensor(apply_to=self.state_keys),
-            StateActionTransform(
-                apply_to=self.state_keys,
-                normalization_modes={
-                    "state.x": "q99",
-                    "state.y": "q99",
-                    "state.z": "q99",
-                    "state.roll": "q99",
-                    "state.pitch": "q99",
-                    "state.yaw": "q99",
-                    "state.pad": "q99",
-                    "state.gripper": "q99",
-
-                    # rot6d 本身一般在 [-1, 1] 附近，可以不归一化；
-                    # trans 是真实坐标，建议 q99。
-                    "state.target_pose_trans": "q99",
-                    "state.static_cam_trans": "q99",
-                },
-            ),
+            apply_to=self.action_keys,
+            normalization_modes={
+                "action.x": "min_max",
+                "action.y": "min_max",
+                "action.z": "min_max",
+                "action.roll": "min_max",
+                "action.pitch": "min_max",
+                "action.yaw": "min_max",
+            },
+        ),
         ]
+        # transforms = [
+        #     # CALVIN actions are already in [-1, 1]; no further normalization needed.
+        #     StateActionToTensor(apply_to=self.action_keys),
+
+        #     StateActionToTensor(apply_to=self.state_keys),
+        #     StateActionTransform(
+        #         apply_to=self.state_keys,
+        #         normalization_modes={
+        #             "state.x": "q99",
+        #             "state.y": "q99",
+        #             "state.z": "q99",
+        #             "state.roll": "q99",
+        #             "state.pitch": "q99",
+        #             "state.yaw": "q99",
+        #             "state.pad": "q99",
+        #             "state.gripper": "q99",
+
+        #             # rot6d 本身一般在 [-1, 1] 附近，可以不归一化；
+        #             # trans 是真实坐标，建议 q99。
+        #             "state.target_pose_trans": "q99",
+        #             "state.static_cam_trans": "q99",
+        #         },
+        #     ),
+        # ]
 
         return ComposedModalityTransform(transforms=transforms)
 

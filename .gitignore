@@ -261,3 +261,5 @@ datasets/
 ckpt/
 
 .sii/
+
+core.*

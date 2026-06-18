@@ -71,13 +71,14 @@ class Args:
     #################################################################################################################
     host: str = "127.0.0.1"
     port: int = 8000
-    resize_size: int = 256
-    replan_steps: int = 0  # 0 means use the model checkpoint's default action horizon
+    resize_size: int = 224
+    replan_steps: int = 5  # 0 means use the model checkpoint's default action horizon
     pretrained_path: str = ""
     unnorm_key: str = ""
-    use_train_renderer: bool = True
+    
+    use_train_renderer: bool = False
     gripper_binarize_threshold: float = 0.0
-    action_normalization_mode: str = "auto"
+    action_normalization_mode: str = "min_max"
 
     #################################################################################################################
     # Calvin environment-specific parameters
@@ -693,34 +694,34 @@ def _parse_bool(value) -> bool:
     raise ValueError(f"Expected a boolean value, got {value!r}")
 
 
-def _parse_args_with_argparse() -> Args:
-    """Small tyro-compatible fallback for older CALVIN envs without tyro."""
-    import argparse
+# def _parse_args_with_argparse() -> Args:
+#     """Small tyro-compatible fallback for older CALVIN envs without tyro."""
+#     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate a policy server on CALVIN.")
-    for field in dataclasses.fields(Args):
-        default = field.default
-        dashed = field.name.replace("_", "-")
-        flags = (f"--args.{dashed}", f"--args.{field.name}")
-        if isinstance(default, bool):
-            group = parser.add_mutually_exclusive_group()
-            group.add_argument(
-                *flags,
-                dest=field.name,
-                nargs="?",
-                const=True,
-                default=default,
-                type=_parse_bool,
-            )
-            group.add_argument(f"--args.no-{dashed}", dest=field.name, action="store_false")
-        else:
-            parser.add_argument(*flags, dest=field.name, default=default, type=type(default))
+#     parser = argparse.ArgumentParser(description="Evaluate a policy server on CALVIN.")
+#     for field in dataclasses.fields(Args):
+#         default = field.default
+#         dashed = field.name.replace("_", "-")
+#         flags = (f"--args.{dashed}", f"--args.{field.name}")
+#         if isinstance(default, bool):
+#             group = parser.add_mutually_exclusive_group()
+#             group.add_argument(
+#                 *flags,
+#                 dest=field.name,
+#                 nargs="?",
+#                 const=True,
+#                 default=default,
+#                 type=_parse_bool,
+#             )
+#             group.add_argument(f"--args.no-{dashed}", dest=field.name, action="store_false")
+#         else:
+#             parser.add_argument(*flags, dest=field.name, default=default, type=type(default))
 
-    return Args(**vars(parser.parse_args()))
+#     return Args(**vars(parser.parse_args()))
 
 
 if __name__ == "__main__":
     if tyro is not None:
         tyro.cli(main)
-    else:
-        main(_parse_args_with_argparse())
+    # else:
+    #     main(_parse_args_with_argparse())
