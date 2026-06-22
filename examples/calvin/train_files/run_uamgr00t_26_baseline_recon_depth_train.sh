@@ -13,7 +13,7 @@ if [[ -n "${GPU_ID:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 fi
 
-CONFIG_YAML="${CONFIG_YAML:-./examples/calvin/train_files/run_uamgr00t_26_baseline_recon_train.yaml}"
+CONFIG_YAML="${CONFIG_YAML:-./examples/calvin/train_files/run_uamgr00t_26_baseline_recon_depth_train.yaml}"
 NUM_GPUS="${NUM_GPUS:-4}"
 # GRAD_ACCUM="${GRAD_ACCUM:-4}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-starVLA/config/deepseeds/deepspeed_zero2.yaml}"
@@ -22,7 +22,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_DIR="${WANDB_DIR:-./wandb}"
 
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-results/Checkpoints}"
-RUN_ID="${RUN_ID:-uamvla_gr00t_starvla26_calvin_d_recon2}"
+RUN_ID="${RUN_ID:-uamvla_gr00t_starvla26_calvin_d_recon_depth}"
 
 mkdir -p "${RUN_ROOT_DIR}/${RUN_ID}"
 cp "$0" "${RUN_ROOT_DIR}/${RUN_ID}/"

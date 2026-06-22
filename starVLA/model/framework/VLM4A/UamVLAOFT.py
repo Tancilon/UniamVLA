@@ -1098,6 +1098,14 @@ class UamVLAOFT(Qwenvl_OFT):
                 name: self._resolve_head_mask(name, batch_dict, hidden.shape[0], hidden.device)
                 for name in aux_heads
             }
+            if global_step == 0:
+                total_samples = hidden.shape[0]
+                for name, mask in masks.items():
+                    valid = int(mask.to(dtype=torch.bool).sum().item())
+                    logger.info(
+                        "[aux-head-coverage step=0] %s: %d/%d samples enter loss (%.1f%%)",
+                        name, valid, total_samples, 100.0 * valid / max(1, total_samples),
+                    )
             aux_loss, aux_metrics = self.aux_suite(
                 action_loss=total,
                 hidden_states=hidden,

@@ -58,7 +58,6 @@ from typing import Literal
 
 import numpy as np
 import tyro
-from PIL import Image as PILImage
 
 # Make project root importable when this script is placed at examples/calvin/.
 # For /repo/examples/calvin/script.py, parents[2] is /repo.
@@ -133,39 +132,6 @@ MERGED_MODALITY_JSON = {
     },
 }
 
-_NUM_POINTS = 1024
-
-
-def _seg_to_grid_mask(seg: np.ndarray, target_id: int, size: int = 20) -> np.ndarray:
-    seg = np.asarray(seg)
-    if seg.ndim == 3:
-        seg = seg[..., -1]
-    mask = (seg == target_id).astype(np.float32)
-    img = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
-    arr = np.asarray(img.resize((size, size), PILImage.BILINEAR), dtype=np.float32) / 255.0
-    return arr[None].astype(np.float32)  # (1, size, size)
-
-
-def _world_to_pixel(pt: np.ndarray, intrinsic: dict, cam_R: np.ndarray, cam_t: np.ndarray) -> np.ndarray:
-    p = np.asarray(cam_R, np.float32).reshape(3, 3).T @ (np.asarray(pt, np.float32).reshape(3) - np.asarray(cam_t, np.float32).reshape(3))
-    nz = -p[2]
-    if nz <= 0:
-        return np.array([np.nan, np.nan])
-    return np.array([float(intrinsic["fx"]) * p[0] / nz + float(intrinsic["cx"]),
-                     float(intrinsic["fy"]) * (-p[1]) / nz + float(intrinsic["cy"])])
-
-
-def _gaussian_heatmap(pixel_xy: np.ndarray, img_w: int, img_h: int, size: int = 20, sigma: float = 1.5) -> np.ndarray:
-    x, y = float(pixel_xy[0]), float(pixel_xy[1])
-    if not (np.isfinite(x) and np.isfinite(y)):
-        return np.zeros((1, size, size), dtype=np.float32)
-    cx = (x + 0.5) * size / max(1, img_w) - 0.5
-    cy = (y + 0.5) * size / max(1, img_h) - 0.5
-    yy, xx = np.mgrid[:size, :size].astype(np.float32)
-    h = np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2))
-    mv = float(h.max())
-    return (h / mv if mv > 0 else h)[None].astype(np.float32)  # (1, size, size)
-
 
 @dataclass(frozen=True)
 class Args:
@@ -199,12 +165,6 @@ class Args:
     render_height: int = 256
 
     write_modality_json: bool = True
-
-    # Sidecar options
-    write_sidecars: bool = True
-    # When True, skip LeRobot dataset creation/modification and only
-    # write sidecar files to an existing dataset directory.
-    sidecar_only: bool = True
 
 
 def _as_1d_float32(x, dim: int, name: str) -> np.ndarray:
@@ -363,16 +323,6 @@ class CalvinEnvStateExtractor:
         self.resolve_target_object = resolve_target_object
         self.env = make_calvin_env_adapter(dataset_path=str(split_dir))
 
-        try:
-            from starVLA.utils.geometry import crop_target_from_seg, depth_to_world_points
-            from starVLA.utils.point_cloud import clean_point_cloud
-            self._crop_target_from_seg = crop_target_from_seg
-            self._depth_to_world_points = depth_to_world_points
-            self._clean_point_cloud = clean_point_cloud
-            self._sidecar_tools_available = True
-        except ImportError:
-            self._sidecar_tools_available = False
-
     def close(self) -> None:
         try:
             self.env.close()
@@ -414,8 +364,7 @@ class CalvinEnvStateExtractor:
         robot_obs: np.ndarray,
         scene_obs: np.ndarray,
         target_object_id: str,
-        compute_sidecars: bool = False,
-    ) -> dict:
+    ) -> dict[str, np.ndarray]:
         robot_obs = _as_1d_float32(robot_obs, 15, "robot_obs")
         scene_obs = np.asarray(scene_obs, dtype=np.float32)
 
@@ -426,119 +375,20 @@ class CalvinEnvStateExtractor:
         )
         obj_pos, obj_R = self.env.get_object_pose(target_object_id)
 
-        result: dict = {
+        return {
             "state.target_pose_rot6d": _mat_to_6d(obj_R),
-            "state.target_pose_trans": _as_1d_float32(obj_pos, 3, "state.target_pose_trans"),
+            "state.target_pose_trans": _as_1d_float32(
+                obj_pos,
+                3,
+                "state.target_pose_trans",
+            ),
             "state.static_cam_rot6d": _mat_to_6d(rendered["static_cam_R"]),
-            "state.static_cam_trans": _as_1d_float32(rendered["static_cam_t"], 3, "state.static_cam_trans"),
+            "state.static_cam_trans": _as_1d_float32(
+                rendered["static_cam_t"],
+                3,
+                "state.static_cam_trans",
+            ),
         }
-
-        if compute_sidecars and self._sidecar_tools_available:
-            result["__sidecars"] = self._compute_frame_sidecars(rendered, robot_obs, target_object_id)
-
-        return result
-
-
-    def _compute_frame_sidecars(
-        self,
-        rendered: dict,
-        robot_obs: np.ndarray,
-        target_object_id: str,
-    ) -> dict:
-        """Compute per-frame sidecar data from rendered output."""
-        rgb = rendered["rgb_static"]           # (H, W, 3) uint8
-        seg = rendered["seg_static"]           # (H, W) int
-        depth = rendered["depth_static"]       # (H, W) float32
-        cam_R = rendered["static_cam_R"]
-        cam_t = rendered["static_cam_t"]
-        intrinsic = rendered.get("static_intrinsic", {})
-        img_h, img_w = np.asarray(rgb).shape[:2]
-
-        target_seg_id = self.env.get_target_seg_id(target_object_id)
-
-        sidecars: dict = {}
-
-        # image_target: 224×224 crop of target object bounding box
-        sidecars["image_target"] = self._crop_target_from_seg(rgb, seg, target_seg_id)  # PIL or None
-
-        # point_cloud: (1024, 3) float32 from depth + segmentation
-        pts = self._depth_to_world_points(
-            depth=depth, seg_mask=seg, intrinsic=intrinsic,
-            cam_R=cam_R, cam_t=cam_t, target_id=target_seg_id, num_points=_NUM_POINTS,
-        )
-        if pts is not None:
-            pc = self._clean_point_cloud(pts).astype(np.float32)
-            if pc.shape == (_NUM_POINTS, 3):
-                sidecars["point_cloud"] = pc
-
-                # affordance_heatmap: gaussian at projected centroid of point cloud
-                tcp = np.asarray(robot_obs[:3], dtype=np.float32)
-                dists = np.linalg.norm(pc - tcp, axis=1)
-                target_pt = pc[np.argmin(dists)]
-                pixel = _world_to_pixel(target_pt, intrinsic, cam_R, cam_t)
-                sidecars["affordance_heatmap"] = _gaussian_heatmap(pixel, img_w, img_h)
-
-        # depth: raw static depth map float32
-        sidecars["depth"] = np.asarray(depth, dtype=np.float32)
-
-        # grounding_mask: (1, 20, 20) binary token grid
-        sidecars["grounding_mask"] = _seg_to_grid_mask(seg, target_seg_id)
-        sidecars["grounding_level"] = "part" if str(target_object_id).startswith("table__") else "object"
-
-        return sidecars
-
-
-def _write_episode_sidecars(
-    sidecar_root: Path,
-    episode_idx: int,
-    frame_sidecars: list[dict],
-) -> None:
-    """Write sidecar files for one episode. Skips files that already exist (append-safe)."""
-    for base_idx, sc in enumerate(frame_sidecars):
-        if not sc:
-            continue
-
-        # image_targets/<ep>/<base>.png
-        img_target = sc.get("image_target")
-        if img_target is not None:
-            p = sidecar_root / "image_targets" / str(episode_idx) / f"{base_idx}.png"
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                img_target.save(p)
-
-        # point_clouds/<ep>/<base>.npy
-        pc = sc.get("point_cloud")
-        if pc is not None:
-            p = sidecar_root / "point_clouds" / str(episode_idx) / f"{base_idx}.npy"
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                np.save(p, pc)
-
-        # depths/static/<ep>/<base>.npy
-        depth = sc.get("depth")
-        if depth is not None:
-            p = sidecar_root / "depths" / "static" / str(episode_idx) / f"{base_idx}.npy"
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                np.save(p, np.asarray(depth, dtype=np.float32))
-
-        # grounding_masks/static/<ep>/<base>.npy + .json
-        gm = sc.get("grounding_mask")
-        if gm is not None:
-            p = sidecar_root / "grounding_masks" / "static" / str(episode_idx) / f"{base_idx}.npy"
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                np.save(p, gm)
-                with open(p.with_suffix(".json"), "w") as f:
-                    json.dump({"grounding_level": sc.get("grounding_level", "object")}, f)
-
-        # affordance_heatmaps/static/<ep>/<base>.npy
-        ah = sc.get("affordance_heatmap")
-        if ah is not None:
-            p = sidecar_root / "affordance_heatmaps" / "static" / str(episode_idx) / f"{base_idx}.npy"
-            if not p.exists():
-                p.parent.mkdir(parents=True, exist_ok=True)
-                np.save(p, ah)
 
 
 def _get_features(state_format: str, extra_state_mode: str) -> dict:
@@ -646,29 +496,22 @@ def main(args: Args) -> None:
     repo_id = args.repo_id or _default_repo_id(input_dir)
     dataset_path = Path(args.output_root) / repo_id
 
-    if args.sidecar_only:
-        if not dataset_path.exists():
-            raise FileNotFoundError(
-                f"--sidecar-only requires an existing dataset at {dataset_path}. "
-                "Run without --sidecar-only first to create it."
+    if dataset_path.exists():
+        if args.overwrite:
+            shutil.rmtree(dataset_path)
+        else:
+            raise FileExistsError(
+                f"Output dataset already exists: {dataset_path}. "
+                "Use --overwrite true to replace it."
             )
-        dataset = None
-    else:
-        if dataset_path.exists():
-            if args.overwrite:
-                shutil.rmtree(dataset_path)
-            else:
-                raise FileExistsError(
-                    f"Output dataset already exists: {dataset_path}. "
-                    "Use --overwrite true to replace it."
-                )
-        dataset = LeRobotDataset.create(
-            repo_id=repo_id,
-            root=dataset_path,
-            robot_type=args.robot_type,
-            fps=args.fps,
-            features=_get_features(args.state_format, args.extra_state_mode),
-        )
+
+    dataset = LeRobotDataset.create(
+        repo_id=repo_id,
+        root=dataset_path,
+        robot_type=args.robot_type,
+        fps=args.fps,
+        features=_get_features(args.state_format, args.extra_state_mode),
+    )
 
     total_saved_episodes = 0
 
@@ -724,7 +567,6 @@ def main(args: Args) -> None:
                         continue
 
                 frames: list[dict] = []
-                frame_sidecars: list[dict] = []
                 drop_episode = False
 
                 for step_id in range(start_idx, end_idx + 1):
@@ -742,21 +584,18 @@ def main(args: Args) -> None:
 
                     if args.extra_state_mode == "lite":
                         frame.update(_zero_extra_state())
-                        frame_sidecars.append({})
 
                     elif args.extra_state_mode == "env":
                         assert extractor is not None
                         assert target_object_id is not None
                         try:
-                            result = extractor.extract(
-                                robot_obs=robot_obs,
-                                scene_obs=step["scene_obs"],
-                                target_object_id=target_object_id,
-                                compute_sidecars=args.write_sidecars,
+                            frame.update(
+                                extractor.extract(
+                                    robot_obs=robot_obs,
+                                    scene_obs=step["scene_obs"],
+                                    target_object_id=target_object_id,
+                                )
                             )
-                            sc = result.pop("__sidecars", {})
-                            frame.update(result)
-                            frame_sidecars.append(sc)
                         except Exception as exc:
                             if args.on_missing_target == "skip":
                                 print(
@@ -766,21 +605,15 @@ def main(args: Args) -> None:
                                 drop_episode = True
                                 break
                             raise
-                    else:
-                        frame_sidecars.append({})
 
                     frames.append(frame)
 
                 if drop_episode:
                     continue
 
-                if not args.sidecar_only:
-                    for frame in frames:
-                        dataset.add_frame(frame, task=instruction)
-                    dataset.save_episode()
-
-                if args.write_sidecars and args.extra_state_mode == "env":
-                    _write_episode_sidecars(dataset_path, total_saved_episodes, frame_sidecars)
+                for frame in frames:
+                    dataset.add_frame(frame, task=instruction)
+                dataset.save_episode()
 
                 total_saved_episodes += 1
                 if (
@@ -799,7 +632,7 @@ def main(args: Args) -> None:
             if extractor is not None:
                 extractor.close()
 
-    if args.write_modality_json and not args.sidecar_only:
+    if args.write_modality_json:
         _write_modality_json(dataset_path, args.extra_state_mode)
 
     print("Conversion finished.")

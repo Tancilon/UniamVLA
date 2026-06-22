@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=int,
-        required=True,
+        default=0,
         help="CUDA device index to use, e.g. 0. This is required to avoid accidental GPU 0 use.",
     )
     parser.add_argument(
