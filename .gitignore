@@ -263,3 +263,5 @@ ckpt/
 .sii/
 
 core.*
+
+uv.lock
