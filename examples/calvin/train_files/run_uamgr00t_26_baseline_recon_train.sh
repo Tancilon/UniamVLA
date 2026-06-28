@@ -22,7 +22,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_DIR="${WANDB_DIR:-./wandb}"
 
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-results/Checkpoints}"
-RUN_ID="${RUN_ID:-uamvla_gr00t_starvla26_calvin_d_recon2}"
+RUN_ID="${RUN_ID:-uamvla_gr00t_starvla26_calvin_d_recon_0627}"
 
 mkdir -p "${RUN_ROOT_DIR}/${RUN_ID}"
 cp "$0" "${RUN_ROOT_DIR}/${RUN_ID}/"

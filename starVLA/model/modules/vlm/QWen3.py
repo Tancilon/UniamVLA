@@ -205,21 +205,21 @@ class _QWen3_VL_Interface(nn.Module):
         messages = []
         assert len(images) == len(instructions), "Images and instructions must have the same length"
         for imgs, instruction in zip(images, instructions):
-            content = []
-            for img in imgs:
-                image_content = {"type": "image", "image": img}
-                if self.fixed_image_pixels is not None:
-                    image_content["min_pixels"] = self.fixed_image_pixels
-                    image_content["max_pixels"] = self.fixed_image_pixels
-                content.append(image_content)
-
             if "CoT_prompt" in self.config.datasets.vla_data:  # If using a grounding prompt to task
                 CoT_prompt = self.config.datasets.vla_data.get("CoT_prompt", "")
                 prompt = CoT_prompt.replace("{instruction}", instruction)
             else:
                 prompt = instruction
 
-            content.append({"type": "text", "text": prompt})
+            # Instruction tokens prepended before image tokens so that image tokens
+            # can attend to instruction via causal attention (ReconVLA §3.2).
+            content = [{"type": "text", "text": prompt}]
+            for img in imgs:
+                image_content = {"type": "image", "image": img}
+                if self.fixed_image_pixels is not None:
+                    image_content["min_pixels"] = self.fixed_image_pixels
+                    image_content["max_pixels"] = self.fixed_image_pixels
+                content.append(image_content)
             msg = [{"role": "user", "content": content}]
 
             if solutions is not None:
