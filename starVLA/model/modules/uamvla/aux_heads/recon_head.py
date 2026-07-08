@@ -46,6 +46,7 @@ class ReconHead(AuxHead):
         image_std: list[float],
         image_token_id: int,
         patches_per_view: int,
+        recon_token_id: int | None = None,
         view_idx: int = 0,
         target_resize: int = 432,
         denoiser_depth: int = 3,
@@ -61,6 +62,9 @@ class ReconHead(AuxHead):
         self.loss_weight = loss_weight
         self.repeat_factor = repeat_factor
         self.image_token_id = image_token_id
+        # Use dedicated recon token when provided (ReconVLA §3.2); fall back
+        # to image token positions for backward compatibility.
+        self._condition_token_id = recon_token_id if recon_token_id is not None else image_token_id
         self.patches_per_view = patches_per_view
         self.view_idx = view_idx
         self.target_resize = target_resize
@@ -93,11 +97,11 @@ class ReconHead(AuxHead):
 
     def _spatial_condition(self, hidden_states: torch.Tensor,
                            input_ids: torch.Tensor) -> torch.Tensor:
-        """Slice image tokens for view_idx, LN on channel dim, reshape to
-        (B, H, h, w). h = w = sqrt(patches_per_view)."""
+        """Slice h_R tokens (recon or image), LN, reshape to (B, C, h, w)."""
         image_h = slice_image_tokens(
             hidden_states, input_ids,
-            self.image_token_id, self.patches_per_view, self.view_idx,
+            self._condition_token_id, self.patches_per_view,
+            0 if self._condition_token_id != self.image_token_id else self.view_idx,
         )                                              # (B, N, H)
         image_h = self.ln_pre(image_h)                 # (B, N, H)
         h = w = int(self.patches_per_view ** 0.5)

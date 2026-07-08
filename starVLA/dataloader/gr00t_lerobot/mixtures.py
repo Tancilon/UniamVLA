@@ -12,9 +12,15 @@ from typing import Dict, List, Tuple
 ## {nakename: [(data_name, sampling_weight, robot_type)] }
 DATASET_NAMED_MIXTURES = {
     "calvin_abc_scene_mix_starvla_uam_state_h8" : [
-        ("task_ABC_D_scene_A_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
-        ("task_ABC_D_scene_B_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
-        ("task_ABC_D_scene_C_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_A_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_B_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_C_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+    ],
+    "calvin_abcd_scene_mix_starvla_uam_state_h8" : [
+        ("task_ABC_D_scene_A_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_B_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_C_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_D_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
     ],
     "calvin_d_scene_mix_starvla_uam_state_h8" : [
         ("task_ABC_D_scene_D_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
