@@ -15,6 +15,7 @@ Usage:
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -59,3 +60,34 @@ def save_depth_npz(out_path, depths, num_frames):
     depths = np.asarray(depths)[:num_frames].astype(np.float16)
     np.savez_compressed(out_path, depths=depths)
     return depths.shape
+
+
+def load_episode_meta(dataset_root):
+    """Read per-episode lengths, chunks_size, and fps from LeRobot meta files."""
+    root = Path(dataset_root)
+    info = json.loads((root / "meta" / "info.json").read_text())
+    lengths = {}
+    with open(root / "meta" / "episodes.jsonl") as f:
+        for line in f:
+            rec = json.loads(line)
+            lengths[rec["episode_index"]] = rec["length"]
+    return lengths, info["chunks_size"], info["fps"]
+
+
+def verify_dataset(dataset_root, camera):
+    """Compare every episode length in meta against its depth npz frame count."""
+    lengths, chunks_size, _ = load_episode_meta(dataset_root)
+    problems = []
+    for ep_idx in sorted(lengths):
+        length = lengths[ep_idx]
+        npz_path = (
+            Path(dataset_root) / "depth" / f"chunk-{ep_idx // chunks_size:03d}"
+            / camera / f"episode_{ep_idx:06d}.npz"
+        )
+        if not npz_path.exists():
+            problems.append(f"missing: {npz_path}")
+            continue
+        n = np.load(npz_path)["depths"].shape[0]
+        if n != length:
+            problems.append(f"frame mismatch: {npz_path} has {n} expected {length}")
+    return problems

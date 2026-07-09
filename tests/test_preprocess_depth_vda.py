@@ -1,6 +1,7 @@
 """Tests for runners/preprocess_depth_vda.py (pure logic; GPU inference excluded)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,9 @@ from runners.preprocess_depth_vda import (
     decode_video_frames,
     depth_output_path,
     list_camera_videos,
+    load_episode_meta,
     save_depth_npz,
+    verify_dataset,
 )
 
 _REAL_AV1_VIDEO = (
@@ -91,3 +94,49 @@ def test_decode_real_av1_dataset_video():
     frames = decode_video_frames(_REAL_AV1_VIDEO)
     assert frames.shape == (65, 200, 200, 3)
     assert frames.dtype == np.uint8
+
+
+def _make_meta(root: Path, lengths: dict[int, int], chunks_size: int = 1000) -> None:
+    meta = root / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(
+        json.dumps({"chunks_size": chunks_size, "fps": 10})
+    )
+    with open(meta / "episodes.jsonl", "w") as f:
+        for ep, length in lengths.items():
+            f.write(json.dumps({"episode_index": ep, "tasks": [], "length": length}) + "\n")
+
+
+def _write_depth_npz(root: Path, ep: int, n_frames: int, chunks_size: int = 1000) -> None:
+    out = (
+        root / "depth" / f"chunk-{ep // chunks_size:03d}" / "image"
+        / f"episode_{ep:06d}.npz"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out, depths=np.zeros((n_frames, 4, 4), dtype=np.float16))
+
+
+def test_load_episode_meta(tmp_path):
+    _make_meta(tmp_path, {0: 65, 1: 34, 1000: 60})
+    lengths, chunks_size, fps = load_episode_meta(tmp_path)
+    assert lengths == {0: 65, 1: 34, 1000: 60}
+    assert chunks_size == 1000
+    assert fps == 10
+
+
+def test_verify_dataset_reports_missing_and_mismatch(tmp_path):
+    _make_meta(tmp_path, {0: 65, 1: 34, 1000: 60})
+    _write_depth_npz(tmp_path, 0, 65)      # ok
+    _write_depth_npz(tmp_path, 1, 30)      # mismatch (expected 34)
+    # episode 1000: missing
+    problems = verify_dataset(tmp_path, "image")
+    assert len(problems) == 2
+    assert any("episode_000001.npz" in p and "mismatch" in p for p in problems)
+    assert any("episode_001000.npz" in p and "missing" in p for p in problems)
+
+
+def test_verify_dataset_all_ok_returns_empty(tmp_path):
+    _make_meta(tmp_path, {0: 65, 1: 34})
+    _write_depth_npz(tmp_path, 0, 65)
+    _write_depth_npz(tmp_path, 1, 34)
+    assert verify_dataset(tmp_path, "image") == []
