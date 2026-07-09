@@ -36,6 +36,21 @@ def depth_output_path(video_path, dataset_root):
     return (Path(dataset_root) / "depth" / rel).with_suffix(".npz")
 
 
+def decode_video_frames(video_path):
+    """Decode ALL frames as (T, H, W, 3) uint8 RGB via pyav (matches the
+    LeRobot training-time decode chain; decord's AV1 support is unreliable)."""
+    import av
+
+    frames = []
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        for frame in container.decode(stream):
+            frames.append(frame.to_ndarray(format="rgb24"))
+    if not frames:
+        raise ValueError(f"no frames decoded from {video_path}")
+    return np.stack(frames, axis=0)
+
+
 def save_depth_npz(out_path, depths, num_frames):
     """Truncate to num_frames (defends against VDA's internal last-frame
     padding), cast to float16, and write compressed npz under key "depths"."""

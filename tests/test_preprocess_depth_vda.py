@@ -7,10 +7,34 @@ import numpy as np
 import pytest
 
 from runners.preprocess_depth_vda import (
+    PROJECT_ROOT,
+    decode_video_frames,
     depth_output_path,
     list_camera_videos,
     save_depth_npz,
 )
+
+_REAL_AV1_VIDEO = (
+    PROJECT_ROOT
+    / "datasets/task_ABC_D_scene_D_lerobot/videos/chunk-000/image/episode_000000.mp4"
+)
+
+
+def _write_synthetic_video(path: Path, n_frames: int = 7, size: int = 64) -> None:
+    import av
+
+    with av.open(str(path), mode="w") as container:
+        stream = container.add_stream("mpeg4", rate=10)
+        stream.width = size
+        stream.height = size
+        stream.pix_fmt = "yuv420p"
+        for i in range(n_frames):
+            img = np.full((size, size, 3), i * 30, dtype=np.uint8)
+            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
 
 
 def _make_video_tree(root: Path) -> None:
@@ -51,3 +75,19 @@ def test_save_depth_npz_truncates_and_casts_float16(tmp_path):
     np.testing.assert_allclose(
         loaded.astype(np.float32), depths[:65], atol=1e-3
     )
+
+
+def test_decode_video_frames_returns_all_frames(tmp_path):
+    video = tmp_path / "ep.mp4"
+    _write_synthetic_video(video, n_frames=7, size=64)
+    frames = decode_video_frames(video)
+    assert frames.shape == (7, 64, 64, 3)
+    assert frames.dtype == np.uint8
+
+
+@pytest.mark.skipif(not _REAL_AV1_VIDEO.exists(), reason="dataset not present")
+def test_decode_real_av1_dataset_video():
+    """Validates the spec's AV1-decode risk on this machine (no GPU needed)."""
+    frames = decode_video_frames(_REAL_AV1_VIDEO)
+    assert frames.shape == (65, 200, 200, 3)
+    assert frames.dtype == np.uint8
