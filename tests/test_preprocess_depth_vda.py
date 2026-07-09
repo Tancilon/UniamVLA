@@ -13,9 +13,11 @@ from runners.preprocess_depth_vda import (
     depth_output_path,
     list_camera_videos,
     load_episode_meta,
+    parse_args,
     process_videos,
     save_depth_npz,
     verify_dataset,
+    write_meta_json,
 )
 
 _REAL_AV1_VIDEO = (
@@ -208,3 +210,32 @@ def test_process_videos_records_failure_and_continues(tmp_path):
     assert "episode_000001.mp4" in failures_txt
     # no partial npz left behind
     assert not list((tmp_path / "depth").rglob("*.npz"))
+
+
+def test_parse_args_defaults():
+    args = parse_args(["--dataset_root", "datasets/task_ABC_D_scene_D_lerobot"])
+    assert args.dataset_root == "datasets/task_ABC_D_scene_D_lerobot"
+    assert args.camera == "image"
+    assert args.encoder == "vitl"
+    assert args.input_size == 518
+    assert args.checkpoint is None  # resolved from encoder at runtime
+    assert args.overwrite is False
+    assert args.verify_only is False
+    assert args.limit == -1
+    assert args.vis_first_n == 0
+
+
+def test_write_meta_json_records_semantics(tmp_path):
+    path = write_meta_json(
+        tmp_path,
+        camera="image",
+        encoder="vitl",
+        checkpoint="checkpoints/video_depth_anything_vitl.pth",
+        input_size=518,
+    )
+    meta = json.loads(path.read_text())
+    assert meta["npz_key"] == "depths"
+    assert meta["dtype"] == "float16"
+    assert "inverse depth" in meta["semantics"]
+    assert meta["encoder"] == "vitl"
+    assert meta["input_size"] == 518

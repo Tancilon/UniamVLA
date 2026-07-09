@@ -15,8 +15,10 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -74,8 +76,72 @@ def load_episode_meta(dataset_root):
     return lengths, info["chunks_size"], info["fps"]
 
 
-def save_depth_vis(depths, out_path, fps):  # implemented in Task 6
-    raise NotImplementedError
+MODEL_CONFIGS = {
+    "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
+    "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
+    "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+}
+
+
+def _ensure_vda_on_path():
+    if str(VDA_ROOT) not in sys.path:
+        sys.path.insert(0, str(VDA_ROOT))
+
+
+def load_model(encoder, checkpoint, device):
+    """Load the relative-depth VDA model; return an infer_fn closure."""
+    import torch
+
+    _ensure_vda_on_path()
+    from video_depth_anything.video_depth import VideoDepthAnything
+
+    model = VideoDepthAnything(**MODEL_CONFIGS[encoder], metric=False)
+    model.load_state_dict(
+        torch.load(str(checkpoint), map_location="cpu"), strict=True
+    )
+    model = model.to(device).eval()
+
+    def infer_fn(frames, fps, input_size):
+        depths, _ = model.infer_video_depth(
+            frames, fps, input_size=input_size, device=device, fp32=False
+        )
+        return np.asarray(depths)
+
+    return infer_fn
+
+
+def save_depth_vis(depths, out_path, fps):
+    """Colormapped mp4 for eyeballing (smoke test only, not a training input)."""
+    _ensure_vda_on_path()
+    from utils.dc_utils import save_video
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    save_video(np.asarray(depths, dtype=np.float32), str(out_path), fps=fps, is_depths=True)
+
+
+def write_meta_json(dataset_root, *, camera, encoder, checkpoint, input_size):
+    depth_root = Path(dataset_root) / "depth"
+    depth_root.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "producer": "runners/preprocess_depth_vda.py",
+        "model": "Video-Depth-Anything (relative)",
+        "encoder": encoder,
+        "checkpoint": str(checkpoint),
+        "input_size": input_size,
+        "precision": "fp16 (torch.autocast)",
+        "semantics": (
+            "relative inverse depth (disparity), raw model output, unnormalized. "
+            "NOTE: already inverse — downstream target prep must NOT apply 1/d again."
+        ),
+        "dtype": "float16",
+        "npz_key": "depths",
+        "camera": camera,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path = depth_root / "meta.json"
+    path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    return path
 
 
 def process_videos(videos, infer_fn, dataset_root, *, fps, input_size=518,
@@ -140,3 +206,62 @@ def verify_dataset(dataset_root, camera):
         if n != length:
             problems.append(f"frame mismatch: {npz_path} has {n} expected {length}")
     return problems
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Batch VDA relative-depth inference over LeRobot camera videos."
+    )
+    parser.add_argument("--dataset_root", type=str, required=True)
+    parser.add_argument("--camera", type=str, default="image")
+    parser.add_argument("--encoder", type=str, default="vitl",
+                        choices=["vits", "vitb", "vitl"])
+    parser.add_argument("--input_size", type=int, default=518)
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="defaults to VDA checkpoints/video_depth_anything_{encoder}.pth")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="re-run episodes whose npz already exists")
+    parser.add_argument("--verify_only", action="store_true",
+                        help="only check npz frame counts against meta/episodes.jsonl")
+    parser.add_argument("--limit", type=int, default=-1,
+                        help="process only the first N videos (smoke test aid)")
+    parser.add_argument("--vis_first_n", type=int, default=0,
+                        help="save colormapped mp4 for the first N processed videos")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    if args.verify_only:
+        problems = verify_dataset(args.dataset_root, args.camera)
+        for p in problems:
+            print(p)
+        print(f"verify: {len(problems)} problem(s)")
+        return 1 if problems else 0
+
+    videos = list_camera_videos(args.dataset_root, args.camera)
+    if not videos:
+        print(f"no videos found under {args.dataset_root}/videos/*/{args.camera}")
+        return 1
+    _, _, fps = load_episode_meta(args.dataset_root)
+    checkpoint = args.checkpoint or (
+        VDA_ROOT / "checkpoints" / f"video_depth_anything_{args.encoder}.pth"
+    )
+    print(f"{len(videos)} videos | encoder={args.encoder} | fps={fps} | ckpt={checkpoint}")
+    infer_fn = load_model(args.encoder, checkpoint, device="cuda")
+    write_meta_json(
+        args.dataset_root, camera=args.camera, encoder=args.encoder,
+        checkpoint=checkpoint, input_size=args.input_size,
+    )
+    n_ok, n_skip, failures = process_videos(
+        videos, infer_fn, args.dataset_root, fps=fps,
+        input_size=args.input_size, overwrite=args.overwrite,
+        limit=args.limit, vis_first_n=args.vis_first_n,
+    )
+    print(f"done: ok={n_ok} skipped={n_skip} failed={len(failures)}")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
