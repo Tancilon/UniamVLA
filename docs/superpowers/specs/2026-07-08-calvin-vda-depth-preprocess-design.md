@@ -65,7 +65,6 @@
 --encoder        vitl         # vits 仅作快速调试
 --input_size     518
 --checkpoint     third_party/Video-Depth-Anything/checkpoints/video_depth_anything_vitl.pth
---shard_id 0 --num_shards 1   # 多卡分片：按 episode 排序后 idx % num_shards
 --overwrite                   # 默认关：跳过已存在 npz → 断点续跑
 --verify_only                 # 只做全量对齐校验，不推理
 ```
@@ -86,24 +85,18 @@
 depth/
   chunk-{XXX}/image/episode_{XXXXXX}.npz   # key "depths": float16, (T, 200, 200)
   meta.json                                # 生产者元数据
-  failures_{shard_id}.txt                  # 失败清单（如有）
+  failures.txt                             # 失败清单（如有）
 ```
 
 `meta.json` 字段：模型名与权重文件、encoder、input_size、精度、
 **语义 = relative inverse depth（disparity，未归一化模型原始输出）**、
 dtype、生成日期、生产脚本路径。
 
-### ⚠️ 语义警告（接线时必读）
-
-VDA relative 模式输出**已经是逆深度**。现有
-`DepthHead.relative_inverse_depth_per_frame` 假设输入是深度并自行取 `1/d`。
-后续 dataloader/target 接线时必须据 `meta.json` 标记**跳过取逆**，
-否则监督目标被倒两次，方向完全错误。
 
 ## 5. 校验与错误处理
 
 - **逐视频**：推理后 assert 深度帧数 == 解码 RGB 帧数，不匹配记为失败。
-- **失败不中断**：单视频异常写入 `depth/failures_{shard_id}.txt` 并继续，
+- **失败不中断**：单视频异常写入 `depth/failures.txt` 并继续，
   结束打印汇总。
 - **全量校验**（`--verify_only`）：读 `meta/episodes.jsonl` 每 episode 的
   `length`，与对应 npz 的帧数逐一比对，报告缺失/不匹配清单。
@@ -114,8 +107,8 @@ VDA relative 模式输出**已经是逆深度**。现有
    帧数与 `episodes.jsonl` 一致；② npz 内容、数值范围、单文件体量符合预期；
    ③ 对 1 个 episode 额外存可视化 mp4（复用 VDA `save_video(is_depths=True)`）
    人工目检。
-2. **全量运行**：按当时 `nvidia-smi` 空闲卡数决定 `--num_shards`，每卡一个
-   分片进程，`CUDA_VISIBLE_DEVICES=N` 显式绑卡（遵守 CLAUDE.md GPU 规则）。
+2. **全量运行**：单卡单进程，跑前 `nvidia-smi` 确认空闲卡，
+   `CUDA_VISIBLE_DEVICES=N` 显式绑卡（遵守 CLAUDE.md GPU 规则）。
 3. 日志由运行命令 `tee` 到 `logs/`。
 4. 预估：约 24GB 产物（压缩前），vitl fp16 单卡数小时；磁盘余量 19T，无压力。
 
