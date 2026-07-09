@@ -47,9 +47,12 @@
 
 ### 位置与文件
 
-- `examples/calvin/preprocess_files/preprocess_depth_vda.py` —— 批量推理主脚本
-- `examples/calvin/preprocess_files/run_preprocess_depth.sh` —— 薄启动器，
+- `runners/preprocess_depth_vda.py` —— 批量推理主脚本
+- `runners/run_preprocess_depth.sh` —— 薄启动器，
   遵守仓库约定：内部不写 tee 落盘，末尾 `"$@"` 透传
+
+（`runners/` 为仓库既有的数据预处理脚本目录，已存放
+`preprocess_calvin.py`、`convert_calvin_dir_to_lerobot_*.py` 等同类脚本。）
 
 通过 `sys.path` 引入 `third_party/Video-Depth-Anything`，**不改动 third_party
 任何文件**。
