@@ -34,3 +34,13 @@ def depth_output_path(video_path, dataset_root):
     """Map videos/chunk-X/{cam}/episode_Y.mp4 -> depth/chunk-X/{cam}/episode_Y.npz."""
     rel = Path(video_path).relative_to(Path(dataset_root) / "videos")
     return (Path(dataset_root) / "depth" / rel).with_suffix(".npz")
+
+
+def save_depth_npz(out_path, depths, num_frames):
+    """Truncate to num_frames (defends against VDA's internal last-frame
+    padding), cast to float16, and write compressed npz under key "depths"."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    depths = np.asarray(depths)[:num_frames].astype(np.float16)
+    np.savez_compressed(out_path, depths=depths)
+    return depths.shape

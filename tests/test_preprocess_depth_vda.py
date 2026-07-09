@@ -9,6 +9,7 @@ import pytest
 from runners.preprocess_depth_vda import (
     depth_output_path,
     list_camera_videos,
+    save_depth_npz,
 )
 
 
@@ -37,3 +38,16 @@ def test_depth_output_path_mirrors_videos_layout(tmp_path):
     video = tmp_path / "videos" / "chunk-002" / "image" / "episode_002345.mp4"
     out = depth_output_path(video, tmp_path)
     assert out == tmp_path / "depth" / "chunk-002" / "image" / "episode_002345.npz"
+
+
+def test_save_depth_npz_truncates_and_casts_float16(tmp_path):
+    out = tmp_path / "depth" / "chunk-000" / "image" / "episode_000000.npz"
+    depths = np.random.default_rng(0).random((70, 200, 200)).astype(np.float32)
+    shape = save_depth_npz(out, depths, num_frames=65)
+    assert shape == (65, 200, 200)
+    loaded = np.load(out)["depths"]
+    assert loaded.shape == (65, 200, 200)
+    assert loaded.dtype == np.float16
+    np.testing.assert_allclose(
+        loaded.astype(np.float32), depths[:65], atol=1e-3
+    )
