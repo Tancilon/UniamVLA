@@ -13,6 +13,7 @@ from runners.preprocess_depth_vda import (
     depth_output_path,
     list_camera_videos,
     load_episode_meta,
+    process_videos,
     save_depth_npz,
     verify_dataset,
 )
@@ -140,3 +141,70 @@ def test_verify_dataset_all_ok_returns_empty(tmp_path):
     _write_depth_npz(tmp_path, 0, 65)
     _write_depth_npz(tmp_path, 1, 34)
     assert verify_dataset(tmp_path, "image") == []
+
+
+def _make_decodable_dataset(root: Path, n_eps: int = 3, n_frames: int = 7):
+    """videos/ tree whose mp4s are real decodable synthetic videos."""
+    d = root / "videos" / "chunk-000" / "image"
+    d.mkdir(parents=True)
+    videos = []
+    for ep in range(n_eps):
+        p = d / f"episode_{ep:06d}.mp4"
+        _write_synthetic_video(p, n_frames=n_frames, size=64)
+        videos.append(p)
+    return videos
+
+
+def _fake_infer(frames, fps, input_size):
+    # VDA pads short clips internally; emulate returning MORE frames than input.
+    t, h, w = frames.shape[0], frames.shape[1], frames.shape[2]
+    return np.linspace(0, 1, (t + 5) * h * w, dtype=np.float32).reshape(t + 5, h, w)
+
+
+def _broken_infer(frames, fps, input_size):
+    return np.zeros((frames.shape[0] - 2, frames.shape[1], frames.shape[2]), np.float32)
+
+
+def test_process_videos_writes_truncated_npz(tmp_path):
+    videos = _make_decodable_dataset(tmp_path, n_eps=2, n_frames=7)
+    n_ok, n_skip, failures = process_videos(
+        videos, _fake_infer, tmp_path, fps=10
+    )
+    assert (n_ok, n_skip, failures) == (2, 0, [])
+    for ep in range(2):
+        loaded = np.load(
+            tmp_path / "depth" / "chunk-000" / "image" / f"episode_{ep:06d}.npz"
+        )["depths"]
+        assert loaded.shape == (7, 64, 64)  # truncated from fake's 12
+        assert loaded.dtype == np.float16
+
+
+def test_process_videos_skips_existing_unless_overwrite(tmp_path):
+    videos = _make_decodable_dataset(tmp_path, n_eps=2, n_frames=7)
+    process_videos(videos, _fake_infer, tmp_path, fps=10)
+    n_ok, n_skip, _ = process_videos(videos, _fake_infer, tmp_path, fps=10)
+    assert (n_ok, n_skip) == (0, 2)
+    n_ok, n_skip, _ = process_videos(
+        videos, _fake_infer, tmp_path, fps=10, overwrite=True
+    )
+    assert (n_ok, n_skip) == (2, 0)
+
+
+def test_process_videos_limit(tmp_path):
+    videos = _make_decodable_dataset(tmp_path, n_eps=3, n_frames=7)
+    n_ok, n_skip, _ = process_videos(videos, _fake_infer, tmp_path, fps=10, limit=1)
+    assert (n_ok, n_skip) == (1, 0)
+
+
+def test_process_videos_records_failure_and_continues(tmp_path):
+    videos = _make_decodable_dataset(tmp_path, n_eps=2, n_frames=7)
+    n_ok, n_skip, failures = process_videos(
+        videos, _broken_infer, tmp_path, fps=10
+    )
+    assert n_ok == 0
+    assert len(failures) == 2
+    failures_txt = (tmp_path / "depth" / "failures.txt").read_text()
+    assert "episode_000000.mp4" in failures_txt
+    assert "episode_000001.mp4" in failures_txt
+    # no partial npz left behind
+    assert not list((tmp_path / "depth").rglob("*.npz"))

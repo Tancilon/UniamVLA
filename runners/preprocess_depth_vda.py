@@ -74,6 +74,55 @@ def load_episode_meta(dataset_root):
     return lengths, info["chunks_size"], info["fps"]
 
 
+def save_depth_vis(depths, out_path, fps):  # implemented in Task 6
+    raise NotImplementedError
+
+
+def process_videos(videos, infer_fn, dataset_root, *, fps, input_size=518,
+                   overwrite=False, limit=-1, vis_first_n=0):
+    """Run infer_fn over each video; write truncated float16 npz per episode.
+
+    Returns (n_ok, n_skip, failures). Failures are appended to
+    depth/failures.txt and never abort the loop. Alignment contract: the
+    depth stack must cover every RGB frame (>= T after decode, saved as [:T]).
+    """
+    from tqdm import tqdm
+
+    depth_root = Path(dataset_root) / "depth"
+    failures_path = depth_root / "failures.txt"
+    if limit > 0:
+        videos = videos[:limit]
+    n_ok = n_skip = 0
+    failures = []
+    for i, video_path in enumerate(tqdm(videos, desc="depth inference")):
+        out_path = depth_output_path(video_path, dataset_root)
+        if out_path.exists() and not overwrite:
+            n_skip += 1
+            continue
+        try:
+            frames = decode_video_frames(video_path)
+            depths = np.asarray(infer_fn(frames, fps, input_size))
+            if depths.shape[0] < frames.shape[0]:
+                raise ValueError(
+                    f"depth frames {depths.shape[0]} < rgb frames {frames.shape[0]}"
+                )
+            save_depth_npz(out_path, depths, frames.shape[0])
+            if n_ok < vis_first_n:
+                save_depth_vis(
+                    depths[: frames.shape[0]],
+                    depth_root / "vis" / f"{Path(video_path).stem}_vis.mp4",
+                    fps,
+                )
+            n_ok += 1
+        except Exception as exc:  # noqa: BLE001 - per-video isolation by design
+            msg = f"{video_path}: {exc!r}"
+            failures.append(msg)
+            depth_root.mkdir(parents=True, exist_ok=True)
+            with open(failures_path, "a") as f:
+                f.write(msg + "\n")
+    return n_ok, n_skip, failures
+
+
 def verify_dataset(dataset_root, camera):
     """Compare every episode length in meta against its depth npz frame count."""
     lengths, chunks_size, _ = load_episode_meta(dataset_root)
