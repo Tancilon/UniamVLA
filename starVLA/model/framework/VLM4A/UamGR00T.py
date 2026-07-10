@@ -197,6 +197,23 @@ class UamVLAGR00T(UamVLAOFT):
                 f"got {counts.tolist()}. Check _force_resize_640 + Qwen3VLProcessor."
             )
 
+    def _encoder_attention_mask(self, qwen_inputs: dict) -> torch.Tensor | None:
+        """Bool KV mask for the action DiT's cross-attention over ``vl_embs``.
+
+        The Qwen tokenizer right-pads, and the DiT cross-attends to the whole
+        sequence, so without this mask it reads padding hidden states as valid
+        context.  ``attn1`` forwards the mask to ``scaled_dot_product_attention``
+        unchanged: the raw int64 0/1 mask raises, only bool (or additive -inf)
+        is honoured.
+
+        Off by default: enabling it shifts every UamGR00T-family baseline, so a
+        run with it on must not be compared against numbers produced without it.
+        """
+        if not bool(self.config.framework.action_model.get("use_encoder_mask", False)):
+            return None
+        mask = qwen_inputs.get("attention_mask")
+        return None if mask is None else mask.bool()
+
     def _encode_qwen_hidden(self, examples: List[dict]):
         """Build Qwen inputs without action-token prompt and return last hidden."""
         batch_images = [self._force_resize_640(example["image"]) for example in examples]
@@ -250,7 +267,13 @@ class UamVLAGR00T(UamVLAOFT):
             state = self._state_batch_or_none(examples, hidden.device, hidden.dtype)
             state_repeated = state.repeat(repeated_steps, 1, 1) if state is not None else None
 
-            total = self.action_model(hidden_repeated, actions_repeated, state_repeated)
+            encoder_mask = self._encoder_attention_mask(qwen_inputs)
+            total = self.action_model(
+                hidden_repeated, actions_repeated, state_repeated,
+                encoder_attention_mask=(
+                    encoder_mask.repeat(repeated_steps, 1) if encoder_mask is not None else None
+                ),
+            )
 
         log_metrics = {"action_loss_fm": total.detach()}
 
@@ -297,11 +320,14 @@ class UamVLAGR00T(UamVLAOFT):
             examples = [examples]
 
         examples = self._prepare_examples(examples)
-        examples, _qwen_inputs, hidden = self._encode_qwen_hidden(examples)
+        examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
         state = self._state_batch_or_none(examples, hidden.device, hidden.dtype)
 
         with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(hidden, state)
+            pred_actions = self.action_model.predict_action(
+                hidden, state,
+                encoder_attention_mask=self._encoder_attention_mask(qwen_inputs),
+            )
 
         return {"normalized_actions": pred_actions.detach().cpu().numpy()}
 
