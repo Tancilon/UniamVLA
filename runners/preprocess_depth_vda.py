@@ -7,8 +7,6 @@ Writes per-episode compressed npz depth files mirroring the videos/ layout:
 Output semantics: relative inverse depth (disparity), raw model output,
 unnormalized, float16. Producer metadata is written to depth/meta.json.
 
-Spec: docs/superpowers/specs/2026-07-08-calvin-vda-depth-preprocess-design.md
-
 Usage:
     CUDA_VISIBLE_DEVICES=0 python runners/preprocess_depth_vda.py \\
         --dataset_root datasets/task_ABC_D_scene_D_lerobot
@@ -132,7 +130,6 @@ def write_meta_json(dataset_root, *, camera, encoder, checkpoint, input_size):
         "precision": "fp16 (torch.autocast)",
         "semantics": (
             "relative inverse depth (disparity), raw model output, unnormalized. "
-            "NOTE: already inverse — downstream target prep must NOT apply 1/d again."
         ),
         "dtype": "float16",
         "npz_key": "depths",
@@ -224,7 +221,7 @@ def parse_args(argv=None):
     parser.add_argument("--verify_only", action="store_true",
                         help="only check npz frame counts against meta/episodes.jsonl")
     parser.add_argument("--limit", type=int, default=-1,
-                        help="process only the first N videos (smoke test aid)")
+                        help="process only the first N videos (smoke test)")
     parser.add_argument("--vis_first_n", type=int, default=0,
                         help="save colormapped mp4 for the first N processed videos")
     return parser.parse_args(argv)
