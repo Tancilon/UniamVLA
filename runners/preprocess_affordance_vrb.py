@@ -298,7 +298,7 @@ def process_episode(frames, models, *, prompt, box_threshold, text_threshold,
         processor, gdino, sub_frames, prompt,
         box_threshold=box_threshold, text_threshold=text_threshold,
         batch_size=gdino_batch, max_boxes=max_boxes, device=device,
-    )
+    ) # (K, 4), 4 -> xyxy
 
     sub_heatmaps = np.zeros((len(sub_frames), img_h, img_w), dtype=np.float32)
     n_detected = 0

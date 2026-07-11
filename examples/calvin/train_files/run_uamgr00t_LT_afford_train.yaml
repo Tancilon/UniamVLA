@@ -1,4 +1,4 @@
-run_id: uamvla_gr00t_lt
+run_id: uamvla_gr00t_lt_afford
 run_root_dir: playground/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
@@ -61,7 +61,7 @@ framework:
     # separate layout switch.  Block order: depth first, affordance second.
     # Baseline = framework.name: UamGR00T.
     depth_latent:
-      enabled: true
+      enabled: false
       loss_weight: 1.0
       head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
       probe_enabled: true        # detached linear probe -> depth pixels, reports only
@@ -69,7 +69,7 @@ framework:
       camera: image              # depth_latent/<camera>/ subdir
       visualize: false           # builds the frozen VAE; unsafe under ZeRO-3
     affordance_px:
-      enabled: false             # requires runners/preprocess_affordance_{vrb,px}.py
+      enabled: true              # requires runners/preprocess_affordance_{vrb,px}.py
       loss_weight: 1.0
       head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
       camera: image              # affordance_px/<camera>/ subdir

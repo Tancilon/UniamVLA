@@ -569,6 +569,16 @@ class UamVLAOFT(Qwenvl_OFT):
                 if px is not None:
                     out["depth_px"] = px
 
+        # UamGR00T_LT: downsampled VRB affordance heatmap (per-token regression
+        # target).  No-op unless aux_heads.affordance_px is on.
+        afford_camera = self._affordance_px_camera()
+        if afford_camera is not None:
+            afford = self._load_depth_latent_frame(
+                "affordance_px", traj, base, sidecar_root=sidecar_root, camera=afford_camera,
+            )
+            if afford is not None:
+                out["affordance_px"] = afford
+
         grounding = self._load_grounding_mask(traj, base, sidecar_root=sidecar_root)
         if grounding is not None:
             out["grounding_mask"] = grounding["mask"]
@@ -677,6 +687,21 @@ class UamVLAOFT(Qwenvl_OFT):
             cfg = heads.get("depth_latent", {}) if heads is not None else {}
             camera = str(cfg.get("camera", "image")) if cfg.get("enabled", False) else None
             self._depth_latent_camera_cached = camera
+        return camera
+
+    def _affordance_px_camera(self) -> str | None:
+        """Camera name when the affordance_px head is on; None disables the loader.
+
+        Same structure as ``_depth_latent_camera``; the artifacts share the
+        chunk/camera/episode layout and the mmap loader below.
+        """
+        camera = getattr(self, "_affordance_px_camera_cached", "__unset__")
+        if camera == "__unset__":
+            framework = getattr(getattr(self, "config", None), "framework", None)
+            heads = getattr(framework, "aux_heads", None)
+            cfg = heads.get("affordance_px", {}) if heads is not None else {}
+            camera = str(cfg.get("camera", "image")) if cfg.get("enabled", False) else None
+            self._affordance_px_camera_cached = camera
         return camera
 
     def _depth_sidecar_path(
@@ -1230,6 +1255,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 "depth_target",
                 "depth_latent",
                 "depth_px",
+                "affordance_px",
                 "grounding_mask",
                 "affordance_heatmap",
                 "image_action_future",
