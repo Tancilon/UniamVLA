@@ -1,15 +1,20 @@
-"""UamGR00T_LT: latent-token depth / affordance supervision, no diffusion denoiser.
+"""UamGR00T_LT: latent-token depth / affordance / future supervision, no diffusion denoiser.
 
-Sequence layout (qwen_image_size=224, 49 tokens per block, both branches on):
+Sequence layout (qwen_image_size=224, 49 tokens per block, all branches on):
 
-    [instruction] -> [primary x49] -> [wrist x49] -> [primary x49] -> [primary x49]
-                                                      ^ depth block    ^ affordance block
+    [instruction] -> [primary x49] -> [wrist x49] -> [primary x49] -> [primary x49] -> [primary x49]
+                                                      ^ depth block    ^ affordance     ^ future (foresight)
 
 The extra blocks are the primary image passed again.  That is not a trick to
 save code -- it is the only way those tokens get a real 2D M-RoPE grid.
-Block order is a contract: depth first, affordance second, matching the
-view_idx arithmetic in ``_maybe_build_aux_heads``.  Each branch is gated by
-its own ``aux_heads.<name>.enabled`` and can run alone.
+Block order is a contract: depth first, affordance second, future third,
+matching the view_idx arithmetic in ``_maybe_build_aux_heads``.  Each branch
+is gated by its own ``aux_heads.<name>.enabled`` and can run alone.
+
+The future block is Seer-style foresight: its tokens regress the frozen-VAE
+latent of the frame ``future_offset`` steps ahead (see FutureLatentHead), and
+the GR00T action head cross-attends them like every other block -- action
+conditioned on a predicted future, without Seer's history window or decoder.
 """
 from __future__ import annotations
 
@@ -21,13 +26,15 @@ import torch
 
 from starVLA.model.framework.VLM4A.UamGR00T import UamVLAGR00T
 from starVLA.model.modules.uamvla.aux_heads.affordance_token_head import AffordanceTokenHead
+from starVLA.model.modules.uamvla.aux_heads.future_latent_head import FutureLatentHead
 from starVLA.model.modules.uamvla.aux_heads.latent_depth_head import LatentDepthHead
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 
 logger = logging.getLogger(__name__)
 
-# Consumed by _maybe_build_aux_heads; everything else is forwarded to the head.
-_NON_HEAD_KEYS = frozenset({"enabled", "lr", "camera", "visualize", "latent_root", "px_root"})
+# Consumed by _maybe_build_aux_heads (future_offset by the dataloader);
+# everything else is forwarded to the head.
+_NON_HEAD_KEYS = frozenset({"enabled", "lr", "camera", "visualize", "latent_root", "px_root", "future_offset"})
 
 
 @FRAMEWORK_REGISTRY.register("UamGR00T_LT")
@@ -79,6 +86,42 @@ class UamVLAGR00T_LT(UamVLAGR00T):
                 meta.get("vae_path"), vae_path,
             )
 
+    def _assert_future_latent_meta(self, layout: dict, latent_channels: int) -> None:
+        """Fail loudly when the precomputed rgb_latent disagrees with this config.
+
+        Same rationale as ``_assert_depth_latent_meta``: the training loader
+        returns None for missing files (mask=False, dummy loss), so without
+        this check a missing/mismatched dataset would train at silent zero
+        coverage instead of erroring.
+        """
+        meta_path = self.sidecar_root / "rgb_latent" / "meta.json"
+        if not meta_path.exists():
+            raise RuntimeError(
+                f"{meta_path} not found. Run:\n"
+                f"  python runners/preprocess_rgb_latent.py "
+                f"--dataset_root {self.sidecar_root}"
+            )
+        meta = json.loads(meta_path.read_text())
+        expected = {
+            "grid": layout["target_size"],
+            "target_resize": layout["target_resize"],
+            "latent_channels": latent_channels,
+        }
+        mismatched = {k: (meta.get(k), v) for k, v in expected.items() if meta.get(k) != v}
+        if mismatched:
+            raise RuntimeError(
+                f"{meta_path} disagrees with the current config "
+                f"(found, expected): {mismatched}. Re-run preprocess_rgb_latent.py "
+                f"with --qwen_image_size {self._qwen_image_size()}."
+            )
+        vae_path = str(self.config.framework.vae.path)
+        if meta.get("vae_path") != vae_path:
+            logger.warning(
+                "rgb_latent was encoded with vae_path=%r but framework.vae.path=%r; "
+                "visualization would decode with a different VAE than the targets.",
+                meta.get("vae_path"), vae_path,
+            )
+
     def _assert_affordance_px_meta(self, layout: dict, camera: str) -> None:
         """Fail loudly when the precomputed affordance_px disagrees with this config.
 
@@ -113,9 +156,12 @@ class UamVLAGR00T_LT(UamVLAGR00T):
     def _maybe_build_aux_heads(self) -> None:
         depth_cfg = self.config.framework.aux_heads.get("depth_latent", {})
         afford_cfg = self.config.framework.aux_heads.get("affordance_px", {})
+        future_cfg = self.config.framework.aux_heads.get("future_latent", {})
         self._depth_block_enabled = bool(depth_cfg.get("enabled", False))
         self._afford_block_enabled = bool(afford_cfg.get("enabled", False))
-        if not (self._depth_block_enabled or self._afford_block_enabled):
+        self._future_block_enabled = bool(future_cfg.get("enabled", False))
+        if not (self._depth_block_enabled or self._afford_block_enabled
+                or self._future_block_enabled):
             return
 
         layout = self._qwen_vision_layout()
@@ -173,14 +219,50 @@ class UamVLAGR00T_LT(UamVLAGR00T):
                 **head_kwargs,
             )
 
+        if self._future_block_enabled:
+            latent_channels = int(future_cfg.get("latent_channels", 64))
+            self._assert_future_latent_meta(layout, latent_channels)
+
+            vae = None
+            if future_cfg.get("visualize", False):
+                # Share the frozen VAE if the depth branch already built it.
+                # Same ZeRO-3 caveat as there: only touched inside visualize().
+                vae = getattr(self, "vae", None)
+                if vae is None:
+                    from starVLA.model.modules.uamvla.components.pixel_decoder.vae import VAEPixelDecoder
+
+                    self.vae = VAEPixelDecoder(self.config.framework.vae.path)
+                    vae = self.vae
+
+            head_kwargs = {k: v for k, v in future_cfg.items() if k not in _NON_HEAD_KEYS}
+            head_kwargs.pop("latent_channels", None)
+
+            self.aux_heads["future_latent"] = FutureLatentHead(
+                hidden_size=hidden_size,
+                image_token_id=image_token_id,
+                patches_per_view=layout["patches_per_view"],
+                # Block-order contract with _encode_qwen_hidden: the future
+                # (foresight) block is always appended last.
+                view_idx=num_views
+                + (1 if self._depth_block_enabled else 0)
+                + (1 if self._afford_block_enabled else 0),
+                latent_channels=latent_channels,
+                vae=vae,
+                **head_kwargs,
+            )
+
     # ──────────────────────────────────────────────────────────────────
     #  Encode: append the primary image as extra vision blocks
     # ──────────────────────────────────────────────────────────────────
     def _encode_qwen_hidden(self, examples: List[dict]):
         batch_images = [self._force_resize_640(example["image"]) for example in examples]
         # Block-order contract with _maybe_build_aux_heads: depth block first,
-        # affordance block second.
-        n_extra = int(self._depth_block_enabled) + int(self._afford_block_enabled)
+        # affordance block second, future (foresight) block last.
+        n_extra = (
+            int(self._depth_block_enabled)
+            + int(self._afford_block_enabled)
+            + int(self._future_block_enabled)
+        )
         if n_extra:
             expected_views = self._num_views_from_config()
             if len(batch_images[0]) != expected_views:
@@ -252,11 +334,16 @@ if __name__ == "__main__":
         "depth_latent": torch.randn(64, grid, grid),
         "depth_px": torch.rand(grid * 16, grid * 16),
         "affordance_px": torch.rand(grid * 16, grid * 16),
+        "future_latent": torch.randn(64, grid, grid),
     }
     batch = [sample, {**sample, "lang": "open the drawer"}]
 
     image_token_id = next(iter(model.aux_heads.values())).image_token_id
-    n_extra = int(model._depth_block_enabled) + int(model._afford_block_enabled)
+    n_extra = (
+        int(model._depth_block_enabled)
+        + int(model._afford_block_enabled)
+        + int(model._future_block_enabled)
+    )
     _, qwen_inputs, hidden = model._encode_qwen_hidden(model._prepare_examples(list(batch)))
     counts = (qwen_inputs["input_ids"] == image_token_id).sum(dim=1)
     expected = ppv * (num_views + n_extra)

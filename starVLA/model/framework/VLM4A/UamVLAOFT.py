@@ -579,6 +579,17 @@ class UamVLAOFT(Qwenvl_OFT):
             if afford is not None:
                 out["affordance_px"] = afford
 
+        # UamGR00T_LT: precomputed RGB VAE latent of the t+N frame -- the
+        # Seer-style foresight target.  No-op unless aux_heads.future_latent
+        # is on.
+        future_camera = self._future_latent_camera()
+        if future_camera is not None:
+            future_latent = self._load_future_latent_frame(
+                traj, base, sidecar_root=sidecar_root, camera=future_camera,
+            )
+            if future_latent is not None:
+                out["future_latent"] = future_latent
+
         grounding = self._load_grounding_mask(traj, base, sidecar_root=sidecar_root)
         if grounding is not None:
             out["grounding_mask"] = grounding["mask"]
@@ -704,6 +715,33 @@ class UamVLAOFT(Qwenvl_OFT):
             self._affordance_px_camera_cached = camera
         return camera
 
+    def _future_latent_camera(self) -> str | None:
+        """Camera name when the future_latent head is on; None disables the loader.
+
+        Same structure as ``_depth_latent_camera``; the rgb_latent artifacts
+        share the chunk/camera/episode layout and the mmap loader below.
+        """
+        camera = getattr(self, "_future_latent_camera_cached", "__unset__")
+        if camera == "__unset__":
+            framework = getattr(getattr(self, "config", None), "framework", None)
+            heads = getattr(framework, "aux_heads", None)
+            cfg = heads.get("future_latent", {}) if heads is not None else {}
+            camera = str(cfg.get("camera", "image")) if cfg.get("enabled", False) else None
+            self._future_latent_camera_cached = camera
+        return camera
+
+    def _future_latent_offset(self) -> int:
+        """N of the t+N foresight target.  Default 8 == action_horizon: the
+        frame reached after executing one full predicted chunk (Seer sets
+        future_steps == action_pred_steps for the same reason)."""
+        offset = getattr(self, "_future_latent_offset_cached", None)
+        if offset is None:
+            framework = getattr(getattr(self, "config", None), "framework", None)
+            heads = getattr(framework, "aux_heads", None)
+            cfg = heads.get("future_latent", {}) if heads is not None else {}
+            offset = self._future_latent_offset_cached = int(cfg.get("future_offset", 8))
+        return offset
+
     def _depth_sidecar_path(
         self, kind: str, trajectory_id: int, sidecar_root: Path, camera: str,
     ) -> Path:
@@ -745,6 +783,29 @@ class UamVLAOFT(Qwenvl_OFT):
         # np.array (not asarray): always copy out of the mmap, so the tensor
         # survives LRU eviction of the handle regardless of the on-disk dtype.
         return torch.as_tensor(np.array(handle[base_index], dtype=np.float32))
+
+    def _load_future_latent_frame(
+        self,
+        trajectory_id: int,
+        base_index: int,
+        sidecar_root: Path | None = None,
+        camera: str = "image",
+    ) -> torch.Tensor | None:
+        """RGB VAE latent of the t+N frame; N clamps to the episode's last frame.
+
+        Clamp rather than mask out (contrast ``_image_action_future_frame_index``):
+        each CALVIN LeRobot episode is one task window, so at the tail the
+        terminal frame *is* the correct future.  Returning None there would
+        silently drop supervision for every episode-tail sample.
+        """
+        root = sidecar_root or self.sidecar_root
+        handle = self._load_depth_episode_memmap(
+            self._depth_sidecar_path("rgb_latent", trajectory_id, root, camera)
+        )
+        if handle is None or base_index >= handle.shape[0]:
+            return None
+        idx = min(base_index + self._future_latent_offset(), handle.shape[0] - 1)
+        return torch.as_tensor(np.array(handle[idx], dtype=np.float32))
 
     def _load_grounding_mask(
         self,
@@ -1256,6 +1317,7 @@ class UamVLAOFT(Qwenvl_OFT):
                 "depth_latent",
                 "depth_px",
                 "affordance_px",
+                "future_latent",
                 "grounding_mask",
                 "affordance_heatmap",
                 "image_action_future",
