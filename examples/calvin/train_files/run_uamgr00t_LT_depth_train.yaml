@@ -79,7 +79,7 @@ datasets:
     dataset_py: lerobot_datasets
 
     data_root_dir: datasets
-    data_mix: calvin_d_lt_starvla_uam_state_h8
+    data_mix: calvin_abc_lt_starvla_uam_state_h8
 
     include_state: true
     gr00t_state_indices: [0, 1, 2, 3, 4, 5, 7]

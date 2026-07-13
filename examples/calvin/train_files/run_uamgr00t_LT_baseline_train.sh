@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
-# UamGR00T_LT — VRB affordance-token supervision on CALVIN ABC_D scene D.
+# UamGR00T baseline for the CALVIN ABC latent-token ablations.
 #
-# Requires the precomputed sidecars:
-#   python runners/preprocess_affordance_vrb.py --dataset_root datasets/task_ABC_D_scene_D_lerobot
-#   python runners/preprocess_affordance_px.py  --dataset_root datasets/task_ABC_D_scene_D_lerobot
-#
-# For the depth+affordance ablation, pass through:
-#   --framework.aux_heads.depth_latent.enabled true
-#
-# No logging to disk here; the caller pipes through tee. CLI overrides pass
-# through "$@", e.g. --trainer.max_train_steps 20 or --trainer.is_resume true.
+# No auxiliary sidecars are required. No logging to disk here; the caller
+# pipes through tee. CLI overrides pass through "$@".
 set -euo pipefail
 
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
@@ -24,7 +17,7 @@ if [[ -n "${GPU_ID:-}" && -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 fi
 
-CONFIG_YAML="${CONFIG_YAML:-./examples/calvin/train_files/run_uamgr00t_LT_afford_train.yaml}"
+CONFIG_YAML="${CONFIG_YAML:-./examples/calvin/train_files/run_uamgr00t_LT_baseline_train.yaml}"
 NUM_GPUS="${NUM_GPUS:-4}"
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-starVLA/config/deepseeds/deepspeed_zero2.yaml}"
 
@@ -32,7 +25,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_DIR="${WANDB_DIR:-./wandb}"
 
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-playground/Checkpoints}"
-RUN_ID="${RUN_ID:-uamvla_gr00t_lt_calvin_abc_afford}"
+RUN_ID="${RUN_ID:-uamvla_gr00t_lt_calvin_abc_baseline}"
 
 mkdir -p "${RUN_ROOT_DIR}/${RUN_ID}"
 cp "$0" "${RUN_ROOT_DIR}/${RUN_ID}/"

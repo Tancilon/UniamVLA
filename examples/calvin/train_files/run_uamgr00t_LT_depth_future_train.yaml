@@ -1,5 +1,5 @@
-run_id: uamvla_gr00t_lt_afford
-run_root_dir: playground/Checkpoints
+run_id: uamvla_gr00t_lt_calvin_abc_depth_future
+run_root_dir: results/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
 wandb_project: uamvla
@@ -20,8 +20,7 @@ framework:
 
   action_model:
     action_model_type: DiT-B
-    use_encoder_mask: true     # mask right-padded VL tokens in the DiT cross-attn;
-                               # NOT comparable with runs trained without it
+    use_encoder_mask: true
     action_hidden_dim: 1024
     hidden_size: 1024
     add_pos_embed: true
@@ -48,31 +47,34 @@ framework:
 
   reduce_in_full_precision: true
 
-  # NOTE: aux_loss_control is deliberately absent.  It builds AuxDenoisingSuite,
-  # which dynamically rescales each head's loss -- that would also rescale the
-  # detached probe's loss and make probe_r2_pixel depend on the schedule.
-  # Without it, _compute_aux_training_losses takes the plain-sum path.
-
+  # Keep the plain-sum auxiliary-loss path so both latent-token losses retain
+  # their explicit weights and remain directly comparable with single-head runs.
   vae:
     path: ckpt/pretrained_vae
 
   aux_heads:
-    # Enabling a head is what appends its extra vision block; there is no
-    # separate layout switch.  Block order: depth first, affordance second.
-    # Baseline = framework.name: UamGR00T.
+    # Appended primary-image block order is depth first, future last.
     depth_latent:
+      enabled: true              # requires preprocess_depth_{vda,latent}.py
+      loss_weight: 1.0
+      head_kind: pointwise_mlp
+      probe_enabled: true
+      latent_channels: 64
+      camera: image
+      visualize: false
+    affordance_px:
       enabled: false
       loss_weight: 1.0
-      head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
-      probe_enabled: true        # detached linear probe -> depth pixels, reports only
-      latent_channels: 64        # VAE latent_channels(16) * 2x2 grouping
-      camera: image              # depth_latent/<camera>/ subdir
-      visualize: false           # builds the frozen VAE; unsafe under ZeRO-3
-    affordance_px:
-      enabled: true              # requires runners/preprocess_affordance_{vrb,px}.py
+      head_kind: pointwise_mlp
+      camera: image
+    future_latent:
+      enabled: true              # requires preprocess_rgb_latent.py
       loss_weight: 1.0
-      head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
-      camera: image              # affordance_px/<camera>/ subdir
+      head_kind: pointwise_mlp
+      latent_channels: 64
+      camera: image
+      future_offset: 8           # matches action_horizon
+      visualize: false
 
 datasets:
   vla_data:

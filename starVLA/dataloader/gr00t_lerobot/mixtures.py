@@ -25,7 +25,11 @@ DATASET_NAMED_MIXTURES = {
     "calvin_d_scene_mix_starvla_uam_state_h8" : [
         ("task_ABC_D_scene_D_lerobot_copy", 1.0, "calvin_starvla_uam_state_h8"),
     ],
-    # depth_latent/ + depth_px/ sidecars that UamGR00T_LT reads.
+    "calvin_abc_lt_starvla_uam_state_h8" : [
+        ("task_ABC_D_scene_A_lerobot_lt", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_B_lerobot_lt", 1.0, "calvin_starvla_uam_state_h8"),
+        ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_starvla_uam_state_h8"),
+    ],
     "calvin_d_lt_starvla_uam_state_h8" : [
         ("task_ABC_D_scene_D_lerobot", 1.0, "calvin_starvla_uam_state_h8"),
     ],
