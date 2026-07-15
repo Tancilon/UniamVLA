@@ -25,7 +25,7 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_DIR="${WANDB_DIR:-./wandb}"
 
 RUN_ROOT_DIR="${RUN_ROOT_DIR:-playground/Checkpoints}"
-RUN_ID="${RUN_ID:-uamvla_gr00t_lt_calvin_abc_baseline}"
+RUN_ID="${RUN_ID:-uamvla_gr00t_lt_calvin_abc_baseline_v2}"
 
 mkdir -p "${RUN_ROOT_DIR}/${RUN_ID}"
 cp "$0" "${RUN_ROOT_DIR}/${RUN_ID}/"
