@@ -8,15 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Key architectural layers** (each independently smoke-testable):
 - `starVLA/model/modules/vlm/` — VLM wrappers (Qwen2.5-VL, Gemma4, etc.)
-- `starVLA/model/modules/action_head/` — Action heads (OFT parallel, PI flow-matching diffusion, FAST autoregressive tokens)
-- `starVLA/model/framework/` — Assembled VLA frameworks combining VLM + action head (e.g., `QwenOFT.py`, `Gemma4PI.py`)
+- `starVLA/model/modules/action_model/` — Action heads (OFT parallel, PI flow-matching diffusion, FAST autoregressive tokens, GR00T dual-system)
+- `starVLA/model/modules/uamvla/` — UamVLA-specific components: `aux_heads/` (pose, future, recon, depth, grounding, affordance, latent-depth), `components/` (denoiser, pixel_decoder, task_adapter), `state_encoder/`, `collator_helpers.py`, `aux_loss_control.py`
+- `starVLA/model/framework/` — Assembled VLA frameworks in two sub-packages: `VLM4A/` (Qwen/Gemma4/Florence2/CosmosReason2 backbones, e.g. `QwenOFT.py`, `UamVLAGR00T.py`) and `WM4A/` (video-DiT world models: Cosmos-Predict2, Wan2)
 - `starVLA/dataloader/` — Dataset loaders (LeRobot, LLaVA-JSON, GR00T format); dataloaders return raw dicts, no model-specific preprocessing
 - `starVLA/training/` — Trainers: `train_starvla.py` (SFT), `train_starvla_cotrain.py` (multi-benchmark co-training), `train_starvlm.py` (VLM-only)
 - `starVLA/config/` — YAML configs for training and DeepSpeed (ZeRO-2/3)
 
 **Config system**: single global config object; all fields overridable via CLI (`--trainer.learning_rate 1e-4`). YAML + CLI overrides feed into `omegaconf`/`tyro`.
 
-**Benchmark examples** live in `examples/<benchmark>/` with `train_files/run_*.sh` and `eval_files/run_*.sh` launchers. Supported benchmarks: LIBERO, SimplerEnv, RoboCasa, RoboTwin, DOMINO, BEHAVIOR, Calvin.
+**Benchmark examples** live in `examples/<benchmark>/` with `train_files/run_*.sh` and `eval_files/run_*.sh` launchers. Supported benchmarks: LIBERO, LIBERO-plus, SimplerEnv, RoboCasa, RoboTwin, DOMINO, BEHAVIOR, Calvin, Franka, VLA-Arena.
 
 ## Common Commands
 
@@ -43,6 +44,21 @@ WANDB_MODE=offline accelerate launch \
 ```
 
 **Resume training**: append `--trainer.is_resume true` via `"$@"` passthrough — no script editing needed.
+
+**Tests**:
+```bash
+pytest tests/                          # full suite
+pytest tests/test_aux_loss_control.py  # single file
+pytest tests/ -k "libero"              # filter by keyword
+```
+Tests are CPU-only by default and don't require a GPU. Use `-x` to stop on first failure.
+
+**Lint / format**:
+```bash
+make check       # dry-run: black + ruff, no file changes
+make autoformat  # apply black + ruff --fix in place
+```
+Line length is 121; target Python 3.10+.
 
 **Docs**: see `docs/starVLA_guideline.md` for the full setup → training → eval walkthrough.
 
