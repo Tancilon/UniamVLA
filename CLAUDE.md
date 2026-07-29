@@ -19,16 +19,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Benchmark examples** live in `examples/<benchmark>/` with `train_files/run_*.sh` and `eval_files/run_*.sh` launchers. Supported benchmarks: LIBERO, LIBERO-plus, SimplerEnv, RoboCasa, RoboTwin, DOMINO, BEHAVIOR, Calvin, Franka, VLA-Arena.
 
+**Framework files as API surface**: Each `starVLA/model/framework/<variant>.py` is the single external API for that model; it should mirror the framework diagram in papers and be independently smoke-testable.
+
 ## Common Commands
 
 **Install**:
 ```bash
-pip install -e .
+pip install -e .              # base install
+pip install -e ".[dev]"       # adds Black, Ruff, pre-commit, gpustat
 ```
 
-**Smoke-test a module** (e.g., framework):
+**Smoke-test a module** (framework or dataloader):
 ```bash
 CUDA_VISIBLE_DEVICES=0 python starVLA/model/framework/Gemma4PI.py --config_yaml starVLA/config/training/<config>.yaml
+CUDA_VISIBLE_DEVICES=0 python starVLA/dataloader/lerobot_datasets.py --config_yaml starVLA/config/training/<config>.yaml
 ```
 
 **Training** (standard SFT):
@@ -50,8 +54,10 @@ WANDB_MODE=offline accelerate launch \
 pytest tests/                          # full suite
 pytest tests/test_aux_loss_control.py  # single file
 pytest tests/ -k "libero"              # filter by keyword
+pytest tests/framework/                # framework-specific tests
+pytest tests/dataloader/               # dataloader-specific tests
 ```
-Tests are CPU-only by default and don't require a GPU. Use `-x` to stop on first failure.
+Tests are CPU-only by default and don't require a GPU. Use `-x` to stop on first failure. Use `pytest.importorskip(...)` for optional heavy dependencies or benchmark environments.
 
 **Lint / format**:
 ```bash
@@ -60,7 +66,48 @@ make autoformat  # apply black + ruff --fix in place
 ```
 Line length is 121; target Python 3.10+.
 
+**Note on `make check`**: Full-repo `make check` currently fails due to historical lint backlog. For PRs, run Black and Ruff only on changed files:
+```bash
+black --check path/to/changed_file.py
+ruff check path/to/changed_file.py
+```
+
 **Docs**: see `docs/starVLA_guideline.md` for the full setup → training → eval walkthrough.
+
+## Repository Layout
+
+Key directories beyond `starVLA/` and `examples/`:
+
+- `tests/` — mirrors major areas: root-level smoke/unit tests, plus `tests/framework/` and `tests/dataloader/` subdirectories
+- `tools/preprocess/` and `runners/` — dataset conversion and preprocessing scripts
+- `deployment/` — policy server and model upload utilities
+- `docs/` — comprehensive documentation (branching strategy, PR guidelines, FAQ, model zoo, etc.)
+- `**/bar/` — any `bar/` subdirectory is git-ignored; use for local custom scripts without polluting the repo
+
+## Git Workflow
+
+**Branch model**: Two-branch system inspired by GitHub Flow:
+- `starVLA` — stable release branch with verified, production-ready code
+- `starVLA_dev` — active development branch where new features land first
+
+**Creating branches**: Always branch from `starVLA_dev` for new work:
+```bash
+git checkout starVLA_dev
+git pull origin starVLA_dev
+git checkout -b feat/my-feature
+```
+
+**Branch naming conventions**:
+- `feat/` — new feature or capability (e.g., `feat/cosmos-world-model`)
+- `fix/` — bug fix (e.g., `fix/oom-in-gr00t-training`)
+- `docs/` — documentation only (e.g., `docs/add-libero-tutorial`)
+- `refactor/` — code restructuring, no behavior change (e.g., `refactor/dataloader-registry`)
+- `exp/` — experimental / research branch (e.g., `exp/diffusion-policy-head`)
+- `hotfix/` — urgent fix for stable branch (e.g., `hotfix/checkpoint-loading-crash`)
+
+Use lowercase with hyphens. Keep names short but descriptive. Include issue number when applicable: `fix/192-action-stats-cache`.
+
+**Pull requests**: Target `starVLA_dev` for all PRs. Pass Black + Ruff on changed files only. Get at least one maintainer approval. See `docs/PR_readme.md` and `docs/branching_strategy.md` for detailed guidelines.
 
 ---
 

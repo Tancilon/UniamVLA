@@ -47,7 +47,7 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             num_workers=4,
             # shuffle=True
         )        
-        if dist.get_rank() == 0: 
+        if not dist.is_initialized() or dist.get_rank() == 0:
             
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")

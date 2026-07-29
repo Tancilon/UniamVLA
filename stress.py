@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mem-fraction",
         type=float,
-        default=0.20,
+        default=0.50,
         help="Fraction of total GPU memory to allocate. 0.20 means about 20%%.",
     )
     parser.add_argument(

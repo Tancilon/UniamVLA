@@ -1381,14 +1381,38 @@ class LeRobotSingleDataset(Dataset):
         640×640 → image_grid_thw=(1,40,40) → ppv=400) so the only resize on
         the training path is the single 200→640 here, avoiding the previous
         200→224→640 triple resize (codex I-5).
+
+        DT multi-frame mode (Seer-style, enabled when data_cfg contains
+        ``num_history_frames > 0``):
+            delta_indices for video = [-(K-1),...,-1, 0, future_offset]
+            T = num_history_frames + 1 + (1 if future_offset > 0 else 0)
+            Packed fields added to sample:
+                image_history  : list[K-1] of list[num_views] PIL images
+                future_rgb     : list[num_views] of float32 Tensor (3,H,W) in [0,1]
         """
         image_resize = 224
         if self.data_cfg is not None:
             image_resize = int(self.data_cfg.get("image_resize", 224))
+
+        # ------------------------------------------------------------------
+        # DT multi-frame mode detection
+        # ------------------------------------------------------------------
+        num_history_frames = 0
+        future_offset = 0
+        if self.data_cfg is not None:
+            num_history_frames = int(self.data_cfg.get("num_history_frames", 0) or 0)
+            future_offset = int(self.data_cfg.get("future_offset", 0) or 0)
+        dt_mode = num_history_frames > 0
+
+        # Index of the "current" frame inside the loaded T-dim tensor.
+        # Standard mode: index 0 is always the current (single) frame.
+        # DT mode: first num_history_frames indices are history, then current.
+        current_frame_idx = num_history_frames if dt_mode else 0
+
         prim_images = []
         wrist_views = []
         for video_key in self.modality_keys["video"]:
-            image = data[video_key][0]
+            image = data[video_key][current_frame_idx]
             image = Image.fromarray(image).resize((image_resize, image_resize))
             if "wrist" not in video_key:
                 prim_images.append(image)
@@ -1415,6 +1439,33 @@ class LeRobotSingleDataset(Dataset):
                 state.append(data[state_key])
             state = np.concatenate(state, axis=1).astype(np.float16)
             sample["state"] = state
+
+        # ------------------------------------------------------------------
+        # DT mode: pack image_history and future_rgb
+        # ------------------------------------------------------------------
+        if dt_mode:
+            # image_history: list[K-1] of list[num_views PIL images]
+            # Ordered from oldest (index 0) to most-recent (index K-2).
+            image_history = []
+            for k in range(num_history_frames):
+                frame_views = []
+                for video_key in self.modality_keys["video"]:
+                    frame = data[video_key][k]  # (H, W, C) uint8
+                    pil = Image.fromarray(frame).resize((image_resize, image_resize))
+                    frame_views.append(pil)
+                image_history.append(frame_views)
+            sample["image_history"] = image_history
+
+            # future_rgb: list[num_views] of float32 Tensor (3, H, W) in [0,1]
+            if future_offset > 0:
+                future_frame_idx = current_frame_idx + 1  # frame right after current
+                future_rgb = []
+                for video_key in self.modality_keys["video"]:
+                    frame = data[video_key][future_frame_idx]  # (H, W, C) uint8
+                    tensor = torch.from_numpy(frame.copy()).float() / 255.0
+                    tensor = tensor.permute(2, 0, 1)  # (3, H, W)
+                    future_rgb.append(tensor)
+                sample["future_rgb"] = future_rgb
 
         # Patch (2026-05-13): pass through sidecar lookup keys for UamVLAOFT.
         # Other frameworks ignore these; they only carry int ids, no semantic

@@ -1,8 +1,8 @@
-run_id: uamvla_gr00t_lt_calvin_abc_baseline
+run_id: uamvla_gr00t_lt_robotwin_baseline
 run_root_dir: results/Checkpoints
 seed: 42
-wandb_entity: tancilon1-fudan-university-school-of-management
-wandb_project: uamvla
+wandb_entity: your_wandb_entity
+wandb_project: starVLA_Robotwin
 is_debug: false
 version_id: "0.21"
 
@@ -24,10 +24,10 @@ framework:
     hidden_size: 1024
     add_pos_embed: true
     max_seq_len: 1024
-    action_dim: 7
-    state_dim: 7
-    action_horizon: 8
-    future_action_window_size: 7
+    action_dim: 14
+    state_dim: 14
+    action_horizon: 16
+    future_action_window_size: 15
     past_action_window_size: 0
     repeated_diffusion_steps: 8
     noise_beta_alpha: 1.5
@@ -52,83 +52,71 @@ framework:
   vae:
     path: ckpt/pretrained_vae
   aux_heads:
-    # Appended primary-image block order is depth first, future last.
     depth_latent:
-      enabled: true              # requires preprocess_depth_{vda,latent}.py
-      loss_weight: 0.5
-      head_kind: pointwise_mlp
-      probe_enabled: true
-      latent_channels: 64
-      camera: image
-      visualize: false
+      enabled: false
     affordance_px:
       enabled: false
-      loss_weight: 0.5
-      head_kind: pointwise_mlp
-      camera: image
     future_latent:
-      enabled: true              # requires preprocess_rgb_latent.py
-      loss_weight: 0.5
-      head_kind: pointwise_mlp
-      latent_channels: 64
-      camera: image
-      future_offset: 8           # matches action_horizon
-      visualize: false        
+      enabled: false
 
 datasets:
   vla_data:
     dataset_py: lerobot_datasets
 
-    data_root_dir: datasets
-    data_mix: calvin_abc_lt_starvla_uam_state_h8
+    data_root_dir: datasets/robotwin2/Randomized
+    data_mix: robotwin_all
 
     include_state: true
-    gr00t_state_indices: [0, 1, 2, 3, 4, 5, 7]
+    gr00t_state_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
     obs:
-      - video.primary_image
-      - video.wrist_image
+      - video.cam_high
+      - video.cam_left_wrist
+      - video.cam_right_wrist
 
-    state_key: state
+    state_key: observation.state
     action_key: action
 
-    state_dim: 26
-    full_state_dim: 26
-    robot_state_dim: 8
-    action_dim: 7
-    action_horizon: 8
+    state_dim: 14
+    full_state_dim: 14
+    robot_state_dim: 14
+    action_dim: 14
+    action_horizon: 16
 
+    # UamGR00T baseline does not consume these aux pose fields, but the shared
+    # UAM unpacker constructs them. Keep slices in-bounds for RoboTwin's 14-D state.
     state_layout:
-      robot_state: [0, 8]
-      target_pose_rot6d: [8, 14]
-      target_pose_trans: [14, 17]
-      static_cam_rot6d: [17, 23]
-      static_cam_trans: [23, 26]
+      robot_state: [0, 14]
+      target_pose_rot6d: [0, 6]
+      target_pose_trans: [0, 3]
+      static_cam_rot6d: [7, 13]
+      static_cam_trans: [7, 10]
 
     aux_state_slice:
-      target_pose_rot6d: [8, 14]
-      target_pose_trans: [14, 17]
-      static_cam_rot6d: [17, 23]
-      static_cam_trans: [23, 26]
+      target_pose_rot6d: [0, 6]
+      target_pose_trans: [0, 3]
+      static_cam_rot6d: [7, 13]
+      static_cam_trans: [7, 10]
 
-    action_type: delta_qpos
+    action_type: abs_qpos
+    action_mode: abs
+    sequential_step_sampling: false
 
-    CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
+    CoT_prompt: "Your task is {instruction}."
 
     per_device_batch_size: 8
     load_all_data_for_training: true
-    video_backend: torchvision_av
+    video_backend: pyav
 
-    enable_sidecar_io: true
+    enable_sidecar_io: false
     strict_sidecar_io: false
     image_target_cache_maxsize: 256
 
 trainer:
   max_train_steps: 100000
   num_warmup_steps: 5000
-  save_interval: 10000
-  eval_interval: 100
-
+  save_interval: 5000
+  eval_interval: 1000
 
   learning_rate:
     base: 2.5e-05

@@ -170,6 +170,18 @@ class FutureLatentHead(AuxHead):
         arr = (rgb.detach().float().cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         return Image.fromarray(arr)
 
+    @staticmethod
+    def _normalized_rgb_to_pil(rgb: torch.Tensor):
+        """(3, H, W) in [-1, 1] -> PIL RGB image."""
+        import numpy as np
+        from PIL import Image
+
+        if rgb.ndim != 3 or rgb.shape[0] != 3:
+            raise ValueError(f"Expected normalized RGB tensor [3,H,W], got {tuple(rgb.shape)}")
+        arr = ((rgb.detach().float().cpu() * 0.5 + 0.5).clamp(0, 1) * 255).round()
+        arr = arr.to(torch.uint8).permute(1, 2, 0).numpy()
+        return Image.fromarray(arr, mode="RGB")
+
     def predict(self, hidden_states: torch.Tensor, batch: dict) -> HeadOutput:
         h = self._foresight_tokens(hidden_states, batch["input_ids"])
         with torch.amp.autocast("cuda", dtype=torch.float32):
@@ -178,10 +190,12 @@ class FutureLatentHead(AuxHead):
                           predictions={"future_frames": self._latent_to_rgb(z_pred.float())})
 
     def visualize(self, hidden_states, batch, mask, num_samples: int = 1, **kwargs) -> list:
-        """GT | prediction, both decoded through the frozen VAE."""
+        """Current primary RGB | GT future | predicted future."""
         mask = mask.to(device=hidden_states.device, dtype=torch.bool)
         if num_samples <= 0 or not mask.any() or self.vae is None:
             return []
+        if "image" not in batch:
+            raise KeyError("FutureLatentHead.visualize requires batch['image'] with primary camera RGB")
 
         from starVLA.utils.vis_draw import concat_images_h
         from starVLA.model.modules.uamvla.aux_heads.spatial_map_denoising_head import (
@@ -204,9 +218,12 @@ class FutureLatentHead(AuxHead):
         instructions = batch.get("instruction", [])
         results = []
         for i, b in enumerate(idx):
-            combined = concat_images_h([self._rgb_to_pil(gt[i]), self._rgb_to_pil(frames[i])])
-            caption = "future_latent: GT vs Pred"
             b = int(b)
+            current = self._normalized_rgb_to_pil(batch["image"][b, 0])
+            combined = concat_images_h(
+                [current, self._rgb_to_pil(gt[i]), self._rgb_to_pil(frames[i])]
+            )
+            caption = "future_latent: Current RGB | GT future | Pred"
             if b < len(instructions):
                 caption = f"{caption} | {instructions[b]}"
             results.append(_S._maybe_wandb_image(combined, caption=caption))

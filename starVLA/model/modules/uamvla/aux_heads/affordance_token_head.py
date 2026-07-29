@@ -162,8 +162,51 @@ class AffordanceTokenHead(AuxHead):
         return HeadOutput(loss=None, metrics={},
                           predictions={"affordance_maps": self._patches_to_map(pred.float())})
 
+    @staticmethod
+    def _rgb_to_pil(rgb: torch.Tensor):
+        import numpy as np
+        from PIL import Image
+
+        if rgb.ndim != 3 or rgb.shape[0] != 3:
+            raise ValueError(f"Expected RGB tensor [3,H,W], got {tuple(rgb.shape)}")
+        image = ((rgb.float() * 0.5 + 0.5).clamp(0, 1) * 255).round()
+        arr = image.to(torch.uint8).cpu().permute(1, 2, 0).numpy()
+        return Image.fromarray(arr, mode="RGB")
+
+    @staticmethod
+    def _overlay_map_on_rgb(rgb: torch.Tensor, heatmap: torch.Tensor, alpha: float = 0.75):
+        import numpy as np
+        import torch.nn.functional as F
+        from PIL import Image
+
+        if rgb.ndim != 3 or rgb.shape[0] != 3:
+            raise ValueError(f"Expected RGB tensor [3,H,W], got {tuple(rgb.shape)}")
+        if heatmap.ndim == 3:
+            heatmap = heatmap.squeeze(0)
+        if heatmap.ndim != 2:
+            raise ValueError(f"Expected 2-D heatmap, got {tuple(heatmap.shape)}")
+
+        rgb_01 = (rgb.float() * 0.5 + 0.5).clamp(0, 1)
+        gray = (
+            0.299 * rgb_01[0]
+            + 0.587 * rgb_01[1]
+            + 0.114 * rgb_01[2]
+        ).unsqueeze(0).expand_as(rgb_01)
+        base = (0.85 * gray + 0.15 * rgb_01) * 0.75
+        heat = F.interpolate(
+            heatmap[None, None].float(),
+            size=base.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0].clamp(0, 1)
+        red = torch.zeros_like(base)
+        red[0] = 1.0
+        overlay = base * (1.0 - alpha * heat[None]) + red * (alpha * heat[None])
+        arr = (overlay.clamp(0, 1) * 255).round().to(torch.uint8).cpu()
+        return Image.fromarray(arr.permute(1, 2, 0).numpy().astype(np.uint8), mode="RGB")
+
     def visualize(self, hidden_states, batch, mask, num_samples: int = 1, **kwargs) -> list:
-        """GT | prediction, both as grayscale heatmaps."""
+        """RGB | GT overlay | prediction overlay."""
         mask = mask.to(device=hidden_states.device, dtype=torch.bool)
         if num_samples <= 0 or not mask.any():
             return []
@@ -186,12 +229,22 @@ class AffordanceTokenHead(AuxHead):
 
         maps = pred.predictions["affordance_maps"]
         gt = batch["affordance_px"][idx].float().clamp(0, 1)
+        rgb_batch = batch.get("image")
         instructions = batch.get("instruction", [])
         results = []
         for i, b in enumerate(idx):
-            combined = concat_images_h([_S._map_to_pil(gt[i]), _S._map_to_pil(maps[i])])
-            caption = "affordance_px: GT vs Pred"
             b = int(b)
+            if rgb_batch is not None:
+                rgb = rgb_batch[b, 0].detach().cpu()
+                combined = concat_images_h([
+                    self._rgb_to_pil(rgb),
+                    self._overlay_map_on_rgb(rgb, gt[i].detach().cpu()),
+                    self._overlay_map_on_rgb(rgb, maps[i].detach().cpu()),
+                ])
+                caption = "affordance_px: RGB | GT overlay | Pred overlay"
+            else:
+                combined = concat_images_h([_S._map_to_pil(gt[i]), _S._map_to_pil(maps[i])])
+                caption = "affordance_px: GT vs Pred"
             if b < len(instructions):
                 caption = f"{caption} | {instructions[b]}"
             results.append(_S._maybe_wandb_image(combined, caption=caption))

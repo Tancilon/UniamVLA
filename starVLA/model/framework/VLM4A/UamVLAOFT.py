@@ -496,27 +496,42 @@ class UamVLAOFT(Qwenvl_OFT):
             state = state.squeeze(0)
 
         s = self.aux_state_slice
-        pose_rot6d = state[s["target_pose_rot6d"][0]:s["target_pose_rot6d"][1]]
-        pose_trans = state[s["target_pose_trans"][0]:s["target_pose_trans"][1]]
-        cam_rot6d = state[s["static_cam_rot6d"][0]:s["static_cam_rot6d"][1]]
-        cam_trans = state[s["static_cam_trans"][0]:s["static_cam_trans"][1]]
-
-        pose_gt = {
-            "rotation": rotation_6d_to_matrix(pose_rot6d),  # (3, 3)
-            "translation": pose_trans,                       # (3,)
-        }
-        static_cam_extrinsic = {
-            "rotation": rotation_6d_to_matrix(cam_rot6d),
-            "translation": cam_trans,
-        }
+        # Guard: state may be shorter than the aux slice indices when the dataset
+        # was collected without sidecar pose/camera data (e.g. CALVIN play data).
+        # In that case pose_gt / static_cam_extrinsic are not available; downstream
+        # aux heads that need them will simply be skipped.
+        _min_len = max(
+            s["target_pose_rot6d"][1],
+            s["target_pose_trans"][1],
+            s["static_cam_rot6d"][1],
+            s["static_cam_trans"][1],
+        )
+        if state.shape[0] >= _min_len:
+            pose_rot6d = state[s["target_pose_rot6d"][0]:s["target_pose_rot6d"][1]]
+            pose_trans = state[s["target_pose_trans"][0]:s["target_pose_trans"][1]]
+            cam_rot6d = state[s["static_cam_rot6d"][0]:s["static_cam_rot6d"][1]]
+            cam_trans = state[s["static_cam_trans"][0]:s["static_cam_trans"][1]]
+            pose_gt = {
+                "rotation": rotation_6d_to_matrix(pose_rot6d),  # (3, 3)
+                "translation": pose_trans,                       # (3,)
+            }
+            static_cam_extrinsic = {
+                "rotation": rotation_6d_to_matrix(cam_rot6d),
+                "translation": cam_trans,
+            }
+        else:
+            pose_gt = None
+            static_cam_extrinsic = None
 
         out = {
             "image": image,
             "lang": lang,
             "action": action,
-            "pose_gt": pose_gt,
-            "static_cam_extrinsic": static_cam_extrinsic,
         }
+        if pose_gt is not None:
+            out["pose_gt"] = pose_gt
+        if static_cam_extrinsic is not None:
+            out["static_cam_extrinsic"] = static_cam_extrinsic
 
         # ── Sidecar IO ──────────────────────────────────────────────
         traj = int(sample["__trajectory_id"])
@@ -1160,7 +1175,14 @@ class UamVLAOFT(Qwenvl_OFT):
         Returns CHW float in [-1, 1] (matching VAE input normalization spec
         in :meth:`FutureHead._normalize_for_vae`).
         """
-        video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
+        try:
+            video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
+        except (KeyError, ValueError) as e:
+            logger.debug(
+                "image_future unavailable for traj=%d: video path pattern error (%s); skipping.",
+                trajectory_id, e,
+            )
+            return None
         if not video_path.exists():
             return None
         try:
@@ -1190,7 +1212,14 @@ class UamVLAOFT(Qwenvl_OFT):
         sidecar_root: Path | None = None,
     ) -> torch.Tensor | None:
         """Read the local future frame aligned to the current action chunk."""
-        video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
+        try:
+            video_path = self._image_future_video_path(trajectory_id, sidecar_root=sidecar_root)
+        except (KeyError, ValueError) as e:
+            logger.debug(
+                "image_action_future unavailable for traj=%d: video path pattern error (%s); skipping.",
+                trajectory_id, e,
+            )
+            return None
         if not video_path.exists():
             return None
         try:

@@ -1,5 +1,5 @@
-run_id: uamvla_gr00t_lt
-run_root_dir: playground/Checkpoints
+run_id: uamvla_gr00t_lt_calvin_abc_baseline
+run_root_dir: results/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
 wandb_project: uamvla
@@ -20,8 +20,6 @@ framework:
 
   action_model:
     action_model_type: DiT-B
-    use_encoder_mask: true     # mask right-padded VL tokens in the DiT cross-attn;
-                               # NOT comparable with runs trained without it
     action_hidden_dim: 1024
     hidden_size: 1024
     add_pos_embed: true
@@ -48,21 +46,18 @@ framework:
 
   reduce_in_full_precision: true
 
-  # NOTE: aux_loss_control is deliberately absent.  It builds AuxDenoisingSuite,
-  # which dynamically rescales each head's loss -- that would also rescale the
-  # detached probe's loss and make probe_r2_pixel depend on the schedule.
-  # Without it, _compute_aux_training_losses takes the plain-sum path.
-
+  aux_loss_control:
+    enabled: true
+    aux_budget: 1.0
   vae:
     path: ckpt/pretrained_vae
-
   aux_heads:
     # Enabling a head is what appends its extra vision block; there is no
     # separate layout switch.  Block order: depth first, affordance second.
     # Baseline = framework.name: UamGR00T.
     depth_latent:
       enabled: true
-      loss_weight: 1.0
+      loss_weight: 0.5
       head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
       probe_enabled: true        # detached linear probe -> depth pixels, reports only
       latent_channels: 64        # VAE latent_channels(16) * 2x2 grouping
@@ -70,9 +65,9 @@ framework:
       visualize: false           # builds the frozen VAE; unsafe under ZeRO-3
     affordance_px:
       enabled: false             # requires runners/preprocess_affordance_{vrb,px}.py
-      loss_weight: 1.0
+      loss_weight: 0.5
       head_kind: pointwise_mlp   # pointwise_mlp | linear. NEVER cross-token mixing.
-      camera: image              # affordance_px/<camera>/ subdir
+      camera: image              # affordance_px/<camera>/ subdir        
 
 datasets:
   vla_data:
@@ -110,7 +105,6 @@ datasets:
       static_cam_rot6d: [17, 23]
       static_cam_trans: [23, 26]
 
-    action_mode: abs
     action_type: delta_qpos
 
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
@@ -120,18 +114,15 @@ datasets:
     video_backend: torchvision_av
 
     enable_sidecar_io: true
-    strict_sidecar_io: true
+    strict_sidecar_io: false
     image_target_cache_maxsize: 256
 
 trainer:
   max_train_steps: 100000
   num_warmup_steps: 5000
-  save_interval: 5000
+  save_interval: 10000
   eval_interval: 100
-  visualization:
-    enabled: false
-    train_every_n_steps: 2000
-    num_samples: 1
+
 
   learning_rate:
     base: 2.5e-05
