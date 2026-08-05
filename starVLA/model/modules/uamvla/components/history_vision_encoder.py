@@ -125,7 +125,13 @@ class HistoryVisionEncoder(nn.Module):
         for b in range(B):
             for k in range(K_minus_1):
                 for v in range(num_views):
-                    flat_images.append(image_history[b][k][v])
+                    img = image_history[b][k][v]
+                    # Accept numpy uint8 arrays (e.g. from msgpack-serialized eval client)
+                    # in addition to PIL Images.
+                    if not isinstance(img, Image.Image):
+                        import numpy as _np
+                        img = Image.fromarray(_np.asarray(img, dtype=_np.uint8))
+                    flat_images.append(img)
 
         with torch.no_grad() if not self.resampler.training else torch.enable_grad():
             pixel_values, image_grid_thw = self._preprocess_images(flat_images, device)

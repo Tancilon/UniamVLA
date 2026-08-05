@@ -15,7 +15,7 @@
 # This is the CALVIN ABCD play split without language annotations.
 # Language field will return empty string; tokenizer handles it gracefully.
 run_id: uamvla_gr00t_dt_calvin_pretrain
-run_root_dir: results/Checkpoints
+run_root_dir: playground/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
 wandb_project: uamvla
@@ -31,7 +31,7 @@ framework:
   # K=14 history frames (Seer pretrain sequence_length=14).
   history_frames: 14
   history_encoder:
-    num_latents: 10
+    num_latents: 16
     resampler_depth: 3
     freeze_qwen_vit: true
 
@@ -44,10 +44,10 @@ framework:
   future_branch:
     num_obs_tokens: 49
     num_cross_attn_layers: 2
-    num_heads: 8
+    num_heads: 16
     future_weight: 1.0          # upweight future recon during pretrain
-    z_channel: 512
-    dit_embed_dim: 512
+    z_channel: 1024
+    dit_embed_dim: 1024
     dit_depth: 3
     dit_timesteps: "1000"
 

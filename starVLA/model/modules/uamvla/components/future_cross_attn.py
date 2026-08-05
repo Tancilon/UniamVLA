@@ -1,6 +1,7 @@
-"""FutureCrossAttnBranch: Seer-style future prediction via cross-attention + DiT diffusion decoder.
+"""FutureCrossAttnBranch: future prediction via cross-attention + DiT diffusion decoder
+in projected VLM feature space (x_channel = z_channel, not pixel space).
 
-Architecture (aligned with ReconVLA + Seer):
+Architecture:
 
   learnable future_query_tokens  (1, N_f, D)   [N_f = num_views × num_obs_tokens]
               │
@@ -11,16 +12,18 @@ Architecture (aligned with ReconVLA + Seer):
       │
       ├── → appended to vl_embs for GR00T cross-attention   [action conditioning]
       │
-      └── FutureDiffusionDecoder (per view, ReconVLA-style DiT)  [future supervision]
+      └── FutureDiffusionDecoder (per view, VLM feature-space DiT)  [future supervision]
             ln_pre: LayerNorm(D)
-            condition_proj: Linear(D, z_channel)
-            rearrange → (B, z_channel, grid_h, grid_w)       [2D spatial cond map]
+            condition_proj: Linear(D, z_channel)       [SHARED for condition AND target]
+            rearrange → (B, z_channel, grid_h, grid_w) [2D spatial feature map]
             ReconDenoiser (DiT DDPM, cosine schedule)
-              denoises (B, 3, target_res, target_res) in pixel space
-            MSE-like DDPM loss vs future_rgb resized to target_res
+              denoises (B, z_channel, grid_h, grid_h) in projected VLM feature space
+            DDPM loss vs GT future_vlm_feat projected through same condition_proj
+
+Condition and target share condition_proj → DiT operates in one unified semantic space.
+At convergence future_tokens ≈ vl_feat, so condition ≈ target (ideal for diffusion).
 
 Constraint: num_obs_tokens must be a perfect square (e.g. 49 = 7×7).
-target_res = sqrt(num_obs_tokens) = 7 (coarse future state representation).
 """
 from __future__ import annotations
 
@@ -30,7 +33,6 @@ from typing import List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 
 from starVLA.model.modules.uamvla.components.denoiser.scheduler import ReconDenoiser
@@ -43,19 +45,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class FutureDiffusionDecoder(nn.Module):
-    """Decode per-view future query tokens into a future RGB frame via DiT DDPM.
+    """Decode per-view future query tokens into projected VLM features via DiT DDPM.
 
-    Conditioning pipeline (mirrors ReconHead._spatial_condition):
-      obs_tokens (B, N, D)
+    Condition and target share condition_proj so the DiT operates in one unified
+    z_channel-dimensional projected semantic feature space (not pixel space).
+
+    Pipeline:
+      obs_tokens (B, N, D)           [predicted future tokens from cross-attn]
         → ln_pre: LayerNorm(D, no learnable params)
-        → condition_proj: Linear(D, z_channel)
-        → rearrange to (B, z_channel, grid_h, grid_w)   [2D spatial cond]
-        → ReconDenoiser: DiT denoises (B, 3, target_res, target_res)
+        → condition_proj: Linear(D, z_channel)   ← SHARED with target projection
+        → rearrange to (B, z_channel, grid_h, grid_w)   [2D spatial cond map]
+        → ReconDenoiser: DiT denoises (B, z_channel, grid_h, grid_h)
+
+      GT target: Qwen ViT tokens (B, N, D)
+        → same ln_pre + condition_proj
+        → rearrange to (B, z_channel, grid_h, grid_h)   [2D spatial target map]
 
     Args:
         d_model:        LLM hidden dimension.
         num_obs_tokens: Tokens for this view (must be a perfect square).
-        z_channel:      Projection dimension for the DiT condition.
+        z_channel:      Projection dim shared by condition and target (= DiT x_channel).
         dit_embed_dim:  DiT transformer hidden size.
         dit_depth:      Number of DiT blocks.
         future_weight:  Loss weight applied to the DDPM loss.
@@ -90,13 +99,15 @@ class FutureDiffusionDecoder(nn.Module):
         self.ln_pre = nn.LayerNorm(d_model, elementwise_affine=False)
         self.condition_proj = nn.Linear(d_model, z_channel)
 
-        # DiT DDPM denoiser — pixel space, x_channel=3 (RGB).
+        # DiT DDPM denoiser — projected VLM feature space, x_channel=z_channel.
+        # Condition and target both live in the same z_channel-dim space (shared proj),
+        # so x_channel == z_channel by design.
         self.denoiser = ReconDenoiser(
-            x_channel=3,
+            x_channel=z_channel,        # feature space, not RGB (was 3)
             z_channel=z_channel,
             embed_dim=dit_embed_dim,
             depth=dit_depth,
-            n_patches=num_obs_tokens,   # DiT input_size = sqrt(49) = 7
+            n_patches=num_obs_tokens,   # DiT spatial grid = sqrt(num_obs_tokens)
             timesteps=dit_timesteps,
         )
 
@@ -108,36 +119,36 @@ class FutureDiffusionDecoder(nn.Module):
         return rearrange(z, "b (h w) c -> b c h w", h=self.grid_h)
 
     def compute_loss(
-        self, obs_tokens: torch.Tensor, future_rgb: torch.Tensor
+        self, obs_tokens: torch.Tensor, future_vlm_feat: torch.Tensor
     ) -> torch.Tensor:
-        """DDPM training loss for one camera view.
+        """VLM feature-space DDPM training loss for one camera view.
+
+        Condition (from predicted future tokens) and target (from Qwen ViT GT) both
+        pass through the shared condition_proj → same z_channel space → no mismatch.
 
         Args:
-            obs_tokens: (B, num_obs_tokens, D) — future query tokens for this view.
-            future_rgb: (B, 3, H, W) float in [0, 1] — ground-truth future frame.
+            obs_tokens:      (B, num_obs_tokens, D) — predicted future tokens from cross-attn.
+            future_vlm_feat: (B, num_obs_tokens, D) — GT VLM tokens from frozen Qwen ViT.
         Returns:
             Scalar loss (future_weight × mean DDPM loss).
         """
-        z = self._prepare_condition(obs_tokens)          # (B, z_channel, 7, 7)
-        # Resize to target_res and rescale [0,1] → [-1,1] for DDPM.
-        target = F.interpolate(
-            future_rgb.float(), (self.target_res, self.target_res), mode="bilinear", align_corners=False
-        )
-        target = target * 2.0 - 1.0                     # → [-1, 1]
-        target = target.to(z.dtype)
-        loss = self.denoiser(z=z, target=target).mean()  # ReconDenoiser returns (B,) losses
+        z = self._prepare_condition(obs_tokens)                             # (B, z_channel, 7, 7)
+        # Project GT VLM features through the same condition_proj (shared weights).
+        target = self.condition_proj(self.ln_pre(future_vlm_feat.to(z.dtype)))  # (B, N, z_channel)
+        target = rearrange(target, "b (h w) c -> b c h w", h=self.grid_h)  # (B, z_channel, 7, 7)
+        target = target.detach()
+        loss = self.denoiser(z=z, target=target).mean()
         return self.future_weight * loss
 
     @torch.no_grad()
     def sample(self, obs_tokens: torch.Tensor) -> torch.Tensor:
-        """Sample a future RGB frame via DDPM reverse diffusion.
+        """Sample a future projected VLM feature map via DDPM reverse diffusion.
 
         Returns:
-            (B, 3, target_res, target_res) float in [0, 1].
+            (B, z_channel, grid_h, grid_h) — denoised projected VLM feature map.
         """
         z = self._prepare_condition(obs_tokens)
-        sampled = self.denoiser.sample(z)                # (B, 3, 7, 7) in [-1, 1]
-        return (sampled / 2.0 + 0.5).clamp(0.0, 1.0)
+        return self.denoiser.sample(z)   # (B, z_channel, grid_h, grid_h)
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +248,14 @@ class FutureCrossAttnBranch(nn.Module):
 
         logger.info(
             "[FutureCrossAttnBranch] N_f=%d  num_views=%d  num_obs_tokens=%d  "
-            "target_res=%dx%d  z_channel=%d  dit_embed_dim=%d  dit_depth=%d",
+            "feat_grid=%dx%d  z_channel=%d  dit_embed_dim=%d  dit_depth=%d  "
+            "(VLM feature-space DDPM, x_channel=z_channel=%d)  "
+            "state_proj=%s (state_dim=%d)",
             self.n_f, num_views, num_obs_tokens,
-            self.diff_decoders[0].target_res, self.diff_decoders[0].target_res,
-            z_channel, dit_embed_dim, dit_depth,
+            self.diff_decoders[0].grid_h, self.diff_decoders[0].grid_h,
+            z_channel, dit_embed_dim, dit_depth, z_channel,
+            "enabled" if self.state_proj is not None else "DISABLED",
+            state_dim,
         )
 
     # ------------------------------------------------------------------
@@ -280,14 +295,16 @@ class FutureCrossAttnBranch(nn.Module):
     ) -> torch.Tensor:
         """Zero-weight dummy loss to keep ZeRO-3 parameter collectives aligned.
 
-        Touches every diff_decoder parameter so all ranks participate in the
-        allgather even when there are no future-rgb supervision targets.
+        Touches condition_proj, ln_pre, AND denoiser parameters so all ranks
+        participate in allgather even when there are no VLM feature supervision targets.
         """
         dummy = future_tokens.new_zeros(())
         for v, dec in enumerate(self.diff_decoders):
             obs_v = future_tokens[:1, v * self.num_obs_tokens:(v + 1) * self.num_obs_tokens]
-            z = dec._prepare_condition(obs_v)
-            dummy = dummy + z.sum() * 0.0
+            z = dec._prepare_condition(obs_v)            # touches condition_proj + ln_pre
+            dummy_target = z.detach().clone()
+            denoiser_out = dec.denoiser(z=z, target=dummy_target)  # touches all DiT params
+            dummy = dummy + denoiser_out.mean() * 0.0
         return dummy
 
     # ------------------------------------------------------------------
@@ -310,33 +327,34 @@ class FutureCrossAttnBranch(nn.Module):
         batch: dict,
         hist_tokens: torch.Tensor | None = None,
         state: torch.Tensor | None = None,
+        future_vlm_features: List[torch.Tensor] | None = None,
     ):
-        """Training path: compute future_tokens and DiT DDPM future prediction loss.
+        """Training path: compute future_tokens and VLM feature-space DiT DDPM loss.
 
         Args:
-            hidden:      Qwen last hidden states (B, seq_len, D).
-            batch:       Must contain ``"future_rgb"`` — list[Tensor(B,3,H,W)] in [0,1],
-                         one entry per view, in the same order as the camera views.
-                         If absent, returns a zero-weight dummy loss.
-            hist_tokens: Optional (B, T_hist, D) from HistoryVisionEncoder.
-            state:       Optional robot state (B, state_dim) or (B, 1, state_dim).
+            hidden:               Qwen last hidden states (B, seq_len, D).
+            batch:                Collated batch dict (used for dummy-loss fallback).
+            hist_tokens:          Optional (B, T_hist, D) from HistoryVisionEncoder.
+            state:                Optional robot state (B, state_dim) or (B, 1, state_dim).
+            future_vlm_features:  list[Tensor(B, num_obs_tokens, D)] — GT VLM tokens from
+                                  frozen Qwen ViT, one entry per view.  If None or empty,
+                                  returns a zero-weight dummy loss.
 
         Returns:
             future_tokens: (B, N_f, D) — appended to vl_embs for GR00T.
-            future_loss:   Scalar DDPM loss (0.0 if no targets present).
+            future_loss:   Scalar DDPM loss (0.0 if no VLM feature targets present).
         """
         kv = self._build_kv(hidden, hist_tokens, state)
         future_tokens = self._cross_attend(kv)          # (B, N_f, D)
 
-        future_rgb_list: List[torch.Tensor] | None = batch.get("future_rgb", None)
-        if future_rgb_list is None or len(future_rgb_list) == 0:
+        if future_vlm_features is None or len(future_vlm_features) == 0:
             return future_tokens, self._dummy_loss(future_tokens)
 
         total_loss = future_tokens.new_zeros(())
         for v, dec in enumerate(self.diff_decoders):
             obs_v = future_tokens[:, v * self.num_obs_tokens:(v + 1) * self.num_obs_tokens]
-            target_v = future_rgb_list[v].to(hidden.device, hidden.dtype)
-            total_loss = total_loss + dec.compute_loss(obs_v, target_v)
+            feat_v = future_vlm_features[v].to(hidden.device, hidden.dtype)
+            total_loss = total_loss + dec.compute_loss(obs_v, feat_v)
 
         return future_tokens, total_loss / self.num_views
 

@@ -228,7 +228,7 @@ class UamVLAOFT(Qwenvl_OFT):
         """
         from starVLA.model.modules.uamvla.aux_heads.pose_head import PoseHead
 
-        cfg_heads = self.config.framework.aux_heads
+        cfg_heads = self.config.framework.get("aux_heads", {})
         hidden_size = self.qwen_vl_interface.model.config.hidden_size
         layout = self._qwen_vision_layout()
 

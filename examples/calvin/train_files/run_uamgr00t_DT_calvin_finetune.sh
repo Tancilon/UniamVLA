@@ -6,9 +6,9 @@
 #   # Resume from checkpoint:
 #   bash run_uamgr00t_DT_calvin_finetune.sh --trainer.is_resume true
 #
-#   # Load pretrained weights (Seer two-stage):
+#   # Override the pretrained weight configured in the YAML:
 #   bash run_uamgr00t_DT_calvin_finetune.sh \
-#     --trainer.resume_from_checkpoint results/Checkpoints/uamvla_gr00t_dt_calvin_pretrain/checkpoint_50000
+#     --trainer.pretrained_checkpoint /path/to/pytorch_model.pt
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${SCRIPT_DIR}/run_uamgr00t_DT_calvin_finetune.yaml"
 

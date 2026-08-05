@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -129,10 +129,18 @@ class CalvinPolicyClient:
         self.replan_steps = replan_steps
         self.step_count = 0
         self.train_renderer = train_renderer
-        self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(
-            getattr(self.client, "model_config", None)
-        )
+        model_config = getattr(self.client, "model_config", None)
+        self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(model_config)
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
+        self.send_uamvla_gr00t_raw_state = self._client_uses_uamvla_gr00t_raw_state(self.client)
+        self._uamvla_gr00t_dt_num_history_frames = self._gr00t_dt_num_history_frames_from_config(model_config)
+        self.send_uamvla_gr00t_dt_history = (
+            self._client_uses_uamvla_gr00t_dt(self.client)
+            and self._uamvla_gr00t_dt_num_history_frames > 0
+        )
+        self._uamvla_gr00t_dt_image_history = deque(
+            maxlen=self._uamvla_gr00t_dt_num_history_frames
+        )
         self._uamvla_gr00t_state_norm_mode = None
         self._uamvla_gr00t_state_stat_a = None
         self._uamvla_gr00t_state_stat_b = None
@@ -171,6 +179,32 @@ class CalvinPolicyClient:
         except (TypeError, ValueError):
             state_dim = 0
         return framework_name in {"UamGR00T", "UamVLAGR00T"} and state_dim >= len(indices)
+
+    @classmethod
+    def _client_uses_uamvla_gr00t_raw_state(cls, client) -> bool:
+        config = getattr(client, "model_config", None)
+        framework_name = cls._nested_config_get(config, "framework", "name")
+        state_dim = cls._nested_config_get(config, "framework", "action_model", "state_dim")
+        indices = cls._gr00t_state_indices_from_config(config)
+        try:
+            state_dim = int(state_dim or 0)
+        except (TypeError, ValueError):
+            state_dim = 0
+        return framework_name == "UamGR00T_DT" and state_dim >= len(indices)
+
+    @classmethod
+    def _client_uses_uamvla_gr00t_dt(cls, client) -> bool:
+        config = getattr(client, "model_config", None)
+        return cls._nested_config_get(config, "framework", "name") == "UamGR00T_DT"
+
+    @classmethod
+    def _gr00t_dt_num_history_frames_from_config(cls, config) -> int:
+        history_frames = cls._nested_config_get(config, "framework", "history_frames")
+        try:
+            history_frames = int(history_frames or 0)
+        except (TypeError, ValueError):
+            history_frames = 0
+        return max(history_frames - 1, 0)
 
     @classmethod
     def _gr00t_state_indices_from_config(cls, config) -> list[int]:
@@ -305,27 +339,19 @@ class CalvinPolicyClient:
             )
         return normalized.reshape(1, len(self._uamvla_gr00t_state_indices))
 
-    def reset(self):
+    def reset(self, clear_history: bool = True):
         """Reset action plan buffer."""
         self.step_count = 0
+        if clear_history:
+            self._uamvla_gr00t_dt_image_history.clear()
 
-    def step(self, obs: dict, lang_annotation: str) -> np.ndarray:
-        """
-        Query policy for action given observation and language instruction.
+    @staticmethod
+    def _copy_image_pair(image_pair: list[np.ndarray]) -> list[np.ndarray]:
+        return [np.array(image, copy=True) for image in image_pair]
 
-        Args:
-            obs: Calvin observation dict with keys:
-                - rgb_obs: dict with 'rgb_static' (200x200x3) and 'rgb_gripper' (84x84x3)
-                - robot_obs: (15,) proprioceptive state [ee_pos(3), ee_ori(3), gripper(2), joint_pos(7)]
-            lang_annotation: Natural language task description
-            get_action: If True, query model for new action chunk
-
-        Returns:
-            action: (7,) array [dx, dy, dz, droll, dpitch, dyaw, gripper]
-        """
-        # Prefer the training-time CALVIN renderer path for UamVLA checkpoints:
-        # render both views at 256x256, then let the backbone perform the only
-        # resize to Qwen3-VL's 640x640 target.
+    def _get_calvin_images(self, obs: dict) -> list[np.ndarray]:
+        # Keep the current-frame image path in one place so image and history use
+        # identical preprocessing.
         if self.train_renderer is not None:
             rendered = self.train_renderer.render_cameras(
                 width=self.resize_size,
@@ -343,14 +369,61 @@ class CalvinPolicyClient:
             wrist_image = image_tools.convert_to_uint8(
                 image_tools.resize_with_pad(rgb_gripper, self.resize_size, self.resize_size)
             )
+        return [image, wrist_image]
+
+    def _uamvla_gr00t_dt_history_for_example(
+        self,
+        current_images: list[np.ndarray],
+    ) -> list[list[np.ndarray]]:
+        num_history_frames = self._uamvla_gr00t_dt_num_history_frames
+        history = list(self._uamvla_gr00t_dt_image_history)
+        if not history:
+            return [
+                self._copy_image_pair(current_images)
+                for _ in range(num_history_frames)
+            ]
+
+        if len(history) < num_history_frames:
+            pad = [
+                self._copy_image_pair(history[0])
+                for _ in range(num_history_frames - len(history))
+            ]
+            history = pad + history
+        return [self._copy_image_pair(frame) for frame in history]
+
+    def _append_uamvla_gr00t_dt_history(self, current_images: list[np.ndarray]) -> None:
+        self._uamvla_gr00t_dt_image_history.append(self._copy_image_pair(current_images))
+
+    def step(self, obs: dict, lang_annotation: str) -> np.ndarray:
+        """
+        Query policy for action given observation and language instruction.
+
+        Args:
+            obs: Calvin observation dict with keys:
+                - rgb_obs: dict with 'rgb_static' (200x200x3) and 'rgb_gripper' (84x84x3)
+                - robot_obs: (15,) proprioceptive state [ee_pos(3), ee_ori(3), gripper(2), joint_pos(7)]
+            lang_annotation: Natural language task description
+            get_action: If True, query model for new action chunk
+
+        Returns:
+            action: (7,) array [dx, dy, dz, droll, dpitch, dyaw, gripper]
+        """
+        current_images = self._get_calvin_images(obs)
 
         # Prepare input for policy server (aligned with eval_libero)
         example = {
-            "image": [image, wrist_image],
+            "image": current_images,
             "lang": lang_annotation,
         }
-        if self.send_uamvla_gr00t_state:
+        if self.send_uamvla_gr00t_raw_state:
+            example["state"] = self._extract_raw_uamvla_gr00t_state(
+                obs,
+                self._uamvla_gr00t_state_indices,
+            )
+        elif self.send_uamvla_gr00t_state:
             example["state"] = self._extract_uamvla_gr00t_state(obs)
+        if self.send_uamvla_gr00t_dt_history:
+            example["image_history"] = self._uamvla_gr00t_dt_history_for_example(current_images)
 
         # Spec parallel of LIBERO state-passthrough: hand the inner ModelClient
         # the raw 15-D CALVIN robot_obs only when ModelClient successfully
@@ -365,6 +438,8 @@ class CalvinPolicyClient:
 
         # Query model
         model_output = self.client.step(example=example, step=self.step_count)
+        if self.send_uamvla_gr00t_dt_history:
+            self._append_uamvla_gr00t_dt_history(current_images)
         raw_action = model_output["raw_action"]
         world_vector = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
         rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
@@ -530,6 +605,7 @@ def evaluate_sequence(
     """
     robot_obs, scene_obs = get_env_state_for_initial_condition(initial_state)
     env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
+    policy.reset(clear_history=True)
 
     success_counter = 0
     if debug:
@@ -608,7 +684,7 @@ def rollout(
     lang_annotation = lang_annotation.split("\n")[0]
     if "\u2019" in lang_annotation:
         lang_annotation.replace("\u2019", "'")
-    policy.reset()
+    policy.reset(clear_history=robot_obs is not None and scene_obs is not None)
     start_info = env.get_info()
 
     if debug:

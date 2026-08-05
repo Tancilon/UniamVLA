@@ -239,6 +239,14 @@ DATASET_NAMED_MIXTURES = {
         ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_dt_k10"),
     ],
 
+    # K=14 counterpart used when finetuning the K=14 pretrained architecture
+    # without changing its temporal parameter shapes.
+    "calvin_abc_dt_k14": [
+        ("task_ABC_D_scene_A_lerobot_lt", 1.0, "calvin_dt_k14"),
+        ("task_ABC_D_scene_B_lerobot_lt", 1.0, "calvin_dt_k14"),
+        ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_dt_k14"),
+    ],
+
     # Pretrain mix: CALVIN play data (no language annotations), K=14.
     # Expects datasets/task_ABC_D_play_lerobot (or similar play split).
     # Language field will be empty string; trainer should set loss_scale.vla=0

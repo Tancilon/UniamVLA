@@ -13,7 +13,7 @@ Future branch runs *after* Qwen encoding:
 
 Key differences from UamGR00T_LT:
   - No auxhead design (no _maybe_build_aux_heads, no duplicate image blocks).
-  - Future supervision is pixel-space (Seer-style MAE decoder), not VAE latent.
+  - Future supervision is not VAE latent.
   - Historical context via a separate lightweight HistoryVisionEncoder.
 
 Dataloader contract:
@@ -29,6 +29,7 @@ from typing import List
 
 import numpy as np
 import torch
+from PIL import Image as PILImage
 
 from starVLA.model.framework.VLM4A.UamGR00T import UamVLAGR00T
 from starVLA.model.modules.uamvla.components.future_cross_attn import FutureCrossAttnBranch
@@ -164,12 +165,86 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             return None
         return self.history_encoder(hist, device=device, dtype=dtype)
 
+    @torch.no_grad()
+    def _encode_future_vlm_features(
+        self,
+        future_rgb_list: List[torch.Tensor] | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> List[torch.Tensor] | None:
+        """Encode future frames through Qwen's frozen ViT → VLM patch tokens.
+
+        Runs only the visual encoder (not the full LLM), so the cost is much
+        lower than a full _encode_qwen_hidden forward pass.
+
+        Args:
+            future_rgb_list: list of (B, 3, H, W) float tensors in [0, 1], one per view.
+                             None or empty → returns None.
+            device, dtype:   Target device/dtype for the returned tensors.
+
+        Returns:
+            list of (B, num_obs_tokens, D_llm) tensors, one per view; or None.
+        """
+        if not future_rgb_list:
+            return None
+
+        B = future_rgb_list[0].shape[0]
+        num_obs = self.future_branch.num_obs_tokens
+        results: List[torch.Tensor] = []
+
+        for rgb in future_rgb_list:                     # (B, 3, H, W), float [0, 1]
+            # Tensor → list of PIL images (processor expects PIL or numpy).
+            rgb_u8 = (rgb.detach().cpu().clamp(0.0, 1.0) * 255).byte()
+            pil_imgs = [
+                PILImage.fromarray(rgb_u8[i].permute(1, 2, 0).numpy())
+                for i in range(B)
+            ]
+
+            # Qwen image processor → pixel_values + image_grid_thw.
+            proc_out = self.qwen_vl_interface.processor.image_processor(
+                images=pil_imgs, return_tensors="pt"
+            )
+            pixel_values = proc_out["pixel_values"].to(device=device, dtype=dtype)
+            image_grid_thw = proc_out["image_grid_thw"].to(device=device)
+
+            # Forward through frozen Qwen visual tower only (no LLM layers).
+            vl_out = self.qwen_vl_interface.model.visual(
+                pixel_values, grid_thw=image_grid_thw
+            )
+            # model.visual may return a raw tensor or a BaseModelOutput / tuple.
+            if isinstance(vl_out, torch.Tensor):
+                vl_tokens = vl_out
+            elif hasattr(vl_out, "last_hidden_state"):
+                vl_tokens = vl_out.last_hidden_state
+            else:
+                vl_tokens = vl_out[0]
+            # vl_tokens: (B * tokens_per_frame, D_llm)
+
+            tokens_per_frame = vl_tokens.shape[0] // B
+            if tokens_per_frame != num_obs:
+                raise RuntimeError(
+                    f"_encode_future_vlm_features: expected {num_obs} tokens/frame "
+                    f"(future_branch.num_obs_tokens={num_obs}), "
+                    f"got {tokens_per_frame}.  "
+                    f"Adjust num_obs_tokens in config or check Qwen image preprocessing."
+                )
+
+            results.append(vl_tokens.view(B, num_obs, -1).to(dtype=dtype))
+
+        return results
+
     # ------------------------------------------------------------------
     #  Training forward
     # ------------------------------------------------------------------
 
     def forward(self, examples: List[dict], **kwargs) -> dict:
-        """Training forward: GR00T action loss + Seer future pixel reconstruction loss."""
+        """Training forward: future VLM feature DDPM loss + (optionally) GR00T action loss.
+
+        When action_model is frozen (freeze_modules: "action_model" in pretrain config),
+        action_loss is logged but excluded from backward to prevent noisy gradients from
+        the uninitialised DiT polluting the Qwen backbone.  During finetune the action_model
+        is unfrozen and action_loss is re-included automatically.
+        """
         examples = self._prepare_examples(examples)
         examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
 
@@ -182,9 +257,13 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         state = self._state_batch_or_none(examples, device, dtype)
         state_for_future = state[:, 0, :] if state is not None else None  # (B, state_dim)
 
-        # --- Future branch: tokens + pixel loss ---
+        # --- Future branch: tokens + VLM feature-space DDPM loss ---
         batch_dict = self._collate_aux(examples, qwen_inputs)
-        batch_dict["future_rgb"] = self._collect_future_rgb(examples, device, dtype)
+        future_rgb_list = self._collect_future_rgb(examples, device, dtype)
+        batch_dict["future_rgb"] = future_rgb_list
+
+        # Encode future frames through frozen Qwen ViT → VLM feature targets.
+        future_vlm_feat = self._encode_future_vlm_features(future_rgb_list, device, dtype)
 
         with torch.autocast("cuda", dtype=torch.float32):
             future_tokens, future_loss = self.future_branch.compute_loss(
@@ -192,6 +271,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
                 batch=batch_dict,
                 hist_tokens=hist_tokens,
                 state=state_for_future,
+                future_vlm_features=future_vlm_feat,
             )
 
         # --- Extend vl_embs with future tokens for GR00T ---
@@ -237,7 +317,14 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             "action_loss_fm": action_loss.detach(),
             "future_recon_loss": future_loss.detach(),
         }
-        total = action_loss + future_loss
+
+        # When action_model is frozen (pretrain), exclude its loss from backward to
+        # prevent noisy gradients from the uninitialised DiT polluting the backbone.
+        # freeze_modules sets requires_grad=False on all action_model params; we detect
+        # this here so the pretrain→finetune transition requires no config change.
+        action_model_trainable = any(p.requires_grad for p in self.action_model.parameters())
+        total = (action_loss + future_loss) if action_model_trainable else future_loss
+
         return {"action_loss": total, **log_metrics}
 
     # ------------------------------------------------------------------

@@ -1,16 +1,16 @@
 # Seer-aligned finetune config for UamGR00T_DT on CALVIN ABC.
 #
-# Matches Seer's finetune setting:
-#   sequence_length = 10  (history_frames = 10)
-#   future_steps    = 3   (future_offset = 3, per CalvinDT_K10DataConfig)
+# K=14 full-architecture finetune setting:
+#   history frames  = 14  (kept identical to the pretrained model)
+#   future_steps    = 3   (future_offset = 3, per CalvinDT_K14DataConfig)
 #   action chunk    = 3   (action_horizon = 3)
 #   exec horizon    = 1   (predict 3 steps, execute only 1 before re-query)
 #   dual camera     = primary_image + wrist_image
 #
 # Prerequisite: run pretrain config first, then load pretrained checkpoint
-# via --trainer.resume_from_checkpoint <path>.
+# through trainer.pretrained_checkpoint.
 run_id: uamvla_gr00t_dt_calvin_abc_finetune
-run_root_dir: results/Checkpoints
+run_root_dir: playground/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
 wandb_project: uamvla
@@ -23,11 +23,11 @@ framework:
   obs_image_size: [224, 224]
   qwen_image_size: 224
 
-  # K=10 history frames (Seer finetune sequence_length=10).
-  # HistoryVisionEncoder encodes the K-1=9 past frames.
-  history_frames: 10
+  # Keep the complete temporal architecture identical to pretraining.
+  # HistoryVisionEncoder encodes the K-1=13 past frames.
+  history_frames: 14
   history_encoder:
-    num_latents: 10
+    num_latents: 16
     resampler_depth: 3
     freeze_qwen_vit: true
 
@@ -35,13 +35,15 @@ framework:
   # to match Seer's inference behavior (re-query at every step).
   exec_horizon: 1
 
+  aux_heads: {}
+
   future_branch:
     num_obs_tokens: 49          # 7x7 spatial grid per view
     num_cross_attn_layers: 2
-    num_heads: 8
-    future_weight: 0.5
-    z_channel: 512
-    dit_embed_dim: 512
+    num_heads: 16
+    future_weight: 1.0
+    z_channel: 1024
+    dit_embed_dim: 1024
     dit_depth: 3
     dit_timesteps: "1000"
 
@@ -84,8 +86,8 @@ datasets:
     dataset_py: lerobot_datasets
 
     data_root_dir: datasets
-    # Calvin ABC language data with K=10 history + future_rgb at t+3.
-    data_mix: calvin_abc_dt_k10
+    # Calvin ABC language data with K=14 history + future_rgb at t+3.
+    data_mix: calvin_abc_dt_k14
 
     include_state: true
     gr00t_state_indices: [0, 1, 2, 3, 4, 5, 7]
@@ -108,16 +110,20 @@ datasets:
     # DT multi-frame signals read by _pack_sample:
     # num_history_frames controls how many past frames to extract from the
     # combined delta_indices window; future_offset marks the future target.
-    num_history_frames: 9       # = history_frames - 1 = K-1
+    num_history_frames: 13      # = history_frames - 1 = K-1
     future_offset: 3            # t+3 frame → future_rgb
 
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
 
-    per_device_batch_size: 4    # reduced from 8 due to larger context (K=10)
+    per_device_batch_size: 4
     load_all_data_for_training: true
     video_backend: torchvision_av
 
 trainer:
+  # Load model weights only and start a new finetuning run from step 0.
+  pretrained_checkpoint: /inspire/hdd/global_user/heyu-240108120071/dengqi/UniamVLA/playground/Checkpoints/uamvla_gr00t_dt_calvin_pretrain/final_model/pytorch_model.pt
+  is_resume: false
+
   max_train_steps: 100000
   num_warmup_steps: 5000
   save_interval: 10000
