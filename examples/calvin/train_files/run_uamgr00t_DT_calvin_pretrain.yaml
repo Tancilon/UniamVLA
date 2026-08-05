@@ -28,60 +28,38 @@ framework:
   obs_image_size: [224, 224]
   qwen_image_size: 224
 
-  # K=14 history frames (Seer pretrain sequence_length=14).
+  # history_frames: total frames fed to Qwen as multi-image input (K-1 history + 1 current).
+  # Qwen's native causal attention provides temporal context — no separate history encoder.
   history_frames: 14
-  history_encoder:
-    num_latents: 16
-    resampler_depth: 3
-    freeze_qwen_vit: true
 
   exec_horizon: 1
+
+  use_temporal_markers: false   # set true to enable per-frame labels in Qwen prompt
 
   # DT does not use the LT-style aux_heads; empty dict avoids KeyError in
   # _maybe_build_aux_heads() inherited from UamVLAOFT.
   aux_heads: {}
 
-  future_branch:
-    num_obs_tokens: 49
-    num_cross_attn_layers: 2
-    num_heads: 16
+  # SeerJointDecoder: unified self-attn + Seer block mask (replaces future_branch + action_model).
+  seer_joint_decoder:
+    # Future reconstruction (MAE ViT decoder)
+    num_obs_tokens: 9
     future_weight: 1.0          # upweight future recon during pretrain
-    z_channel: 1024
-    dit_embed_dim: 1024
-    dit_depth: 3
-    dit_timesteps: "1000"
+    patch_size: 16
+    decoder_dim: 2048
+    num_decoder_heads: 16
+    num_decoder_blocks: 2
 
-  qwenvl:
-    base_vlm: ./ckpt/Qwen3-VL-4B-Instruct
-    attn_implementation: flash_attention_2
-    vl_hidden_dim: 2048
-    enable_gradient_checkpointing: true
+    # Joint self-attention (Seer block mask)
+    num_joint_layers: 2
+    num_heads: 16
 
-  action_model:
-    action_model_type: DiT-B
-    action_hidden_dim: 1024
-    hidden_size: 1024
-    add_pos_embed: true
-    max_seq_len: 1024
+    # Action prediction (MLP decoder)
     action_dim: 7
     state_dim: 7
     action_horizon: 3
-    future_action_window_size: 2
-    past_action_window_size: 0
-    repeated_diffusion_steps: 8
-    noise_beta_alpha: 1.5
-    noise_beta_beta: 1.0
-    noise_s: 0.999
-    num_timestep_buckets: 1000
-    num_inference_timesteps: 4
-    num_target_vision_tokens: 32
-    diffusion_model_cfg:
-      dropout: 0.2
-      final_dropout: true
-      interleave_self_attention: true
-      norm_type: ada_norm
-      num_layers: 16
-      positional_embeddings: null
+    hidden_dim: 1024
+    gripper_loss_ratio: 0.01
 
   reduce_in_full_precision: true
 
@@ -132,26 +110,17 @@ trainer:
   eval_interval: 100
 
   learning_rate:
-    base: 2.5e-05               # remaining params (embedding layers, etc.)
-    qwen_vl_interface: 1.0e-05  # pretrained backbone → small LR
-    future_branch: 1.0e-04           # randomly initialised new head → higher LR
-    history_encoder.resampler: 1.0e-04  # only the new PerceiverResampler params;
-                                        # history_encoder._visual shares weights with
-                                        # qwen_vl_interface → using "history_encoder"
-                                        # directly causes duplicate param group error
-    # action_model omitted: frozen during pretrain (see freeze_modules below)
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    future_branch: 1.0e-04
+    action_model: 1.0e-04      # Seer: pretrain trains action head jointly with future branch
 
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06
 
-  # Freeze the action model during pretrain; its DiT weights are uninitialised
-  # noise relative to the future-reconstruction objective. train_starvla.py's
-  # build_param_lr_groups() honours this field and excludes these params from
-  # the optimizer, saving ~157 M × 12 bytes of optimizer state.
-  # NOTE: loss_scale.vla has no effect in the current trainer (train_starvla.py
-  # does not apply loss_scale multipliers); freezing is the correct mechanism.
-  freeze_modules: "action_model"
+  # Seer-aligned: pretrain trains both future reconstruction and action jointly.
+  freeze_modules: ""
 
   loss_scale:
     # NOTE: loss_scale.{vla,vlm} are NOT applied by train_starvla.py's

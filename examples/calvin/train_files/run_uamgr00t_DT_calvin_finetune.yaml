@@ -23,61 +23,41 @@ framework:
   obs_image_size: [224, 224]
   qwen_image_size: 224
 
-  # Keep the complete temporal architecture identical to pretraining.
-  # HistoryVisionEncoder encodes the K-1=13 past frames.
-  history_frames: 14
-  history_encoder:
-    num_latents: 16
-    resampler_depth: 3
-    freeze_qwen_vit: true
+  # history_frames: total frames fed to Qwen as multi-image input (K-1 history + 1 current).
+  # Seer finetune.sh: sequence_length=10, window_size=13 → K=10 to match.
+  history_frames: 10
 
   # exec_horizon=1: predict 3-step chunk but return only 1 step per query
   # to match Seer's inference behavior (re-query at every step).
   exec_horizon: 1
 
+  # use_temporal_markers: insert "Frame t-9:", ..., "Current frame:" labels
+  # between image groups in the Qwen prompt for prompt-based timestep structure.
+  # Default false; set true to experiment with Seer-style temporal conditioning.
+  use_temporal_markers: false
+
   aux_heads: {}
 
-  future_branch:
-    num_obs_tokens: 49          # 7x7 spatial grid per view
-    num_cross_attn_layers: 2
-    num_heads: 16
+  # SeerJointDecoder: unified self-attn + Seer block mask (replaces future_branch + action_model).
+  seer_joint_decoder:
+    # Future reconstruction (MAE ViT decoder)
+    num_obs_tokens: 9            # 3×3 semantic tokens per view
     future_weight: 1.0
-    z_channel: 1024
-    dit_embed_dim: 1024
-    dit_depth: 3
-    dit_timesteps: "1000"
+    patch_size: 16               # 14×14 = 196 target patches
+    decoder_dim: 2048
+    num_decoder_heads: 16
+    num_decoder_blocks: 2
 
-  qwenvl:
-    base_vlm: ./ckpt/Qwen3-VL-4B-Instruct
-    attn_implementation: flash_attention_2
-    vl_hidden_dim: 2048
-    enable_gradient_checkpointing: true
+    # Joint self-attention (Seer block mask)
+    num_joint_layers: 2          # depth of the joint transformer
+    num_heads: 16
 
-  action_model:
-    action_model_type: DiT-B
-    action_hidden_dim: 1024
-    hidden_size: 1024
-    add_pos_embed: true
-    max_seq_len: 1024
+    # Action prediction (MLP decoder)
     action_dim: 7
     state_dim: 7
-    action_horizon: 3           # Seer action_pred_steps=3
-    future_action_window_size: 2
-    past_action_window_size: 0
-    repeated_diffusion_steps: 8
-    noise_beta_alpha: 1.5
-    noise_beta_beta: 1.0
-    noise_s: 0.999
-    num_timestep_buckets: 1000
-    num_inference_timesteps: 4
-    num_target_vision_tokens: 32
-    diffusion_model_cfg:
-      dropout: 0.2
-      final_dropout: true
-      interleave_self_attention: true
-      norm_type: ada_norm
-      num_layers: 16
-      positional_embeddings: null
+    action_horizon: 3            # Seer action_pred_steps=3
+    hidden_dim: 1024
+    gripper_loss_ratio: 0.01     # Seer train_utils.py:165
 
   reduce_in_full_precision: true
 
@@ -86,8 +66,9 @@ datasets:
     dataset_py: lerobot_datasets
 
     data_root_dir: datasets
-    # Calvin ABC language data with K=14 history + future_rgb at t+3.
-    data_mix: calvin_abc_dt_k14
+    # Calvin ABC language data with K=10 history + future_rgb at t+3.
+    # Seer finetune: sequence_length=10 (window_size=13 = K + future_steps).
+    data_mix: calvin_abc_dt_k10
 
     include_state: true
     gr00t_state_indices: [0, 1, 2, 3, 4, 5, 7]
@@ -110,7 +91,7 @@ datasets:
     # DT multi-frame signals read by _pack_sample:
     # num_history_frames controls how many past frames to extract from the
     # combined delta_indices window; future_offset marks the future target.
-    num_history_frames: 13      # = history_frames - 1 = K-1
+    num_history_frames: 9       # = history_frames - 1 = K-1 (K=10, Seer finetune)
     future_offset: 3            # t+3 frame → future_rgb
 
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."

@@ -195,10 +195,22 @@ class _QWen3_VL_Interface(nn.Module):
             )
         return generation_output
 
-    def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
+    def build_qwenvl_inputs(self, images, instructions, solutions=None,
+                             num_views_per_frame: int | None = None, **kwargs):
         """
         Build model inputs from raw data (images + instructions + optional solutions).
-        Follow Oficial Qwen3-VL Instruct format: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+        Follow Official Qwen3-VL Instruct format: text BEFORE images.
+        https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+
+        Args:
+            num_views_per_frame: When set, insert temporal frame markers between each
+                                 group of `num_views_per_frame` images, e.g.:
+                                   "Frame t-9:" [img_v0] [img_v1]
+                                   "Frame t-8:" [img_v0] [img_v1]
+                                   ...
+                                   "Current frame:" [img_v0] [img_v1]
+                                 Enables prompt-based timestep block simulation.
+                                 Controlled by framework.use_temporal_markers in YAML.
         """
 
         # Create messages: one message per sample
@@ -214,12 +226,29 @@ class _QWen3_VL_Interface(nn.Module):
             # Instruction tokens prepended before image tokens so that image tokens
             # can attend to instruction via causal attention (ReconVLA §3.2).
             content = [{"type": "text", "text": prompt}]
-            for img in imgs:
-                image_content = {"type": "image", "image": img}
-                if self.fixed_image_pixels is not None:
-                    image_content["min_pixels"] = self.fixed_image_pixels
-                    image_content["max_pixels"] = self.fixed_image_pixels
-                content.append(image_content)
+
+            if num_views_per_frame is not None and num_views_per_frame > 0:
+                # Interleave temporal markers with image groups.
+                n_frames = len(imgs) // num_views_per_frame
+                for frame_i in range(n_frames):
+                    rel_t = frame_i - (n_frames - 1)   # e.g., -9, -8, ..., 0
+                    label = f"Frame t{rel_t}:" if rel_t < 0 else "Current frame:"
+                    content.append({"type": "text", "text": label})
+                    for view_i in range(num_views_per_frame):
+                        img = imgs[frame_i * num_views_per_frame + view_i]
+                        image_content = {"type": "image", "image": img}
+                        if self.fixed_image_pixels is not None:
+                            image_content["min_pixels"] = self.fixed_image_pixels
+                            image_content["max_pixels"] = self.fixed_image_pixels
+                        content.append(image_content)
+            else:
+                for img in imgs:
+                    image_content = {"type": "image", "image": img}
+                    if self.fixed_image_pixels is not None:
+                        image_content["min_pixels"] = self.fixed_image_pixels
+                        image_content["max_pixels"] = self.fixed_image_pixels
+                    content.append(image_content)
+
             msg = [{"role": "user", "content": content}]
 
             if solutions is not None:

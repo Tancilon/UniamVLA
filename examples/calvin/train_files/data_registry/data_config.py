@@ -146,12 +146,15 @@ class CalvinDT_K10DataConfig(CalvinABCLeRobotV21H8DataConfig):
     # e.g. [-9,-8,-7,-6,-5,-4,-3,-2,-1, 0, 3]
 
     def modality_config(self):
+        # Seer alignment (point 3): load K frames of state history so the future branch
+        # receives K-frame proprio context (Seer uses per-timestep state for all K steps).
+        state_history_indices = list(range(-self._history_k_minus_1, 1))  # e.g. [-9,...,0]
         return {
             "video": ModalityConfig(
                 delta_indices=self.observation_indices,
                 modality_keys=self.video_keys,
             ),
-            "state": ModalityConfig(delta_indices=[0], modality_keys=self.state_keys),
+            "state": ModalityConfig(delta_indices=state_history_indices, modality_keys=self.state_keys),
             "action": ModalityConfig(delta_indices=self.action_indices, modality_keys=self.action_keys),
             "language": ModalityConfig(delta_indices=[0], modality_keys=self.language_keys),
         }

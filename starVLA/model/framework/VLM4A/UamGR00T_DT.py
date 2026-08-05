@@ -1,26 +1,44 @@
-"""UamGR00T_DT: Seer-style future prediction branch on top of Qwen3-VL + GR00T.
+"""UamGR00T_DT: Qwen3-VL backbone + Seer-style future decoder + lightweight MLP action.
 
-Sequence layout (standard, no duplicate images unlike _LT):
+Accurate description (after Seer alignment work):
+  "Qwen3-VL 主干 + Seer-style future decoder/action loss"
+  (not a full Seer replication — backbone topology and attention masking differ)
 
-    [instruction] -> [primary x49] -> [wrist x49]
+Pipeline:
+  1. Qwen3-VL processes ALL K frames as a single multi-image sequence
+     (K-1 history + current, oldest→newest, in one forward pass).
+     Qwen's causal attention provides native temporal context.
+     NOTE: Qwen3 chat template places instruction text BEFORE image tokens.
 
-Future branch runs *after* Qwen encoding:
-  1. Learnable future_query_tokens cross-attend to Qwen hidden states
-     + compressed history tokens (K-1 frames via HistoryVisionEncoder)
-     + robot state token.
-  2. future_tokens appended to vl_embs → GR00T DiT cross-attends to both.
-  3. Pixel decoder reconstructs t+N future frame patches (MSE loss).
+  2. FutureCrossAttnBranch: learnable future_query_tokens cross-attend to
+     [Qwen hidden | K-frame state tokens] → future_tokens (9 per view).
+       - Seer MAE decoder: obs_tokens + mask_tokens → 2×ViT Block → normalized patch MSE.
 
-Key differences from UamGR00T_LT:
-  - No auxhead design (no _maybe_build_aux_heads, no duplicate image blocks).
-  - Future supervision is not VAE latent.
-  - Historical context via a separate lightweight HistoryVisionEncoder.
+  3. SeerMLPActionHead: action_pred_tokens cross-attend to
+     [future_tokens | Qwen hidden] → MLP → arm (Tanh) + gripper (±1 at inference).
+       - Loss: SmoothL1(arm) + 0.01 × BCEWithLogits(gripper).
+       - Gripper inference: logit sign → {+1 open, -1 close} (matches eval threshold-at-0).
+
+Seer alignment status:
+  ✅ Future reconstruction: Seer MAE ViT decoder, normalized patch MSE
+  ✅ Future/action token interaction: cross-attn to [future | qwen_hidden]
+  ✅ Action loss: SmoothL1 + 0.01×BCE (Seer train_utils.py)
+  ✅ Action model: lightweight MLP (no diffusion)
+  ✅ History: K frames in one Qwen causal forward pass
+  ✅ K-frame state: (K, state_dim) preserved in _prepare_examples, bypasses parent squeeze
+  ✅ Training protocol: future + action losses jointly (no pretrain freeze)
+  ✅ Gripper inference: {-1,+1} binarised from logit sign
+  ⚠  Backbone topology: Qwen+cross-attn (not GPT2 internal token coupling)
+  ⚠  Attention mask: Qwen causal (not Seer block-level temporal mask)
+  ⚠  Prediction granularity: current-anchor chunk (not Seer dense per-timestep)
 
 Dataloader contract:
-  example["image"]          — list of PIL images, current frame (num_views).
+  example["image"]          — list[PIL], current frame (num_views).
   example["image_history"]  — list[list[PIL]] shape (K-1, num_views); optional.
+                              Combined with current → K*num_views images for Qwen.
   example["future_rgb"]     — list[Tensor(3,H,W)] shape (num_views,) in [0,1]; train only.
-  example["state"]          — (1, state_dim) numpy array; optional.
+  example["state"]          — (K, state_dim) after _prepare_examples re-extraction;
+                              (1, state_dim) if history absent or K=1.
 """
 from __future__ import annotations
 
@@ -29,11 +47,10 @@ from typing import List
 
 import numpy as np
 import torch
-from PIL import Image as PILImage
+import torch.nn as nn
 
 from starVLA.model.framework.VLM4A.UamGR00T import UamVLAGR00T
-from starVLA.model.modules.uamvla.components.future_cross_attn import FutureCrossAttnBranch
-from starVLA.model.modules.uamvla.components.history_vision_encoder import HistoryVisionEncoder
+from starVLA.model.modules.uamvla.components.seer_joint_decoder import SeerJointDecoder
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -48,57 +65,51 @@ class UamVLAGR00T_DT(UamVLAGR00T):
     # ------------------------------------------------------------------
 
     def __init__(self, config) -> None:
-        # Builds Qwen3-VL backbone + GR00T action head + sidecar helpers.
-        # No call to _maybe_build_aux_heads.
+        # Builds Qwen3-VL backbone via parent chain.
         super().__init__(config)
 
-        dt_cfg = self.config.framework.get("future_branch", {})
-        history_cfg = self.config.framework.get("history_encoder", {})
+        sjd_cfg = self.config.framework.get("seer_joint_decoder", {})
 
-        d_llm = self.qwen_vl_interface.model.config.hidden_size
+        d_llm     = self.qwen_vl_interface.model.config.hidden_size
         num_views = self._num_views_from_config()
-        state_dim = int(self.config.framework.action_model.get("state_dim", 0) or 0)
+        state_dim = int(sjd_cfg.get("state_dim", 0) or 0)
 
-        # Future cross-attention branch (DiT diffusion decoder).
-        self.future_branch = FutureCrossAttnBranch(
+        # SeerJointDecoder: unified self-attn + Seer block mask.
+        # Replaces independent FutureCrossAttnBranch + SeerMLPActionHead.
+        self.seer_joint_decoder = SeerJointDecoder(
             d_model=d_llm,
             num_views=num_views,
-            num_obs_tokens=int(dt_cfg.get("num_obs_tokens", 49)),
-            num_cross_attn_layers=int(dt_cfg.get("num_cross_attn_layers", 2)),
-            num_heads=int(dt_cfg.get("num_heads", 8)),
+            num_obs_tokens=int(sjd_cfg.get("num_obs_tokens", 9)),
+            action_dim=int(sjd_cfg.get("action_dim", 7)),
+            action_pred_steps=int(sjd_cfg.get("action_horizon", 3)),
+            num_joint_layers=int(sjd_cfg.get("num_joint_layers", 2)),
+            num_heads=int(sjd_cfg.get("num_heads", 16)),
             state_dim=state_dim,
-            future_weight=float(dt_cfg.get("future_weight", 0.5)),
-            z_channel=int(dt_cfg.get("z_channel", 512)),
-            dit_embed_dim=int(dt_cfg.get("dit_embed_dim", 512)),
-            dit_depth=int(dt_cfg.get("dit_depth", 3)),
-            dit_timesteps=str(dt_cfg.get("dit_timesteps", "1000")),
+            hidden_dim=int(sjd_cfg.get("hidden_dim", d_llm // 2)) or None,
+            gripper_loss_ratio=float(sjd_cfg.get("gripper_loss_ratio", 0.01)),
+            patch_size=int(sjd_cfg.get("patch_size", 16)),
+            image_size=int(sjd_cfg.get("image_size", 224)),
+            decoder_dim=int(sjd_cfg.get("decoder_dim", d_llm)) or None,
+            num_decoder_heads=int(sjd_cfg.get("num_decoder_heads", 16)),
+            num_decoder_blocks=int(sjd_cfg.get("num_decoder_blocks", 2)),
+            future_weight=float(sjd_cfg.get("future_weight", 1.0)),
         )
 
-        # History vision encoder (skipped when history_frames <= 1).
-        self._history_frames = int(self.config.framework.get("history_frames", 1))
-        self.history_encoder: HistoryVisionEncoder | None = None
-        if self._history_frames > 1:
-            self.history_encoder = HistoryVisionEncoder(
-                qwen_vl_interface=self.qwen_vl_interface,
-                d_llm=d_llm,
-                num_latents=int(history_cfg.get("num_latents", 10)),
-                resampler_depth=int(history_cfg.get("resampler_depth", 3)),
-                freeze_visual=bool(history_cfg.get("freeze_qwen_vit", True)),
-                max_history_frames=self._history_frames - 1,
-                num_views=num_views,
-            )
+        # K-frame state projection: appends proprio tokens to Qwen hidden so the
+        # joint decoder can see state via the block mask (Seer per-timestep state).
+        self.state_proj_to_llm = (
+            nn.Linear(state_dim, d_llm) if state_dim > 0 else None
+        )
 
-        # exec_horizon: how many actions to return at inference time.
-        # Predict action_horizon steps but only execute exec_horizon of them
-        # before re-querying (Seer-style: predict 3, execute 1).
-        # -1 (default) means return all action_horizon steps.
-        self._exec_horizon = int(self.config.framework.get("exec_horizon", -1))
+        self._history_frames = int(self.config.framework.get("history_frames", 1))
+        self._exec_horizon   = int(self.config.framework.get("exec_horizon", -1))
 
         logger.info(
             "[UamGR00T_DT] history_frames=%d  num_views=%d  state_dim=%d  "
-            "future_weight=%.2f  exec_horizon=%d",
+            "num_obs_tokens=%d  num_joint_layers=%d  exec_horizon=%d",
             self._history_frames, num_views, state_dim,
-            float(dt_cfg.get("future_weight", 0.5)),
+            int(sjd_cfg.get("num_obs_tokens", 9)),
+            int(sjd_cfg.get("num_joint_layers", 2)),
             self._exec_horizon,
         )
 
@@ -113,32 +124,93 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             raise RuntimeError("datasets.vla_data.obs contains no video.* keys")
         return len(views)
 
-    # DT-specific keys that _unpack_lerobot_sample does not carry through.
+    def _encode_qwen_hidden(self, examples: List[dict]):
+        """Override: pass temporal frame markers when use_temporal_markers is set.
+
+        Temporal markers insert text labels ("Frame t-9:", "Current frame:", etc.)
+        between image groups in the Qwen input sequence, providing explicit
+        timestep structure as a prompt-based approximation of Seer's token blocks.
+        Controlled by ``framework.use_temporal_markers: true`` in YAML (default false).
+        """
+        batch_images = [self._force_resize_640(example["image"]) for example in examples]
+        examples = [
+            {**example, "image": images}
+            for example, images in zip(examples, batch_images)
+        ]
+        instructions = [example["lang"] for example in examples]
+
+        use_markers = bool(self.config.framework.get("use_temporal_markers", False))
+        num_vpf = self._num_views_from_config() if use_markers else None
+
+        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
+            images=batch_images,
+            instructions=instructions,
+            num_views_per_frame=num_vpf,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            qwenvl_outputs = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_attentions=False,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+        hidden = qwenvl_outputs.hidden_states[-1]
+        self._assert_image_token_count(qwen_inputs["input_ids"], examples)
+        return examples, qwen_inputs, hidden
+
+    # DT-specific key that _unpack_lerobot_sample does not carry through.
     _DT_PASSTHROUGH_KEYS = ("future_rgb", "image_history")
 
     def _prepare_examples(self, examples: List[dict]) -> List[dict]:
-        """Unpack LeRobot samples and restore DT-specific future_rgb / image_history.
+        """Unpack samples and build Seer-aligned K-frame image list for Qwen.
 
-        The parent's _unpack_lerobot_sample builds a new dict with a fixed set
-        of keys and silently drops future_rgb and image_history.  We splice them
-        back in so FutureCrossAttnBranch.compute_loss() receives its targets.
+        Restores future_rgb for pixel MSE supervision, then flattens
+        image_history + current frame into a single ordered list so that
+        Qwen processes all K frames in one forward pass (Seer-faithful causal
+        temporal context without a separate history encoder):
+
+            example["image"] = [
+                hist_0_view0, hist_0_view1,   ← oldest frame
+                hist_1_view0, hist_1_view1,
+                ...
+                hist_{K-2}_view0, hist_{K-2}_view1,
+                cur_view0,    cur_view1,       ← current frame (last)
+            ]  length = K * num_views
+
+        When image_history is absent the list stays as [cur_view0, cur_view1]
+        (single-frame mode, K=1).
         """
         unpacked = super()._prepare_examples(examples)
         for orig, out in zip(examples, unpacked):
-            for key in self._DT_PASSTHROUGH_KEYS:
-                if key in orig:
-                    out[key] = orig[key]
-        return unpacked
+            # Always restore future_rgb for training supervision.
+            if "future_rgb" in orig:
+                out["future_rgb"] = orig["future_rgb"]
 
-    @staticmethod
-    def _collect_history(examples: List[dict]):
-        """Return (B, K-1, num_views) nested list of PIL images, or None."""
-        if not examples or "image_history" not in examples[0]:
-            return None
-        hist = [e.get("image_history") for e in examples]
-        if not hist[0]:
-            return None
-        return hist
+            # Re-extract K-frame state, bypassing parent's squeeze.
+            # Parent's _extract_gr00t_state_by_indices does reshape(...)[0] for ndim>1,
+            # which picks the oldest history frame (row 0).  We preserve all K frames so
+            # that FutureCrossAttnBranch._build_kv receives (K, state_dim) context.
+            raw_state = orig.get("state")
+            if raw_state is not None:
+                arr = np.asarray(raw_state, dtype=np.float32)
+                if arr.ndim == 2 and arr.shape[0] > 1:          # K-frame state (K, full_dim)
+                    indices = self._configured_gr00t_state_indices()
+                    if indices is None:
+                        indices = list(range(7))                 # default Calvin gr00t dims
+                    if max(indices) < arr.shape[-1]:
+                        # (K, state_dim) — all frames, configured dims only
+                        out["state"] = torch.as_tensor(arr[:, indices])
+
+            # Build multi-frame image list (oldest → newest → current).
+            history = orig.get("image_history")  # list[list[PIL]], shape (K-1, num_views)
+            if history:
+                current_images = out["image"]   # list[PIL], shape (num_views,)
+                all_images: List = []
+                for frame_views in history:     # iterate K-1 frames, chronological order
+                    all_images.extend(frame_views)
+                all_images.extend(current_images)
+                out["image"] = all_images       # K * num_views images total
+        return unpacked
 
     @staticmethod
     def _collect_future_rgb(examples: List[dict], device, dtype):
@@ -156,136 +228,49 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             result.append(frames)
         return result
 
-    def _encode_history(self, examples: List[dict], device, dtype):
-        """Run HistoryVisionEncoder if history is available, else return None."""
-        if self.history_encoder is None:
-            return None
-        hist = self._collect_history(examples)
-        if hist is None:
-            return None
-        return self.history_encoder(hist, device=device, dtype=dtype)
-
-    @torch.no_grad()
-    def _encode_future_vlm_features(
-        self,
-        future_rgb_list: List[torch.Tensor] | None,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> List[torch.Tensor] | None:
-        """Encode future frames through Qwen's frozen ViT → VLM patch tokens.
-
-        Runs only the visual encoder (not the full LLM), so the cost is much
-        lower than a full _encode_qwen_hidden forward pass.
-
-        Args:
-            future_rgb_list: list of (B, 3, H, W) float tensors in [0, 1], one per view.
-                             None or empty → returns None.
-            device, dtype:   Target device/dtype for the returned tensors.
-
-        Returns:
-            list of (B, num_obs_tokens, D_llm) tensors, one per view; or None.
-        """
-        if not future_rgb_list:
-            return None
-
-        B = future_rgb_list[0].shape[0]
-        num_obs = self.future_branch.num_obs_tokens
-        results: List[torch.Tensor] = []
-
-        for rgb in future_rgb_list:                     # (B, 3, H, W), float [0, 1]
-            # Tensor → list of PIL images (processor expects PIL or numpy).
-            rgb_u8 = (rgb.detach().cpu().clamp(0.0, 1.0) * 255).byte()
-            pil_imgs = [
-                PILImage.fromarray(rgb_u8[i].permute(1, 2, 0).numpy())
-                for i in range(B)
-            ]
-
-            # Qwen image processor → pixel_values + image_grid_thw.
-            proc_out = self.qwen_vl_interface.processor.image_processor(
-                images=pil_imgs, return_tensors="pt"
-            )
-            pixel_values = proc_out["pixel_values"].to(device=device, dtype=dtype)
-            image_grid_thw = proc_out["image_grid_thw"].to(device=device)
-
-            # Forward through frozen Qwen visual tower only (no LLM layers).
-            vl_out = self.qwen_vl_interface.model.visual(
-                pixel_values, grid_thw=image_grid_thw
-            )
-            # model.visual may return a raw tensor or a BaseModelOutput / tuple.
-            if isinstance(vl_out, torch.Tensor):
-                vl_tokens = vl_out
-            elif hasattr(vl_out, "last_hidden_state"):
-                vl_tokens = vl_out.last_hidden_state
-            else:
-                vl_tokens = vl_out[0]
-            # vl_tokens: (B * tokens_per_frame, D_llm)
-
-            tokens_per_frame = vl_tokens.shape[0] // B
-            if tokens_per_frame != num_obs:
-                raise RuntimeError(
-                    f"_encode_future_vlm_features: expected {num_obs} tokens/frame "
-                    f"(future_branch.num_obs_tokens={num_obs}), "
-                    f"got {tokens_per_frame}.  "
-                    f"Adjust num_obs_tokens in config or check Qwen image preprocessing."
-                )
-
-            results.append(vl_tokens.view(B, num_obs, -1).to(dtype=dtype))
-
-        return results
-
     # ------------------------------------------------------------------
     #  Training forward
     # ------------------------------------------------------------------
 
     def forward(self, examples: List[dict], **kwargs) -> dict:
-        """Training forward: future VLM feature DDPM loss + (optionally) GR00T action loss.
+        """Training forward: pixel-space future MSE + Seer-style MLP action MSE.
+
+        All K frames are processed by Qwen in _prepare_examples; hidden contains
+        the full temporal context.  No separate history encoder needed.
 
         When action_model is frozen (freeze_modules: "action_model" in pretrain config),
-        action_loss is logged but excluded from backward to prevent noisy gradients from
-        the uninitialised DiT polluting the Qwen backbone.  During finetune the action_model
-        is unfrozen and action_loss is re-included automatically.
+        action_loss is excluded from backward so the future branch can pretrain
+        the Qwen backbone without noisy action gradients.
         """
         examples = self._prepare_examples(examples)
         examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
 
         device, dtype = hidden.device, hidden.dtype
 
-        # --- History tokens (optional) ---
-        hist_tokens = self._encode_history(examples, device, dtype)
-
-        # --- Robot state for future branch ---
+        # --- Robot state (K-frame: all history + current) ---
+        # With K-frame state config, state shape is (B, K, state_dim).
         state = self._state_batch_or_none(examples, device, dtype)
-        state_for_future = state[:, 0, :] if state is not None else None  # (B, state_dim)
 
-        # --- Future branch: tokens + VLM feature-space DDPM loss ---
-        batch_dict = self._collate_aux(examples, qwen_inputs)
+        # Inject K-frame state tokens into Qwen hidden so the joint decoder
+        # sees proprio via the block mask (Seer per-timestep state token coupling).
+        if state is not None and self.state_proj_to_llm is not None:
+            s = state.float()
+            if s.ndim == 2:
+                s = s.unsqueeze(1)
+            state_tokens = self.state_proj_to_llm(s).to(dtype)
+            hidden = torch.cat([hidden, state_tokens], dim=1)  # (B, L+K, d_llm)
+
+        # qwen_pad_mask: (B, L+K) — 1=valid, 0=pad (Qwen left-pads; state tokens valid)
+        qwen_pad_mask = qwen_inputs.get("attention_mask")
+        if qwen_pad_mask is not None and state is not None and self.state_proj_to_llm is not None:
+            K_state = state.shape[1] if state.ndim == 3 else 1
+            extra   = qwen_pad_mask.new_ones(qwen_pad_mask.shape[0], K_state)
+            qwen_pad_mask = torch.cat([qwen_pad_mask, extra], dim=1)
+
+        # --- Future reconstruction + action prediction (unified Seer block mask) ---
+        batch_dict      = self._collate_aux(examples, qwen_inputs)
         future_rgb_list = self._collect_future_rgb(examples, device, dtype)
-        batch_dict["future_rgb"] = future_rgb_list
 
-        # Encode future frames through frozen Qwen ViT → VLM feature targets.
-        future_vlm_feat = self._encode_future_vlm_features(future_rgb_list, device, dtype)
-
-        with torch.autocast("cuda", dtype=torch.float32):
-            future_tokens, future_loss = self.future_branch.compute_loss(
-                hidden=hidden,
-                batch=batch_dict,
-                hist_tokens=hist_tokens,
-                state=state_for_future,
-                future_vlm_features=future_vlm_feat,
-            )
-
-        # --- Extend vl_embs with future tokens for GR00T ---
-        vl_embs = torch.cat([hidden, future_tokens], dim=1)   # (B, seq+N_f, D)
-
-        # Build extended encoder attention mask (pad mask extended for future tokens).
-        base_mask = self._encoder_attention_mask(qwen_inputs)
-        if base_mask is not None:
-            future_mask_ext = base_mask.new_ones(base_mask.shape[0], future_tokens.shape[1])
-            ext_mask = torch.cat([base_mask, future_mask_ext], dim=1)
-        else:
-            ext_mask = None
-
-        # --- GR00T flow-matching action loss ---
         gt_actions = [e["action"] for e in examples]
         with torch.autocast("cuda", dtype=torch.float32):
             actions = torch.as_tensor(
@@ -295,35 +280,29 @@ class UamVLAGR00T_DT(UamVLAGR00T):
                 ]),
                 device=device, dtype=dtype,
             )
-            actions_target = actions[:, -self.action_horizon:, :]
-            if actions_target.shape[1] != self.action_horizon:
+            T_act = self.seer_joint_decoder.N_act
+            actions_target = actions[:, -T_act:, :]
+            if actions_target.shape[1] != T_act:
                 raise RuntimeError(
-                    f"Expected at least {self.action_horizon} action steps, "
-                    f"got {actions.shape[1]}."
+                    f"Expected at least {T_act} action steps, got {actions.shape[1]}."
                 )
 
-            repeated_steps = int(self.config.framework.action_model.get("repeated_diffusion_steps", 4))
-            actions_rep = actions_target.repeat(repeated_steps, 1, 1)
-            vl_embs_rep = vl_embs.repeat(repeated_steps, 1, 1)
-            state_rep = state.repeat(repeated_steps, 1, 1) if state is not None else None
-            ext_mask_rep = ext_mask.repeat(repeated_steps, 1) if ext_mask is not None else None
-
-            action_loss = self.action_model(
-                vl_embs_rep, actions_rep, state_rep,
-                encoder_attention_mask=ext_mask_rep,
+            future_loss, action_loss = self.seer_joint_decoder.compute_loss(
+                qwen_hidden=hidden,
+                qwen_pad_mask=qwen_pad_mask,
+                state=state,
+                gt_actions=actions_target,
+                future_rgb_list=future_rgb_list,
             )
 
         log_metrics = {
-            "action_loss_fm": action_loss.detach(),
+            "action_loss_mse": action_loss.detach(),
             "future_recon_loss": future_loss.detach(),
         }
 
-        # When action_model is frozen (pretrain), exclude its loss from backward to
-        # prevent noisy gradients from the uninitialised DiT polluting the backbone.
-        # freeze_modules sets requires_grad=False on all action_model params; we detect
-        # this here so the pretrain→finetune transition requires no config change.
-        action_model_trainable = any(p.requires_grad for p in self.action_model.parameters())
-        total = (action_loss + future_loss) if action_model_trainable else future_loss
+        # When joint decoder is frozen (pretrain), exclude action loss from backward.
+        decoder_trainable = any(p.requires_grad for p in self.seer_joint_decoder.parameters())
+        total = (action_loss + future_loss) if decoder_trainable else future_loss
 
         return {"action_loss": total, **log_metrics}
 
@@ -333,7 +312,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
 
     @torch.inference_mode()
     def predict_action(self, examples, **kwargs) -> dict:
-        """Inference: Qwen → history encode → future branch → GR00T sample."""
+        """Inference: Qwen → state inject → SeerJointDecoder → actions."""
         if not isinstance(examples, list):
             examples = [examples]
 
@@ -341,36 +320,30 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
 
         device, dtype = hidden.device, hidden.dtype
-
-        hist_tokens = self._encode_history(examples, device, dtype)
         state = self._state_batch_or_none(examples, device, dtype)
-        state_for_future = state[:, 0, :] if state is not None else None
+
+        # Inject K-frame state tokens (same as forward).
+        if state is not None and self.state_proj_to_llm is not None:
+            s = state.float()
+            if s.ndim == 2:
+                s = s.unsqueeze(1)
+            state_tokens = self.state_proj_to_llm(s).to(dtype)
+            hidden = torch.cat([hidden, state_tokens], dim=1)
+
+        qwen_pad_mask = qwen_inputs.get("attention_mask")
+        if qwen_pad_mask is not None and state is not None and self.state_proj_to_llm is not None:
+            K_state = state.shape[1] if state.ndim == 3 else 1
+            extra   = qwen_pad_mask.new_ones(qwen_pad_mask.shape[0], K_state)
+            qwen_pad_mask = torch.cat([qwen_pad_mask, extra], dim=1)
 
         with torch.autocast("cuda", dtype=torch.float32):
-            future_tokens = self.future_branch(
-                hidden=hidden,
-                hist_tokens=hist_tokens,
-                state=state_for_future,
-            )
-
-        vl_embs = torch.cat([hidden, future_tokens], dim=1)
-
-        base_mask = self._encoder_attention_mask(qwen_inputs)
-        if base_mask is not None:
-            future_mask_ext = base_mask.new_ones(base_mask.shape[0], future_tokens.shape[1])
-            ext_mask = torch.cat([base_mask, future_mask_ext], dim=1)
-        else:
-            ext_mask = None
-
-        with torch.autocast("cuda", dtype=torch.float32):
-            pred_actions = self.action_model.predict_action(
-                vl_embs, state,
-                encoder_attention_mask=ext_mask,
+            pred_actions = self.seer_joint_decoder.predict_action(
+                qwen_hidden=hidden,
+                qwen_pad_mask=qwen_pad_mask,
+                state=state,
             )
 
         pred_np = pred_actions.detach().cpu().numpy()
-        # Apply exec_horizon: return only the first exec_horizon steps so the
-        # eval loop can re-query after each step (Seer-style: predict 3, exec 1).
         if self._exec_horizon > 0:
             pred_np = pred_np[:, :self._exec_horizon, :]
         return {"normalized_actions": pred_np}
@@ -397,15 +370,20 @@ if __name__ == "__main__":
     from omegaconf import OmegaConf as OC
     dt_patch = OC.create({
         "framework": {
-            "future_branch": {
-                "num_obs_tokens": 49,
-                "num_cross_attn_layers": 2,
+            "seer_joint_decoder": {
+                "num_obs_tokens": 9,
+                "future_weight": 1.0,
+                "patch_size": 16,
+                "decoder_dim": 512,
+                "num_decoder_heads": 8,
+                "num_decoder_blocks": 2,
+                "num_joint_layers": 2,
                 "num_heads": 8,
-                "future_weight": 0.5,
-                "z_channel": 512,
-                "dit_embed_dim": 512,
-                "dit_depth": 3,
-                "dit_timesteps": "1000",
+                "action_dim": 7,
+                "state_dim": 7,
+                "action_horizon": 3,
+                "hidden_dim": 512,
+                "gripper_loss_ratio": 0.01,
             },
             "history_frames": 1,
         }
