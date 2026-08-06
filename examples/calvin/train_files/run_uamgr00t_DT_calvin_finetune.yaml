@@ -42,14 +42,14 @@ framework:
   seer_joint_decoder:
     # Future reconstruction (MAE ViT decoder)
     num_obs_tokens: 9            # 3×3 semantic tokens per view
-    future_weight: 1.0
+    future_weight: 0.1           # Seer train_utils.py: 0.1 * loss_image
     patch_size: 16               # 14×14 = 196 target patches
     decoder_dim: 2048
     num_decoder_heads: 16
     num_decoder_blocks: 2
 
     # Joint self-attention (Seer block mask)
-    num_joint_layers: 2          # depth of the joint transformer
+    num_joint_layers: 4          # depth of the joint transformer
     num_heads: 16
 
     # Action prediction (MLP decoder)
@@ -58,6 +58,14 @@ framework:
     action_horizon: 3            # Seer action_pred_steps=3
     hidden_dim: 1024
     gripper_loss_ratio: 0.01     # Seer train_utils.py:165
+
+    # Dense per-timestep supervision (Seer-aligned).
+    # history_frames must match framework.history_frames.
+    # atten_goal: last atten_goal groups unsupervised (K_sup = K - atten_goal).
+    # Seer finetune.sh: no --atten_goal flag → default 0 → K_sup = K = 10 (full supervision).
+    # Seer pretrain.sh: atten_goal=4 → K_sup=10 (for sequence_length=14).
+    history_frames: 10
+    atten_goal: 0                # Seer finetune default; matches dataloader atten_goal below
 
   reduce_in_full_precision: true
 
@@ -93,6 +101,8 @@ datasets:
     # combined delta_indices window; future_offset marks the future target.
     num_history_frames: 9       # = history_frames - 1 = K-1 (K=10, Seer finetune)
     future_offset: 3            # t+3 frame → future_rgb
+    # Dense supervision: produce future_rgb_history + action_history per sample.
+    atten_goal: 3
 
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
 

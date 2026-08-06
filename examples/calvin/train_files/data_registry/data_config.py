@@ -125,30 +125,40 @@ class CalvinABCLeRobotV21H8DataConfig:
 
 
 class CalvinDT_K10DataConfig(CalvinABCLeRobotV21H8DataConfig):
-    """Seer-style DT config for Calvin finetune (K=10 history, future_offset=3, action_horizon=3).
+    """Seer-style DT config for Calvin finetune (K=10, Seer sequence_length=10).
 
-    delta_indices for video encodes K-1=9 history frames + current frame + 1 future frame:
-        [-9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 3]
-    _pack_sample reads data_cfg.num_history_frames and data_cfg.future_offset to split
-    these 11 video frames into:
-        sample["image"]          — current frame (PIL)
-        sample["image_history"]  — list[9] of list[2 views] PIL images
-        sample["future_rgb"]     — list[2 views] of Tensor(3,H,W) in [0,1]
+    Dense per-timestep prediction aligned with Seer (window_size=13):
+      observation_indices = [-9,...,0, 1, 2, 3]  — 13 frames total
+        positions 0..8   : delta -9..-1  (K-1 history frames)
+        position  9      : delta  0      (current frame)
+        positions 10..12 : delta  1..3   (future frames needed for dense targets)
+      action_indices     = [-9,..., 0, 1, 2]  — 12 delta indices for dense windows
+      atten_goal = 3     : supervise only K-atten_goal=7 earliest timesteps
+
+    _pack_sample splits these into:
+        sample["image"]              — current frame (delta=0)
+        sample["image_history"]      — list[K-1=9] of list[num_views] PIL
+        sample["future_rgb"]         — list[num_views] Tensor(3,H,W) at delta=3 (compat)
+        sample["future_rgb_history"] — list[K=10] of list[num_views] Tensor (dense)
+        sample["action_history"]     — ndarray (K, action_horizon, action_dim) (dense)
     """
-    history_frames = 10          # K
-    future_offset = 3            # predict t+3 frame (Seer future_steps=3)
-    action_horizon = 3           # Seer action_pred_steps=3
-    action_indices = list(range(action_horizon))
+    history_frames = 10          # K = sequence_length
+    future_offset  = 3           # Seer future_steps = 3
+    action_horizon = 3           # Seer action_pred_steps = 3
+    atten_goal     = 3           # supervise K - atten_goal = 7 timesteps
 
-    # Combined delta_indices: [-(K-1),...,-1, 0, future_offset]
-    _history_k_minus_1 = history_frames - 1
-    observation_indices = list(range(-_history_k_minus_1, 1)) + [future_offset]
-    # e.g. [-9,-8,-7,-6,-5,-4,-3,-2,-1, 0, 3]
+    _history_k_minus_1 = history_frames - 1  # = 9
+
+    # 13 frames: history (9) + current (1) + future (3) — window_size = K + future_steps
+    observation_indices = list(range(-_history_k_minus_1, future_offset + 1))
+    # [-9, -8, ..., 0, 1, 2, 3]
+
+    # 12 action delta indices covering all K dense windows
+    action_indices = list(range(-_history_k_minus_1, action_horizon))
+    # [-9, -8, ..., 0, 1, 2]
 
     def modality_config(self):
-        # Seer alignment (point 3): load K frames of state history so the future branch
-        # receives K-frame proprio context (Seer uses per-timestep state for all K steps).
-        state_history_indices = list(range(-self._history_k_minus_1, 1))  # e.g. [-9,...,0]
+        state_history_indices = list(range(-self._history_k_minus_1, 1))
         return {
             "video": ModalityConfig(
                 delta_indices=self.observation_indices,
@@ -161,14 +171,13 @@ class CalvinDT_K10DataConfig(CalvinABCLeRobotV21H8DataConfig):
 
 
 class CalvinDT_K14DataConfig(CalvinDT_K10DataConfig):
-    """Seer-style DT config for Calvin pretrain (K=14 history, future_offset=3, action_horizon=3).
-
-    Matches Seer's pretraining sequence_length=14 / window_size=17 setting.
-    """
-    history_frames = 14
-    _history_k_minus_1 = history_frames - 1
-    observation_indices = list(range(-_history_k_minus_1, 1)) + [CalvinDT_K10DataConfig.future_offset]
-    # [-13,-12,...,-1, 0, 3]  — 15 total frames loaded
+    """Seer-style DT config for Calvin pretrain (K=14, window_size=17)."""
+    history_frames     = 14
+    _history_k_minus_1 = history_frames - 1                    # = 13
+    observation_indices = list(range(-_history_k_minus_1, CalvinDT_K10DataConfig.future_offset + 1))
+    # [-13, ..., 0, 1, 2, 3]  — 17 frames
+    action_indices = list(range(-_history_k_minus_1, CalvinDT_K10DataConfig.action_horizon))
+    # [-13, ..., 0, 1, 2]  — 16 delta indices
 
 
 ROBOT_TYPE_CONFIG_MAP = {

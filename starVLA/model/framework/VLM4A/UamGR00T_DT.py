@@ -53,12 +53,67 @@ from starVLA.model.framework.VLM4A.UamGR00T import UamVLAGR00T
 from starVLA.model.modules.uamvla.components.seer_joint_decoder import SeerJointDecoder
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 
+
+# ---------------------------------------------------------------------------
+#  Forward hook: replaces pad-token embeddings at insertion positions with
+#  per-timestep state embeddings (gradient-safe via scatter_ + torch.where).
+# ---------------------------------------------------------------------------
+
+class _UamGR00T_DT_StateHook:
+    """One-shot embed_tokens hook for temporal state injection.
+
+    After Qwen's embed_tokens maps token IDs to embeddings, this hook
+    replaces the pad-token embeddings that were inserted at each frame's
+    vision_end boundary with the corresponding state_proj_to_llm(state_t)
+    output.  torch.where preserves autograd through both paths.
+
+    Args:
+        insert_positions: list[B] of list[K] — positions in the extended
+                          sequence where pad tokens were inserted.
+        state_embeds:     Tensor (B, K, d_llm) — projected state embeddings.
+    """
+
+    def __init__(self, insert_positions, state_embeds: torch.Tensor) -> None:
+        self.insert_positions = insert_positions   # list[B][K] int
+        self.state_embeds = state_embeds           # (B, K, D)
+
+    def __call__(self, module, input_tuple, output: torch.Tensor) -> torch.Tensor:
+        B, T_new, D = output.shape
+        K = len(self.insert_positions[0])
+        device = output.device
+
+        # Build index tensor (B, K)
+        idx = torch.tensor(
+            self.insert_positions, dtype=torch.long, device=device
+        )
+
+        # Scatter state embeddings into a (B, T_new, D) zero tensor.
+        # scatter_ is autograd-safe when the source tensor requires grad.
+        state_full = output.new_zeros(B, T_new, D)
+        state_full.scatter_(
+            1,
+            idx.unsqueeze(-1).expand(-1, -1, D),
+            self.state_embeds.to(dtype=output.dtype, device=device),
+        )
+
+        # Boolean replacement mask (B, T_new)
+        mask = torch.zeros(B, T_new, dtype=torch.bool, device=device)
+        mask.scatter_(1, idx, True)
+
+        # torch.where: gradient flows through state_full at True positions
+        # and through original output at False positions.
+        return torch.where(mask.unsqueeze(-1), state_full, output)
+
 logger = logging.getLogger(__name__)
 
 
 @FRAMEWORK_REGISTRY.register("UamGR00T_DT")
 class UamVLAGR00T_DT(UamVLAGR00T):
     """GR00T + Seer-style future prediction branch; no auxhead design."""
+
+    # Qwen3-VL token IDs (from config.json)
+    _VISION_START_TOKEN_ID: int = 151652
+    _VISION_END_TOKEN_ID:   int = 151653
 
     # ------------------------------------------------------------------
     #  Construction
@@ -93,6 +148,8 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             num_decoder_heads=int(sjd_cfg.get("num_decoder_heads", 16)),
             num_decoder_blocks=int(sjd_cfg.get("num_decoder_blocks", 2)),
             future_weight=float(sjd_cfg.get("future_weight", 1.0)),
+            history_frames=int(sjd_cfg.get("history_frames", 1)),
+            atten_goal=int(sjd_cfg.get("atten_goal", 0)),
         )
 
         # K-frame state projection: appends proprio tokens to Qwen hidden so the
@@ -124,13 +181,24 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             raise RuntimeError("datasets.vla_data.obs contains no video.* keys")
         return len(views)
 
-    def _encode_qwen_hidden(self, examples: List[dict]):
-        """Override: pass temporal frame markers when use_temporal_markers is set.
+    def _encode_qwen_hidden(
+        self,
+        examples: List[dict],
+        state: "torch.Tensor | None" = None,
+    ):
+        """Qwen forward with optional per-timestep state injection (Option A).
 
-        Temporal markers insert text labels ("Frame t-9:", "Current frame:", etc.)
-        between image groups in the Qwen input sequence, providing explicit
-        timestep structure as a prompt-based approximation of Seer's token blocks.
-        Controlled by ``framework.use_temporal_markers: true`` in YAML (default false).
+        When ``state`` is provided and ``state_proj_to_llm`` exists, one state
+        token is inserted into Qwen's input sequence immediately after each
+        frame's last vision_end token.  This aligns with Seer's per-timestep
+        A-block state token (text | state | image_emb | cls_token).
+
+        The insertion is done via a one-shot forward hook on embed_tokens so
+        that the projected state embeddings replace the pad-token placeholders
+        inserted into input_ids.  Gradients flow through state_proj_to_llm
+        via scatter_ + torch.where inside the hook.
+
+        Falls back to plain Qwen forward when state is None or K == 1.
         """
         batch_images = [self._force_resize_640(example["image"]) for example in examples]
         examples = [
@@ -147,19 +215,210 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             instructions=instructions,
             num_views_per_frame=num_vpf,
         )
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            qwenvl_outputs = self.qwen_vl_interface(
-                **qwen_inputs,
-                output_attentions=False,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-        hidden = qwenvl_outputs.hidden_states[-1]
-        self._assert_image_token_count(qwen_inputs["input_ids"], examples)
-        return examples, qwen_inputs, hidden
 
-    # DT-specific key that _unpack_lerobot_sample does not carry through.
-    _DT_PASSTHROUGH_KEYS = ("future_rgb", "image_history")
+        # --- Option A: temporal state injection into Qwen input_embeds ---
+        # State is inserted BEFORE each frame's first vision_start token so that
+        # image tokens (which come after vision_start) can attend to state via
+        # Qwen causal attention — mirroring Seer's [text|state|image] A-block order.
+        inject = (
+            state is not None
+            and self.state_proj_to_llm is not None
+            and self._history_frames > 1
+        )
+        if inject:
+            num_views = self._num_views_from_config()
+            K         = self._history_frames
+            pad_id    = self.qwen_vl_interface.processor.tokenizer.pad_token_id
+
+            # Find first vision_start per frame; insert state token BEFORE it.
+            # We pass (frame_start - 1) as the "end_pos" to _extend_inputs_for_state,
+            # which inserts the pad token after that position = before vision_start.
+            frame_starts = self._find_frame_start_positions(
+                qwen_inputs["input_ids"], num_views, K, self._VISION_START_TOKEN_ID
+            )
+            before_starts = [[s - 1 for s in starts] for starts in frame_starts]
+            new_input_ids, new_attn_mask, insert_pos = self._extend_inputs_for_state(
+                qwen_inputs["input_ids"],
+                qwen_inputs["attention_mask"],
+                before_starts,
+                pad_id,
+            )
+
+            # Project state → (B, K, d_llm).
+            s = state.float()
+            if s.ndim == 2:
+                s = s.unsqueeze(1)
+            state_embeds = self.state_proj_to_llm(s)
+
+            # Register hook; Qwen forward replaces pad embeds with state embeds.
+            hook = self.qwen_vl_interface.model.model.embed_tokens.register_forward_hook(
+                _UamGR00T_DT_StateHook(insert_pos, state_embeds)
+            )
+            try:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    qwenvl_outputs = self.qwen_vl_interface(
+                        input_ids=new_input_ids,
+                        attention_mask=new_attn_mask,
+                        pixel_values=qwen_inputs.get("pixel_values"),
+                        image_grid_thw=qwen_inputs.get("image_grid_thw"),
+                        output_attentions=False,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+            finally:
+                hook.remove()
+
+            # Update both attention_mask and input_ids in qwen_inputs so that
+            # downstream consumers (_collate_aux, _assert_image_token_count) see
+            # the extended sequence with injected state tokens.
+            qwen_inputs = {
+                **qwen_inputs,
+                "attention_mask": new_attn_mask,
+                "input_ids":      new_input_ids,
+            }
+            state_token_positions: "list[list[int]] | None" = insert_pos  # list[B][K]
+        else:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                qwenvl_outputs = self.qwen_vl_interface(
+                    **qwen_inputs,
+                    output_attentions=False,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+
+        hidden = qwenvl_outputs.hidden_states[-1]
+        self._assert_image_token_count(qwen_inputs.get("input_ids",
+                                                        new_input_ids if inject else None),
+                                       examples)
+
+        # qwen_frame_ends: list[B][K] int — per-sample position of each frame's
+        # last vision_end token in qwen_hidden (inclusive).
+        # Used by _build_block_mask to prevent future_t from attending qwen positions
+        # that belong to frame t+1..K-1 of that specific sample.
+        # Must be per-sample because Qwen uses left-padding: different prompt lengths
+        # shift image token positions by varying amounts across batch samples.
+        _V = self._num_views_from_config()
+        K  = self._history_frames
+        if inject:
+            # Scan each sample's new_input_ids for vision_end positions.
+            qwen_frame_ends: "list[list[int]] | None" = []
+            for b in range(new_input_ids.shape[0]):
+                ve_b = (new_input_ids[b] == self._VISION_END_TOKEN_ID).nonzero(
+                    as_tuple=False
+                ).squeeze(-1)
+                qwen_frame_ends.append([int(ve_b[(t + 1) * _V - 1].item()) for t in range(K)])
+            # state_token_positions: list[B][K] — position of each injected state token.
+            # Used by _build_block_mask to implement atten_goal_state (Seer pretrain.sh:42):
+            # future_t may additionally attend the state token of frame t+atten_goal.
+            state_token_positions: "list[list[int]] | None" = insert_pos
+        elif K > 1:
+            qwen_frame_ends = self._find_frame_end_positions(
+                qwen_inputs["input_ids"], _V, K, self._VISION_END_TOKEN_ID
+            )
+            state_token_positions = None  # no injected state tokens in this path
+        else:
+            qwen_frame_ends = None
+            state_token_positions = None
+
+        return examples, qwen_inputs, hidden, qwen_frame_ends, state_token_positions
+
+    # ------------------------------------------------------------------
+    #  Static helpers for state injection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_frame_start_positions(
+        input_ids: torch.Tensor,
+        num_views: int,
+        K: int,
+        vision_start_id: int,
+    ) -> "list[list[int]]":
+        """Return the position of the FIRST vision_start token for each frame.
+
+        With V views per frame, the sequence contains K*V vision_start tokens.
+        Frame t's first view starts at the t*V-th occurrence (0-indexed).
+        State tokens are inserted just before this position so that image tokens
+        (which come after vision_start) can attend to state via causal attention.
+
+        Returns list[B] of list[K] int positions.
+        """
+        result = []
+        for b in range(input_ids.shape[0]):
+            vs_pos = (input_ids[b] == vision_start_id).nonzero(as_tuple=False).squeeze(-1)
+            frame_starts = [int(vs_pos[t * num_views].item()) for t in range(K)]
+            result.append(frame_starts)
+        return result
+
+    @staticmethod
+    def _find_frame_end_positions(
+        input_ids: torch.Tensor,
+        num_views: int,
+        K: int,
+        vision_end_id: int,
+    ) -> "list[list[int]]":
+        """Return the position of the last vision_end token for each frame.
+
+        With V views per frame, the sequence contains K*V vision_end tokens.
+        Frame t's last token is the (t+1)*V-th occurrence (0-indexed: (t+1)*V-1).
+
+        Returns list[B] of list[K] int positions.
+        """
+        result = []
+        for b in range(input_ids.shape[0]):
+            ve_pos = (input_ids[b] == vision_end_id).nonzero(as_tuple=False).squeeze(-1)
+            frame_ends = [
+                int(ve_pos[(t + 1) * num_views - 1].item()) for t in range(K)
+            ]
+            result.append(frame_ends)
+        return result
+
+    @staticmethod
+    def _extend_inputs_for_state(
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        frame_end_positions: "list[list[int]]",
+        pad_token_id: int,
+    ) -> "tuple[torch.Tensor, torch.Tensor, list[list[int]]]":
+        """Insert one pad token after each frame's last vision_end.
+
+        Returns:
+            new_input_ids:    (B, T+K)
+            new_attention_mask: (B, T+K)
+            insert_positions: list[B] of list[K] — positions in new sequence
+                              where the inserted tokens landed.
+        """
+        new_ids_list, new_mask_list, all_insert_pos = [], [], []
+
+        for b, ends in enumerate(frame_end_positions):
+            row_ids  = input_ids[b]
+            row_mask = attention_mask[b]
+            parts_ids, parts_mask, insert_pos = [], [], []
+            prev = 0
+
+            for end_pos in sorted(ends):
+                parts_ids.append(row_ids[prev : end_pos + 1])
+                parts_mask.append(row_mask[prev : end_pos + 1])
+                # Record the position AFTER the inserted token lands.
+                insert_pos.append(sum(p.shape[0] for p in parts_ids))
+                parts_ids.append(row_ids.new_full((1,), pad_token_id))
+                parts_mask.append(row_mask.new_ones(1))
+                prev = end_pos + 1
+
+            parts_ids.append(row_ids[prev:])
+            parts_mask.append(row_mask[prev:])
+
+            new_ids_list.append(torch.cat(parts_ids))
+            new_mask_list.append(torch.cat(parts_mask))
+            all_insert_pos.append(insert_pos)
+
+        return (
+            torch.stack(new_ids_list),
+            torch.stack(new_mask_list),
+            all_insert_pos,
+        )
+
+    # DT-specific keys that _unpack_lerobot_sample does not carry through.
+    _DT_PASSTHROUGH_KEYS = ("future_rgb", "image_history", "future_rgb_history", "action_history")
 
     def _prepare_examples(self, examples: List[dict]) -> List[dict]:
         """Unpack samples and build Seer-aligned K-frame image list for Qwen.
@@ -182,9 +441,10 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         """
         unpacked = super()._prepare_examples(examples)
         for orig, out in zip(examples, unpacked):
-            # Always restore future_rgb for training supervision.
-            if "future_rgb" in orig:
-                out["future_rgb"] = orig["future_rgb"]
+            # Restore DT-specific keys stripped by the parent unpack step.
+            for key in self._DT_PASSTHROUGH_KEYS:
+                if key in orig:
+                    out[key] = orig[key]
 
             # Re-extract K-frame state, bypassing parent's squeeze.
             # Parent's _extract_gr00t_state_by_indices does reshape(...)[0] for ndim>1,
@@ -199,7 +459,12 @@ class UamVLAGR00T_DT(UamVLAGR00T):
                         indices = list(range(7))                 # default Calvin gr00t dims
                     if max(indices) < arr.shape[-1]:
                         # (K, state_dim) — all frames, configured dims only
-                        out["state"] = torch.as_tensor(arr[:, indices])
+                        state_arr = arr[:, indices].copy()
+                        # Align gripper state with Seer (train_utils.py:109):
+                        # CALVIN gripper is {-1, 1}; Seer converts to {0, 1} via (x+1)//2.
+                        # Apply to the last dimension (gripper is always the last index).
+                        state_arr[:, -1] = (state_arr[:, -1] + 1) / 2
+                        out["state"] = torch.as_tensor(state_arr)
 
             # Build multi-frame image list (oldest → newest → current).
             history = orig.get("image_history")  # list[list[PIL]], shape (K-1, num_views)
@@ -228,6 +493,51 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             result.append(frames)
         return result
 
+    @staticmethod
+    def _collect_future_rgb_history(examples: List[dict], device, dtype):
+        """Batch dense future_rgb_history for compute_loss dense mode.
+
+        Input per sample: list[K] of list[num_views] of Tensor(3,H,W).
+        Output: list[K] of list[num_views] of Tensor(B,3,H,W).
+        Returns None when field is absent (single-step fallback).
+        """
+        if not examples or "future_rgb_history" not in examples[0]:
+            return None
+        K = len(examples[0]["future_rgb_history"])
+        V = len(examples[0]["future_rgb_history"][0])
+        result = []
+        for t in range(K):
+            views = []
+            for v in range(V):
+                frames = torch.stack([
+                    (e["future_rgb_history"][t][v].float()
+                     if torch.is_tensor(e["future_rgb_history"][t][v])
+                     else torch.as_tensor(
+                         np.asarray(e["future_rgb_history"][t][v]), dtype=torch.float32))
+                    for e in examples
+                ]).to(device=device, dtype=dtype)
+                views.append(frames)
+            result.append(views)
+        return result  # list[K] of list[V] of Tensor(B,3,H,W)
+
+    @staticmethod
+    def _collect_action_history(examples: List[dict]):
+        """Batch dense action_history for compute_loss dense mode.
+
+        Input per sample: ndarray (K, T_act, action_dim).
+        Output: ndarray (B, K, T_act, action_dim).
+        Returns None when field is absent.
+        """
+        if not examples or "action_history" not in examples[0]:
+            return None
+        return np.stack(
+            [
+                np.asarray(e["action_history"], dtype=np.float32)
+                for e in examples
+            ],
+            axis=0,
+        )  # (B, K, T_act, action_dim)
+
     # ------------------------------------------------------------------
     #  Training forward
     # ------------------------------------------------------------------
@@ -235,41 +545,31 @@ class UamVLAGR00T_DT(UamVLAGR00T):
     def forward(self, examples: List[dict], **kwargs) -> dict:
         """Training forward: pixel-space future MSE + Seer-style MLP action MSE.
 
-        All K frames are processed by Qwen in _prepare_examples; hidden contains
-        the full temporal context.  No separate history encoder needed.
-
-        When action_model is frozen (freeze_modules: "action_model" in pretrain config),
-        action_loss is excluded from backward so the future branch can pretrain
-        the Qwen backbone without noisy action gradients.
+        State tokens are injected into Qwen's input sequence (Option A: input-side
+        temporal alignment) so that all K frames' state information is processed
+        by Qwen's full depth before reaching the SeerJointDecoder.
         """
         examples = self._prepare_examples(examples)
-        examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
+
+        # Pre-extract state for Qwen temporal injection (before hidden exists).
+        # Use parameter device; will be re-cast to hidden's dtype after forward.
+        _dev = next(self.parameters()).device
+        state_pre = self._state_batch_or_none(examples, _dev, torch.float32)
+
+        examples, qwen_inputs, hidden, qwen_frame_ends, state_token_positions = (
+            self._encode_qwen_hidden(examples, state=state_pre)
+        )
 
         device, dtype = hidden.device, hidden.dtype
+        state = state_pre.to(device=device, dtype=dtype) if state_pre is not None else None
 
-        # --- Robot state (K-frame: all history + current) ---
-        # With K-frame state config, state shape is (B, K, state_dim).
-        state = self._state_batch_or_none(examples, device, dtype)
-
-        # Inject K-frame state tokens into Qwen hidden so the joint decoder
-        # sees proprio via the block mask (Seer per-timestep state token coupling).
-        if state is not None and self.state_proj_to_llm is not None:
-            s = state.float()
-            if s.ndim == 2:
-                s = s.unsqueeze(1)
-            state_tokens = self.state_proj_to_llm(s).to(dtype)
-            hidden = torch.cat([hidden, state_tokens], dim=1)  # (B, L+K, d_llm)
-
-        # qwen_pad_mask: (B, L+K) — 1=valid, 0=pad (Qwen left-pads; state tokens valid)
         qwen_pad_mask = qwen_inputs.get("attention_mask")
-        if qwen_pad_mask is not None and state is not None and self.state_proj_to_llm is not None:
-            K_state = state.shape[1] if state.ndim == 3 else 1
-            extra   = qwen_pad_mask.new_ones(qwen_pad_mask.shape[0], K_state)
-            qwen_pad_mask = torch.cat([qwen_pad_mask, extra], dim=1)
 
         # --- Future reconstruction + action prediction (unified Seer block mask) ---
-        batch_dict      = self._collate_aux(examples, qwen_inputs)
-        future_rgb_list = self._collect_future_rgb(examples, device, dtype)
+        batch_dict          = self._collate_aux(examples, qwen_inputs)
+        future_rgb_list     = self._collect_future_rgb(examples, device, dtype)
+        future_rgb_history  = self._collect_future_rgb_history(examples, device, dtype)
+        action_history      = self._collect_action_history(examples)
 
         gt_actions = [e["action"] for e in examples]
         with torch.autocast("cuda", dtype=torch.float32):
@@ -290,9 +590,12 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             future_loss, action_loss = self.seer_joint_decoder.compute_loss(
                 qwen_hidden=hidden,
                 qwen_pad_mask=qwen_pad_mask,
-                state=state,
                 gt_actions=actions_target,
                 future_rgb_list=future_rgb_list,
+                action_history=action_history,
+                future_rgb_history=future_rgb_history,
+                qwen_frame_ends=qwen_frame_ends,
+                state_token_positions=state_token_positions,
             )
 
         log_metrics = {
@@ -312,35 +615,30 @@ class UamVLAGR00T_DT(UamVLAGR00T):
 
     @torch.inference_mode()
     def predict_action(self, examples, **kwargs) -> dict:
-        """Inference: Qwen → state inject → SeerJointDecoder → actions."""
+        """Inference: Qwen (with state injection) → SeerJointDecoder → actions."""
         if not isinstance(examples, list):
             examples = [examples]
 
         examples = self._prepare_examples(examples)
-        examples, qwen_inputs, hidden = self._encode_qwen_hidden(examples)
+
+        _dev = next(self.parameters()).device
+        state_pre = self._state_batch_or_none(examples, _dev, torch.float32)
+
+        examples, qwen_inputs, hidden, qwen_frame_ends, state_token_positions = (
+            self._encode_qwen_hidden(examples, state=state_pre)
+        )
 
         device, dtype = hidden.device, hidden.dtype
-        state = self._state_batch_or_none(examples, device, dtype)
-
-        # Inject K-frame state tokens (same as forward).
-        if state is not None and self.state_proj_to_llm is not None:
-            s = state.float()
-            if s.ndim == 2:
-                s = s.unsqueeze(1)
-            state_tokens = self.state_proj_to_llm(s).to(dtype)
-            hidden = torch.cat([hidden, state_tokens], dim=1)
+        state = state_pre.to(device=device, dtype=dtype) if state_pre is not None else None
 
         qwen_pad_mask = qwen_inputs.get("attention_mask")
-        if qwen_pad_mask is not None and state is not None and self.state_proj_to_llm is not None:
-            K_state = state.shape[1] if state.ndim == 3 else 1
-            extra   = qwen_pad_mask.new_ones(qwen_pad_mask.shape[0], K_state)
-            qwen_pad_mask = torch.cat([qwen_pad_mask, extra], dim=1)
 
         with torch.autocast("cuda", dtype=torch.float32):
             pred_actions = self.seer_joint_decoder.predict_action(
                 qwen_hidden=hidden,
                 qwen_pad_mask=qwen_pad_mask,
-                state=state,
+                qwen_frame_ends=qwen_frame_ends,
+                state_token_positions=state_token_positions,
             )
 
         pred_np = pred_actions.detach().cpu().numpy()

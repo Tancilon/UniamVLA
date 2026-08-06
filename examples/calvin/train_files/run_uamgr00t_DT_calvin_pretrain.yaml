@@ -44,14 +44,14 @@ framework:
   seer_joint_decoder:
     # Future reconstruction (MAE ViT decoder)
     num_obs_tokens: 9
-    future_weight: 1.0          # upweight future recon during pretrain
+    future_weight: 0.1           # Seer train_utils.py: 0.1 * loss_image
     patch_size: 16
     decoder_dim: 2048
     num_decoder_heads: 16
     num_decoder_blocks: 2
 
     # Joint self-attention (Seer block mask)
-    num_joint_layers: 2
+    num_joint_layers: 4
     num_heads: 16
 
     # Action prediction (MLP decoder)
@@ -60,6 +60,13 @@ framework:
     action_horizon: 3
     hidden_dim: 1024
     gripper_loss_ratio: 0.01
+
+    # Dense per-timestep supervision (Seer-aligned).
+    # history_frames must match framework.history_frames.
+    # atten_goal: last atten_goal groups unsupervised (K_sup = K - atten_goal).
+    # Seer pretrain.sh: sequence_length=14, atten_goal=4 → K_sup=10. Match exactly.
+    history_frames: 14
+    atten_goal: 4                # Seer pretrain default (K_sup = 14-4 = 10)
 
   reduce_in_full_precision: true
 
@@ -93,6 +100,9 @@ datasets:
     # DT multi-frame signals: K-1=13 history + future at t+3.
     num_history_frames: 13      # = history_frames - 1
     future_offset: 3
+    # Dense supervision: produce future_rgb_history + action_history per sample.
+    # atten_goal must equal future_offset so each timestep's target is at t+future_offset.
+    atten_goal: 3
 
     # LeRobot v3.0 dataset (task_ABC_D_play_lerobot was created by LeRobot v3 API)
     lerobot_version: "v3.0"

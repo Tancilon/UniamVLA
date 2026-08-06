@@ -8,10 +8,10 @@ future and action tokens in the same sequence as Qwen hidden:
               ↓  masked self-attention (Seer block mask)
     [qwen_out          | future_tokens (N_f)        | action_feats (T_act)     ]
 
-Seer block mask (Seer seer_model.py §3):
-  qwen(L+K)    → sees: qwen only   (no future, no action)
-  future(N_f)  → sees: qwen+future (not action)
-  action(T_act)→ sees: everything
+Seer block mask — aligned with seer_model.py generate_attention_mask:
+  qwen(L+K)    → qwen only          (B tokens never keys for A tokens)
+  future_t     → qwen only          (per-timestep independent; no cross-B key access)
+  action_t     → qwen + future_t    (same-timestep obs_tokens only; Seer exception rule)
 
 This exactly mirrors Seer's causal obs/action token visibility rules while
 keeping Qwen3-VL as the backbone (replacing GPT2).
@@ -122,35 +122,46 @@ class SeerJointDecoder(nn.Module):
         num_decoder_heads: int = 16,
         num_decoder_blocks: int = 2,
         future_weight: float = 1.0,
+        history_frames: int = 1,    # K total query groups (Seer: sequence_length)
+        atten_goal: int = 0,        # last atten_goal groups not supervised (Seer default 3)
     ) -> None:
         super().__init__()
 
         if hidden_dim is None:
             hidden_dim = d_model // 2
 
-        self.N_f   = num_views * num_obs_tokens   # total future tokens
-        self.N_act = action_pred_steps
+        self.N_f    = num_views * num_obs_tokens   # tokens per query group (future)
+        self.N_act  = action_pred_steps             # tokens per query group (action)
+        self.K      = history_frames                # total query groups
+        self.K_sup  = max(1, history_frames - atten_goal)  # supervised groups
         self.action_dim = action_dim
         self._gripper_loss_ratio = gripper_loss_ratio
 
-        # Learnable query tokens (moved from FutureCrossAttnBranch and SeerMLPActionHead)
-        self.future_query_tokens = nn.Parameter(torch.zeros(1, self.N_f, d_model))
-        self.action_pred_tokens  = nn.Parameter(torch.zeros(1, action_pred_steps, d_model))
-        nn.init.xavier_uniform_(self.future_query_tokens.view(1, -1, d_model))
-        nn.init.normal_(self.action_pred_tokens, std=0.02)
+        # Query tokens: shared base + per-timestep positional embedding.
+        # Aligns with Seer (seer_model.py:190): obs_tokens (1,1,N,D) shared across all
+        # S timesteps; position_embedding (1,S,1,D) added to distinguish timesteps.
+        # Parameters:
+        #   future_query_base  (1, N_f,   D) — shared semantic base, xavier init
+        #   action_pred_base   (1, N_act, D) — shared semantic base, normal init
+        #   temporal_pos_emb   (K, 1,     D) — one vector per timestep, broadcast to
+        #                                       both future and action tokens (Seer style)
+        self.future_query_base  = nn.Parameter(torch.zeros(1, self.N_f,   d_model))
+        self.action_pred_base   = nn.Parameter(torch.zeros(1, self.N_act, d_model))
+        self.temporal_pos_emb   = nn.Parameter(torch.zeros(self.K, 1,     d_model))
+        nn.init.xavier_uniform_(self.future_query_base.squeeze(0))
+        nn.init.normal_(self.action_pred_base, std=0.02)
+        # temporal_pos_emb: zeros init (Seer initialises position embeddings at zero)
 
-        # Optional state encoder: biases action_pred_tokens with current-frame state.
-        self.state_encoder = (
-            nn.Linear(state_dim, d_model) if state_dim > 0 else None
-        )
+        self.state_encoder = None  # removed: state is now injected into Qwen input_embeds
+        # (state_dim kept in signature for YAML backward compat; value is intentionally unused)
 
-        # Joint self-attention layers with Seer block mask.
+        self._num_heads = num_heads  # stored for (B*H, N, N) mask expansion in _run_joint
+
         self.joint_layers = nn.ModuleList([
             _JointSelfAttnBlock(d_model, num_heads)
             for _ in range(num_joint_layers)
         ])
 
-        # Per-view Seer MAE decoders (unchanged from FutureCrossAttnBranch).
         self.vit_decoders = nn.ModuleList([
             SeerViTDecoder(
                 d_model=d_model,
@@ -165,43 +176,89 @@ class SeerJointDecoder(nn.Module):
             for _ in range(num_views)
         ])
 
-        # Action MLP decoder (unchanged from SeerMLPActionHead).
         mlp_out = hidden_dim // 2
         self.action_decoder  = nn.Sequential(
             nn.Linear(d_model, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, mlp_out), nn.ReLU(),
         )
         self.arm_decoder     = nn.Sequential(nn.Linear(mlp_out, action_dim - 1), nn.Tanh())
-        self.gripper_decoder = nn.Linear(mlp_out, 1)   # raw logit for BCEWithLogits
+        self.gripper_decoder = nn.Linear(mlp_out, 1)
 
         logger.info(
-            "[SeerJointDecoder] N_f=%d  N_act=%d  num_joint_layers=%d  "
-            "num_obs_tokens=%d  patch_size=%d  state_encoder=%s",
-            self.N_f, action_pred_steps, num_joint_layers,
-            num_obs_tokens, patch_size,
+            "[SeerJointDecoder] K=%d  K_sup=%d  N_f=%d  N_act=%d  "
+            "num_joint_layers=%d  num_obs_tokens=%d  patch_size=%d  state_encoder=%s",
+            self.K, self.K_sup, self.N_f, self.N_act,
+            num_joint_layers, num_obs_tokens, patch_size,
             "enabled" if self.state_encoder is not None else "DISABLED",
         )
     # ------------------------------------------------------------------
     #  Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_block_mask(self, L_q: int, device: torch.device) -> torch.Tensor:
-        """Build Seer-style additive block mask (0=allowed, -inf=blocked).
+    def _build_block_mask(
+        self,
+        L_q: int,
+        device: torch.device,
+        B: int = 1,
+        qwen_frame_ends: "list[list[int]] | None" = None,
+        state_token_positions: "list[list[int]] | None" = None,
+    ) -> torch.Tensor:
+        """Build per-sample Seer temporal causal block mask.
+
+        Sequence layout:
+          [qwen(L_q) | f_0(N_f)|a_0(N_act) | f_1|a_1 | ... | f_{K-1}|a_{K-1}]
 
         Visibility rules:
-          qwen(L_q)    → qwen only   (VLM representation shielded from prediction tokens)
-          future(N_f)  → qwen+future (obs tokens see context but not action)
-          action(T_act)→ all         (action tokens see full context incl. future)
+          qwen      -> qwen only
+          future_t  -> qwen[0..end_t[b])  (per-sample causal boundary)
+                    -> ALSO: state token of frame t+atten_goal (atten_goal_state)
+          action_t  -> qwen[0..end_t[b]) + future_t
+
+        qwen_frame_ends: list[B][K] — per-sample frame end positions.
+        state_token_positions: list[B][K] — position of each injected state token.
+          When provided, future_t may additionally attend the state token of the
+          goal timestep t+atten_goal (Seer pretrain --atten_goal_state flag).
+          atten_goal is derived from self.K - self.K_sup.
+
+        Returns (B, N, N) — caller expands to (B*num_heads, N, N) for MHA.
         """
-        N = L_q + self.N_f + self.N_act
-        mask = torch.full((N, N), float("-inf"), device=device)
-        # qwen → qwen
-        mask[:L_q, :L_q] = 0.0
-        # future → qwen + future
-        mask[L_q : L_q + self.N_f, : L_q + self.N_f] = 0.0
-        # action → all
-        mask[L_q + self.N_f :, :] = 0.0
-        return mask    # (N, N)
+        K   = self.K
+        N_f = self.N_f
+        N_a = self.N_act
+        N   = L_q + K * (N_f + N_a)
+        _atten_goal = K - self.K_sup  # = atten_goal stored implicitly via K_sup
+
+        masks = []
+        for b in range(B):
+            mask = torch.full((N, N), float("-inf"), device=device)
+            mask[:L_q, :L_q] = 0.0
+
+            for t in range(K):
+                f_s = L_q + t * (N_f + N_a)
+                f_e = f_s + N_f
+                a_s = f_e
+                a_e = a_s + N_a
+
+                end_t = (qwen_frame_ends[b][t] + 1) if qwen_frame_ends is not None else L_q
+
+                mask[f_s:f_e, :end_t] = 0.0          # future_t -> qwen[0..end_t)
+                mask[a_s:a_e, :end_t] = 0.0          # action_t -> qwen[0..end_t)
+                mask[a_s:a_e, f_s:f_e] = 0.0         # action_t -> future_t
+
+                # atten_goal_state (Seer pretrain --atten_goal_state):
+                # future_t may additionally attend the state token of the goal frame
+                # t + atten_goal.  This gives future prediction a goal-conditioning
+                # signal: "predict the image given you know where the robot will be
+                # atten_goal steps later."  Only valid when state tokens are injected.
+                if state_token_positions is not None and _atten_goal > 0:
+                    goal_t = t + _atten_goal
+                    if goal_t < K:
+                        goal_state_pos = state_token_positions[b][goal_t]
+                        mask[f_s:f_e, goal_state_pos] = 0.0
+
+            masks.append(mask)
+
+        return torch.stack(masks)  # (B, N, N)
 
     def _build_key_padding_mask(
         self,
@@ -210,54 +267,57 @@ class SeerJointDecoder(nn.Module):
         qwen_pad_mask: torch.Tensor | None,
         device: torch.device,
     ) -> torch.Tensor | None:
-        """Extend Qwen padding mask to cover the full joint sequence.
-
-        ``qwen_pad_mask`` is (B, L_q) with 1=valid, 0=pad (from qwen attention_mask).
-        nn.MultiheadAttention's ``key_padding_mask`` convention: True=IGNORE.
-        """
         if qwen_pad_mask is None:
             return None
-        qwen_kpm = ~qwen_pad_mask.bool()                        # True=pad → ignore
-        extra    = torch.zeros(B, self.N_f + self.N_act, dtype=torch.bool, device=device)
-        return torch.cat([qwen_kpm, extra], dim=1)              # (B, L_q+N_f+N_act)
+        qwen_kpm = ~qwen_pad_mask.bool()
+        extra    = torch.zeros(B, self.K * (self.N_f + self.N_act), dtype=torch.bool, device=device)
+        return torch.cat([qwen_kpm, extra], dim=1)
 
     def _run_joint(
         self,
         qwen_hidden: torch.Tensor,
-        state: torch.Tensor | None,
         qwen_pad_mask: torch.Tensor | None,
+        qwen_frame_ends: "list[list[int]] | None" = None,
+        state_token_positions: "list[list[int]] | None" = None,
     ):
-        """Run the joint self-attention and return (future_tokens, action_feats)."""
+        """Run joint self-attn → return (future_all, action_all) each (B, K*N, D)."""
         B, L_q, D = qwen_hidden.shape
         device, dtype = qwen_hidden.device, qwen_hidden.dtype
 
-        # Expand learnable query tokens to batch size
-        fq = self.future_query_tokens.expand(B, -1, -1).to(dtype)  # (B, N_f, D)
-        aq = self.action_pred_tokens.expand(B, -1, -1).to(dtype)   # (B, N_act, D)
+        # Expand K query groups: shared_base + temporal_pos_emb → (K, N, D) → (B, K*N, D)
+        # Mirrors Seer: token_t = obs_tokens_base + position_embedding[t]
+        fq_knd = (self.future_query_base + self.temporal_pos_emb).to(dtype)  # (K, N_f, D)
+        aq_knd = (self.action_pred_base  + self.temporal_pos_emb).to(dtype)  # (K, N_act, D)
+        fq = fq_knd.unsqueeze(0).expand(B, -1, -1, -1).reshape(B, self.K * self.N_f,   D)
+        aq = aq_knd.unsqueeze(0).expand(B, -1, -1, -1).reshape(B, self.K * self.N_act, D)
 
-        # Optional: bias action tokens with current-frame state
-        if state is not None and self.state_encoder is not None:
-            s = state.float()
-            if s.ndim == 3:
-                s = s[:, -1, :]           # current frame (B, state_dim)
-            elif s.ndim == 1:
-                s = s.unsqueeze(0)
-            aq = aq + self.state_encoder(s).to(dtype).unsqueeze(1)
+        # Interleave into [qwen | f_0|a_0 | f_1|a_1 | ...]
+        parts = [qwen_hidden]
+        for t in range(self.K):
+            parts.append(fq[:, t * self.N_f : (t + 1) * self.N_f])
+            parts.append(aq[:, t * self.N_act : (t + 1) * self.N_act])
+        seq = torch.cat(parts, dim=1)  # (B, L_q + K*(N_f+N_act), D)
 
-        # Build joint sequence: [qwen | future | action]
-        seq = torch.cat([qwen_hidden, fq, aq], dim=1)  # (B, L_q+N_f+N_act, D)
-
-        # Build Seer block mask and optional padding mask
-        block_mask = self._build_block_mask(L_q, device)
+        block_mask = self._build_block_mask(L_q, device, B, qwen_frame_ends,
+                                             state_token_positions)
+        # Expand (B, N, N) → (B*num_heads, N, N) as required by nn.MultiheadAttention.
+        H = self._num_heads
+        N = block_mask.shape[-1]
+        block_mask = block_mask.unsqueeze(1).expand(-1, H, -1, -1).reshape(B * H, N, N)
         kpm        = self._build_key_padding_mask(L_q, B, qwen_pad_mask, device)
 
-        # Run joint self-attention layers
         for layer in self.joint_layers:
             seq = layer(seq, attn_mask=block_mask, key_padding_mask=kpm)
 
-        future_tokens = seq[:, L_q : L_q + self.N_f]      # (B, N_f, D)
-        action_feats  = seq[:, L_q + self.N_f :]           # (B, N_act, D)
-        return future_tokens, action_feats
+        # Slice out future and action tokens for all K groups
+        future_out = torch.zeros(B, self.K, self.N_f, D, device=device, dtype=dtype)
+        action_out = torch.zeros(B, self.K, self.N_act, D, device=device, dtype=dtype)
+        for t in range(self.K):
+            f_s = L_q + t * (self.N_f + self.N_act)
+            future_out[:, t] = seq[:, f_s : f_s + self.N_f]
+            action_out[:, t] = seq[:, f_s + self.N_f : f_s + self.N_f + self.N_act]
+
+        return future_out, action_out   # (B, K, N_f, D), (B, K, N_act, D)
     # ------------------------------------------------------------------
     #  Training
     # ------------------------------------------------------------------
@@ -266,79 +326,111 @@ class SeerJointDecoder(nn.Module):
         self,
         qwen_hidden: torch.Tensor,
         qwen_pad_mask: torch.Tensor | None,
-        state: torch.Tensor | None,
         gt_actions: torch.Tensor,
         future_rgb_list: List[torch.Tensor] | None,
+        action_history: "np.ndarray | None" = None,
+        future_rgb_history: "List | None" = None,
+        qwen_frame_ends: "list[list[int]] | None" = None,
+        state_token_positions: "list[list[int]] | None" = None,
     ):
-        """Training forward: Seer MAE reconstruction loss + SmoothL1+BCE action loss.
+        """Dense per-timestep training (Seer-aligned).
 
-        Args:
-            qwen_hidden:     (B, L, D) — Qwen last hidden states (+ state tokens appended).
-            qwen_pad_mask:   (B, L) 1=valid 0=pad from qwen attention_mask; or None.
-            state:           (B, K, state_dim) or None — for action state conditioning.
-            gt_actions:      (B, T_act, action_dim) — ground-truth actions.
-            future_rgb_list: list[Tensor(B,3,H,W)] per view, or None (pretrain w/o action).
+        Dense mode (action_history / future_rgb_history provided):
+          - Computes loss for K_sup supervised timesteps (t=0..K_sup-1).
+          - action_history: ndarray (B, K, T_act, action_dim)
+          - future_rgb_history: list[K] of list[num_views](B,3,H,W) tensors
+
+        Single-step mode (backward compat, only gt_actions / future_rgb_list):
+          - Uses query group t=K-1 (last = current timestep).
+
+        qwen_frame_ends: passed to _build_block_mask to prevent future-frame leakage.
 
         Returns:
-            future_loss, action_loss  — scalar losses.
+            future_loss, action_loss — scalar losses.
         """
-        future_tokens, action_feats = self._run_joint(qwen_hidden, state, qwen_pad_mask)
+        future_out, action_out = self._run_joint(qwen_hidden, qwen_pad_mask,
+                                                  qwen_frame_ends, state_token_positions)
+        # future_out: (B, K, N_f, D),  action_out: (B, K, N_act, D)
 
-        # ── Future reconstruction loss (Seer MAE per view) ─────────────────────
+        num_views    = len(self.vit_decoders)
+        obs_per_view = self.N_f // num_views
+
+        dense = (action_history is not None) and (future_rgb_history is not None)
+
+        # ── Future reconstruction loss ──────────────────────────────────────────
         future_loss = qwen_hidden.new_zeros(())
-        if future_rgb_list is not None and len(future_rgb_list) > 0:
-            num_views = len(self.vit_decoders)
-            obs_per_view = self.N_f // num_views
+        if dense:
+            for t in range(self.K_sup):
+                for v, dec in enumerate(self.vit_decoders):
+                    obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
+                    rgb_v = future_rgb_history[t][v]
+                    future_loss = future_loss + dec.compute_loss(obs_v, rgb_v)
+            future_loss = future_loss / (self.K_sup * num_views)
+        elif future_rgb_list is not None and len(future_rgb_list) > 0:
+            t = self.K - 1   # current timestep group
             for v, dec in enumerate(self.vit_decoders):
-                obs_v = future_tokens[:, v * obs_per_view : (v + 1) * obs_per_view]
+                obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
                 future_loss = future_loss + dec.compute_loss(obs_v, future_rgb_list[v])
             future_loss = future_loss / num_views
         else:
-            # ZeRO-3 dummy: touch decoder params
             for dec in self.vit_decoders:
                 future_loss = future_loss + (dec.decoder_pred.weight * 0.0).sum()
 
         # ── Action loss (SmoothL1 arm + 0.01×BCE gripper) ──────────────────────
-        feat          = self.action_decoder(action_feats)     # (B, T_act, mlp_out)
-        arm_pred      = self.arm_decoder(feat)                # (B, T_act, action_dim-1) Tanh
-        gripper_logit = self.gripper_decoder(feat)            # (B, T_act, 1)
-
-        gt = gt_actions.to(arm_pred.dtype)
-        gt_arm     = gt[..., :-1]
-        gt_gripper = (gt[..., -1:] > 0).float()
-
-        arm_loss     = F.smooth_l1_loss(arm_pred, gt_arm)
-        gripper_loss = F.binary_cross_entropy_with_logits(gripper_logit, gt_gripper)
-        action_loss  = arm_loss + self._gripper_loss_ratio * gripper_loss
+        action_loss = qwen_hidden.new_zeros(())
+        if dense:
+            import numpy as _np
+            act_hist = torch.as_tensor(
+                _np.asarray(action_history), device=qwen_hidden.device, dtype=qwen_hidden.dtype
+            )  # (B, K, T_act, action_dim)
+            for t in range(self.K_sup):
+                feats         = self.action_decoder(action_out[:, t])
+                arm_pred      = self.arm_decoder(feats)
+                gripper_logit = self.gripper_decoder(feats)
+                gt            = act_hist[:, t].to(arm_pred.dtype)
+                action_loss   = action_loss + (
+                    F.smooth_l1_loss(arm_pred, gt[..., :-1])
+                    + self._gripper_loss_ratio * F.binary_cross_entropy_with_logits(
+                        gripper_logit, (gt[..., -1:] > 0).float()
+                    )
+                )
+            action_loss = action_loss / self.K_sup
+        else:
+            t             = self.K - 1
+            feats         = self.action_decoder(action_out[:, t])
+            arm_pred      = self.arm_decoder(feats)
+            gripper_logit = self.gripper_decoder(feats)
+            gt            = gt_actions.to(arm_pred.dtype)
+            action_loss   = (
+                F.smooth_l1_loss(arm_pred, gt[..., :-1])
+                + self._gripper_loss_ratio * F.binary_cross_entropy_with_logits(
+                    gripper_logit, (gt[..., -1:] > 0).float()
+                )
+            )
 
         return future_loss, action_loss
-
-    # ------------------------------------------------------------------
-    #  Inference
-    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def predict_action(
         self,
         qwen_hidden: torch.Tensor,
         qwen_pad_mask: torch.Tensor | None,
-        state: torch.Tensor | None,
+        qwen_frame_ends: "list[list[int]] | None" = None,
+        state_token_positions: "list[list[int]] | None" = None,
     ) -> torch.Tensor:
-        """Inference: return predicted actions (B, T_act, action_dim).
-
-        Gripper output is binarised to {-1, +1} from logit sign to match
-        eval_calvin.py:700 threshold-at-0 protocol.
-        """
-        _, action_feats = self._run_joint(qwen_hidden, state, qwen_pad_mask)
-        feat          = self.action_decoder(action_feats)
-        arm           = self.arm_decoder(feat)                        # Tanh [-1,1]
-        gripper_logit = self.gripper_decoder(feat)
+        """Inference: use LAST query group (t=K-1 = current timestep)."""
+        _, action_out = self._run_joint(qwen_hidden, qwen_pad_mask,
+                                        qwen_frame_ends, state_token_positions)
+        # Use last group (current timestep)
+        feats         = self.action_decoder(action_out[:, self.K - 1])
+        arm           = self.arm_decoder(feats)
+        gripper_logit = self.gripper_decoder(feats)
         gripper       = torch.where(
             gripper_logit > 0,
-            torch.ones_like(gripper_logit),    # open  → +1
-            -torch.ones_like(gripper_logit),   # close → -1
+            torch.ones_like(gripper_logit),
+            -torch.ones_like(gripper_logit),
         )
-        return torch.cat([arm, gripper], dim=-1)   # (B, T_act, action_dim)
+        return torch.cat([arm, gripper], dim=-1)
 
     # ------------------------------------------------------------------
     #  Properties

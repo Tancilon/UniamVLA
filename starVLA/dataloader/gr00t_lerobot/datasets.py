@@ -1444,28 +1444,79 @@ class LeRobotSingleDataset(Dataset):
         # DT mode: pack image_history and future_rgb
         # ------------------------------------------------------------------
         if dt_mode:
+            # ------------------------------------------------------------------
             # image_history: list[K-1] of list[num_views PIL images]
-            # Ordered from oldest (index 0) to most-recent (index K-2).
+            # Ordered oldest (index 0) to most-recent (index K-2).
+            # ------------------------------------------------------------------
             image_history = []
             for k in range(num_history_frames):
                 frame_views = []
                 for video_key in self.modality_keys["video"]:
-                    frame = data[video_key][k]  # (H, W, C) uint8
+                    frame = data[video_key][k]
                     pil = Image.fromarray(frame).resize((image_resize, image_resize))
                     frame_views.append(pil)
                 image_history.append(frame_views)
             sample["image_history"] = image_history
 
-            # future_rgb: list[num_views] of float32 Tensor (3, H, W) in [0,1]
+            # ------------------------------------------------------------------
+            # future_rgb (single, backward compat): frame at delta=future_offset
+            # future_frame_idx = current_frame_idx + future_offset (NOT +1)
+            # because observation_indices = [-K+1,...,0,1,...,future_offset].
+            # ------------------------------------------------------------------
             if future_offset > 0:
-                future_frame_idx = current_frame_idx + 1  # frame right after current
+                future_frame_idx = current_frame_idx + future_offset
                 future_rgb = []
                 for video_key in self.modality_keys["video"]:
-                    frame = data[video_key][future_frame_idx]  # (H, W, C) uint8
+                    frame = data[video_key][future_frame_idx]
                     tensor = torch.from_numpy(frame.copy()).float() / 255.0
-                    tensor = tensor.permute(2, 0, 1)  # (3, H, W)
+                    tensor = tensor.permute(2, 0, 1)
                     future_rgb.append(tensor)
                 sample["future_rgb"] = future_rgb
+
+            # ------------------------------------------------------------------
+            # Dense: future_rgb_history + action_history (Seer per-timestep)
+            # K = history_frames (total timesteps including current).
+            # future_rgb_history[t] = views at delta = -(K-1)+t + future_offset
+            #   = array position: atten_goal + t  (where atten_goal = future_offset)
+            # action_history[t] = action_horizon steps starting at array index t.
+            # ------------------------------------------------------------------
+            atten_goal = int(self.data_cfg.get("atten_goal", 0) or 0)
+            # future_offset: frame offset for image prediction targets (Seer: future_steps).
+            # Decoupled from atten_goal — Seer pretrain uses future_steps=3, atten_goal=4.
+            # Falls back to atten_goal for backward compatibility when future_offset is absent.
+            future_offset = int(self.data_cfg.get("future_offset", atten_goal) or atten_goal)
+            K = num_history_frames + 1   # total timesteps (K-1 history + current)
+            history_frames_cfg = int(self.data_cfg.get("history_frames", K) or K)
+            K = history_frames_cfg
+
+            if atten_goal > 0:
+                # future_rgb_history: list[K] of list[num_views] tensors
+                future_rgb_history = []
+                for t in range(K):
+                    future_arr_idx = future_offset + t   # Seer: future_steps + t
+                    views = []
+                    for video_key in self.modality_keys["video"]:
+                        frame = data[video_key][future_arr_idx]
+                        tensor = torch.from_numpy(frame.copy()).float() / 255.0
+                        tensor = tensor.permute(2, 0, 1)
+                        views.append(tensor)
+                    future_rgb_history.append(views)
+                sample["future_rgb_history"] = future_rgb_history
+
+                # action_history: ndarray (K, action_horizon, action_dim)
+                # data["action_key"] has shape (total_action_steps, action_dim)
+                # action delta_indices = [-(K-1),...,0,1,...,action_horizon-1]
+                # Step t uses action_indices[t], [t+1], ..., [t+action_horizon-1]
+                action_horizon_cfg = int(self.data_cfg.get("action_horizon", 1) or 1)
+                action_history_list = []
+                for t in range(K):
+                    window_parts = []
+                    for action_key in self.modality_keys["action"]:
+                        window_parts.append(data[action_key][t:t + action_horizon_cfg])
+                    window = np.concatenate(window_parts, axis=1).astype(np.float16)
+                    action_history_list.append(window)
+                sample["action_history"] = np.stack(action_history_list, axis=0)
+                # shape: (K, action_horizon, action_dim)
 
         # Patch (2026-05-13): pass through sidecar lookup keys for UamVLAOFT.
         # Other frameworks ignore these; they only carry int ids, no semantic
