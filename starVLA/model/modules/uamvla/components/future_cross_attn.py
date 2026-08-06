@@ -228,9 +228,16 @@ class SeerViTDecoder(nn.Module):
         pred = self.decoder_pred(x[:, self.num_obs_tokens:])    # (B, N_mask, patch_dim)
 
         # Patchify ground-truth, then normalize (Seer train_utils.py:150).
-        target = self.patchify(
-            future_rgb.to(device=obs_tokens.device, dtype=dtype)
-        )
+        # Auto-resize to expected image_size if dataset frames differ
+        # (e.g. raw Calvin frames are 200×200 but decoder expects 224×224).
+        expected_px = int(self.num_patches ** 0.5) * self.patch_size
+        rgb = future_rgb.to(device=obs_tokens.device, dtype=torch.float32)
+        if rgb.shape[-2] != expected_px or rgb.shape[-1] != expected_px:
+            rgb = torch.nn.functional.interpolate(
+                rgb, size=(expected_px, expected_px),
+                mode="bilinear", align_corners=False,
+            )
+        target = self.patchify(rgb.to(dtype=dtype))
         mean = target.mean(dim=-1, keepdim=True)
         var  = target.var(dim=-1, keepdim=True)
         target = ((target - mean) / (var + 1e-6) ** 0.5).detach()

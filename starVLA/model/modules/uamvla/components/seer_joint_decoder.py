@@ -35,6 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from starVLA.model.modules.uamvla.components.future_cross_attn import SeerViTDecoder
+from starVLA.model.modules.uamvla.components.future_dit_branch import FutureDiTBranch
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,17 @@ class SeerJointDecoder(nn.Module):
         num_decoder_heads: int = 16,
         num_decoder_blocks: int = 2,
         future_weight: float = 1.0,
-        history_frames: int = 1,    # K total query groups (Seer: sequence_length)
-        atten_goal: int = 0,        # last atten_goal groups not supervised (Seer default 3)
+        history_frames: int = 1,
+        atten_goal: int = 0,
+        # --- FutureDiTBranch params (used when future_decoder_type="dit") ---
+        future_decoder_type: str = "vit",  # "vit" (MAE) or "dit" (flow matching)
+        dit_hidden_dim: int = 256,
+        dit_depth: int = 2,
+        dit_num_heads: int = 8,
+        dit_num_img_tokens: int = 49,      # Qwen image tokens per view
+        dit_num_inference_steps: int = 4,
+        token_loss_weight: float = 1.0,
+        pixel_loss_weight: float = 0.1,
     ) -> None:
         super().__init__()
 
@@ -162,19 +172,39 @@ class SeerJointDecoder(nn.Module):
             for _ in range(num_joint_layers)
         ])
 
-        self.vit_decoders = nn.ModuleList([
-            SeerViTDecoder(
-                d_model=d_model,
-                num_obs_tokens=num_obs_tokens,
-                patch_size=patch_size,
-                image_size=image_size,
-                decoder_dim=decoder_dim,
-                num_heads=num_decoder_heads,
-                num_blocks=num_decoder_blocks,
-                future_weight=future_weight,
-            )
-            for _ in range(num_views)
-        ])
+        self._future_decoder_type = future_decoder_type
+        if future_decoder_type == "dit":
+            self.future_dit_branches = nn.ModuleList([
+                FutureDiTBranch(
+                    d_model=d_model,
+                    num_obs_tokens=num_obs_tokens,
+                    num_img_tokens=dit_num_img_tokens,
+                    image_size=image_size,
+                    dit_hidden=dit_hidden_dim,
+                    dit_depth=dit_depth,
+                    dit_num_heads=dit_num_heads,
+                    num_inference_steps=dit_num_inference_steps,
+                    token_loss_weight=token_loss_weight,
+                    pixel_loss_weight=pixel_loss_weight,
+                )
+                for _ in range(num_views)
+            ])
+            self.vit_decoders = None  # unused when future_decoder_type="dit"
+        else:
+            self.vit_decoders = nn.ModuleList([
+                SeerViTDecoder(
+                    d_model=d_model,
+                    num_obs_tokens=num_obs_tokens,
+                    patch_size=patch_size,
+                    image_size=image_size,
+                    decoder_dim=decoder_dim,
+                    num_heads=num_decoder_heads,
+                    num_blocks=num_decoder_blocks,
+                    future_weight=future_weight,
+                )
+                for _ in range(num_views)
+            ])
+            self.future_dit_branches = None  # unused when future_decoder_type="vit"
 
         mlp_out = hidden_dim // 2
         self.action_decoder  = nn.Sequential(
@@ -186,10 +216,9 @@ class SeerJointDecoder(nn.Module):
 
         logger.info(
             "[SeerJointDecoder] K=%d  K_sup=%d  N_f=%d  N_act=%d  "
-            "num_joint_layers=%d  num_obs_tokens=%d  patch_size=%d  state_encoder=%s",
+            "num_joint_layers=%d  num_obs_tokens=%d  future_decoder=%s",
             self.K, self.K_sup, self.N_f, self.N_act,
-            num_joint_layers, num_obs_tokens, patch_size,
-            "enabled" if self.state_encoder is not None else "DISABLED",
+            num_joint_layers, num_obs_tokens, future_decoder_type,
         )
     # ------------------------------------------------------------------
     #  Internal helpers
@@ -332,6 +361,7 @@ class SeerJointDecoder(nn.Module):
         future_rgb_history: "List | None" = None,
         qwen_frame_ends: "list[list[int]] | None" = None,
         state_token_positions: "list[list[int]] | None" = None,
+        gt_img_tokens: "List | None" = None,
     ):
         """Dense per-timestep training (Seer-aligned).
 
@@ -343,6 +373,10 @@ class SeerJointDecoder(nn.Module):
         Single-step mode (backward compat, only gt_actions / future_rgb_list):
           - Uses query group t=K-1 (last = current timestep).
 
+        gt_img_tokens (optional, used when future_decoder_type="dit"):
+          Single-step: list[num_views] of Tensor(B, N_img, D)
+          Dense:       list[K] of list[num_views] of Tensor(B, N_img, D)
+
         qwen_frame_ends: passed to _build_block_mask to prevent future-frame leakage.
 
         Returns:
@@ -352,29 +386,62 @@ class SeerJointDecoder(nn.Module):
                                                   qwen_frame_ends, state_token_positions)
         # future_out: (B, K, N_f, D),  action_out: (B, K, N_act, D)
 
-        num_views    = len(self.vit_decoders)
+        # Determine number of views from whichever decoder list is active
+        if self._future_decoder_type == "dit":
+            num_views = len(self.future_dit_branches)
+        else:
+            num_views = len(self.vit_decoders)
         obs_per_view = self.N_f // num_views
 
         dense = (action_history is not None) and (future_rgb_history is not None)
 
         # ── Future reconstruction loss ──────────────────────────────────────────
         future_loss = qwen_hidden.new_zeros(())
-        if dense:
-            for t in range(self.K_sup):
+
+        if self._future_decoder_type == "dit":
+            # ── DiT flow-matching decoder ──────────────────────────────────────
+            if gt_img_tokens is None:
+                # No GT tokens available — zero-gradient placeholder
+                for branch in self.future_dit_branches:
+                    future_loss = future_loss + (
+                        branch.dit.x_embedder.weight * 0.0
+                    ).sum()
+            elif dense:
+                # gt_img_tokens: list[K] of list[V](B, N_img, D)
+                for t in range(self.K_sup):
+                    for v, branch in enumerate(self.future_dit_branches):
+                        obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
+                        rgb_v = future_rgb_history[t][v]
+                        gt_v  = gt_img_tokens[t][v]
+                        future_loss = future_loss + branch.compute_loss(obs_v, rgb_v, gt_v)
+                future_loss = future_loss / (self.K_sup * num_views)
+            else:
+                # gt_img_tokens: list[V](B, N_img, D)
+                t = self.K - 1
+                for v, branch in enumerate(self.future_dit_branches):
+                    obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
+                    rgb_v = future_rgb_list[v]
+                    gt_v  = gt_img_tokens[v]
+                    future_loss = future_loss + branch.compute_loss(obs_v, rgb_v, gt_v)
+                future_loss = future_loss / num_views
+        else:
+            # ── SeerViTDecoder (MAE) — original path ───────────────────────────
+            if dense:
+                for t in range(self.K_sup):
+                    for v, dec in enumerate(self.vit_decoders):
+                        obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
+                        rgb_v = future_rgb_history[t][v]
+                        future_loss = future_loss + dec.compute_loss(obs_v, rgb_v)
+                future_loss = future_loss / (self.K_sup * num_views)
+            elif future_rgb_list is not None and len(future_rgb_list) > 0:
+                t = self.K - 1
                 for v, dec in enumerate(self.vit_decoders):
                     obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
-                    rgb_v = future_rgb_history[t][v]
-                    future_loss = future_loss + dec.compute_loss(obs_v, rgb_v)
-            future_loss = future_loss / (self.K_sup * num_views)
-        elif future_rgb_list is not None and len(future_rgb_list) > 0:
-            t = self.K - 1   # current timestep group
-            for v, dec in enumerate(self.vit_decoders):
-                obs_v = future_out[:, t, v * obs_per_view : (v + 1) * obs_per_view]
-                future_loss = future_loss + dec.compute_loss(obs_v, future_rgb_list[v])
-            future_loss = future_loss / num_views
-        else:
-            for dec in self.vit_decoders:
-                future_loss = future_loss + (dec.decoder_pred.weight * 0.0).sum()
+                    future_loss = future_loss + dec.compute_loss(obs_v, future_rgb_list[v])
+                future_loss = future_loss / num_views
+            else:
+                for dec in self.vit_decoders:
+                    future_loss = future_loss + (dec.decoder_pred.weight * 0.0).sum()
 
         # ── Action loss (SmoothL1 arm + 0.01×BCE gripper) ──────────────────────
         action_loss = qwen_hidden.new_zeros(())

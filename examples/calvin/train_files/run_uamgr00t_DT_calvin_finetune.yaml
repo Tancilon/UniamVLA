@@ -67,6 +67,18 @@ framework:
     history_frames: 10
     atten_goal: 0                # Seer finetune default; matches dataloader atten_goal below
 
+    # Future decoder type: "vit" (current MAE-style) or "dit" (flow matching with GT tokens).
+    # Set to "dit" to enable FutureDiTBranch: future_query → DiT → 49 img tokens → pixels.
+    # When "dit", GT image tokens are extracted from future_rgb via frozen Qwen ViT each step.
+    future_decoder_type: "dit"
+    dit_hidden_dim: 256
+    dit_depth: 2
+    dit_num_heads: 8
+    dit_num_img_tokens: 49
+    dit_num_inference_steps: 4
+    token_loss_weight: 1.0
+    pixel_loss_weight: 0.1
+
   reduce_in_full_precision: true
 
 datasets:

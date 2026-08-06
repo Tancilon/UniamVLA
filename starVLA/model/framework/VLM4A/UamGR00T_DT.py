@@ -150,6 +150,15 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             future_weight=float(sjd_cfg.get("future_weight", 1.0)),
             history_frames=int(sjd_cfg.get("history_frames", 1)),
             atten_goal=int(sjd_cfg.get("atten_goal", 0)),
+            # FutureDiTBranch params (active when future_decoder_type="dit")
+            future_decoder_type=str(sjd_cfg.get("future_decoder_type", "vit")),
+            dit_hidden_dim=int(sjd_cfg.get("dit_hidden_dim", 256)),
+            dit_depth=int(sjd_cfg.get("dit_depth", 2)),
+            dit_num_heads=int(sjd_cfg.get("dit_num_heads", 8)),
+            dit_num_img_tokens=int(sjd_cfg.get("dit_num_img_tokens", 49)),
+            dit_num_inference_steps=int(sjd_cfg.get("dit_num_inference_steps", 4)),
+            token_loss_weight=float(sjd_cfg.get("token_loss_weight", 1.0)),
+            pixel_loss_weight=float(sjd_cfg.get("pixel_loss_weight", 0.1)),
         )
 
         # K-frame state projection: appends proprio tokens to Qwen hidden so the
@@ -245,13 +254,17 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             )
 
             # Project state → (B, K, d_llm).
-            s = state.float()
+            # Cast to the Linear layer's dtype (BF16 under DeepSpeed) to avoid
+            # dtype mismatch: state arrives as float32 from the dataloader path.
+            s = state.to(dtype=self.state_proj_to_llm.weight.dtype)
             if s.ndim == 2:
                 s = s.unsqueeze(1)
             state_embeds = self.state_proj_to_llm(s)
 
-            # Register hook; Qwen forward replaces pad embeds with state embeds.
-            hook = self.qwen_vl_interface.model.model.embed_tokens.register_forward_hook(
+            # Register hook on the input embedding layer.
+            # Use get_input_embeddings() (standard HF API) instead of hard-coded
+            # .model.embed_tokens — Qwen3VL stores it at .model.language_model.embed_tokens.
+            hook = self.qwen_vl_interface.model.get_input_embeddings().register_forward_hook(
                 _UamGR00T_DT_StateHook(insert_pos, state_embeds)
             )
             try:
@@ -539,6 +552,88 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         )  # (B, K, T_act, action_dim)
 
     # ------------------------------------------------------------------
+    #  GT image token extraction (for FutureDiTBranch)
+    # ------------------------------------------------------------------
+
+    def _extract_gt_image_tokens(
+        self,
+        rgb_list: "List[torch.Tensor]",   # list[V] of Tensor(B, 3, H, W) float [0,1]
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "List[torch.Tensor] | None":
+        """Extract GT image tokens per view from future_rgb using frozen Qwen ViT.
+
+        Only active when seer_joint_decoder.future_decoder_type = "dit".
+        Runs the visual encoder (no LLM), so the overhead is small.
+
+        Returns list[V] of Tensor(B, N_img, d_llm) or None.
+        """
+        if self.seer_joint_decoder._future_decoder_type != "dit":
+            return None
+        if not rgb_list:
+            return None
+
+        from torchvision.transforms.functional import to_pil_image
+
+        V = len(rgb_list)
+        B = rgb_list[0].shape[0]
+        results = []
+
+        visual = self.qwen_vl_interface.model.model.visual
+        proc   = self.qwen_vl_interface.processor.image_processor
+        vis_dtype = next(visual.parameters()).dtype
+
+        for v in range(V):
+            rgb_v = rgb_list[v]  # (B, 3, H, W) float [0,1]
+
+            # Convert tensors to PIL for the Qwen image processor
+            pils = [
+                to_pil_image(
+                    (rgb_v[b].float().clamp(0, 1) * 255).byte().cpu()
+                )
+                for b in range(B)
+            ]
+
+            # Process through Qwen image processor
+            with torch.no_grad():
+                inputs = proc(images=pils, return_tensors="pt")
+                pixel_values = inputs["pixel_values"].to(
+                    device=device, dtype=vis_dtype
+                )
+                grid_thw = inputs["image_grid_thw"].to(device=device)
+
+                # Visual encoder (frozen): (B*N_tokens, d_llm)
+                tokens = visual(pixel_values, grid_thw=grid_thw)
+                # Qwen3VL visual encoder may return (features, ...) tuple
+                if isinstance(tokens, tuple):
+                    tokens = tokens[0]
+
+            N_tokens = tokens.shape[0] // B
+            gt_v = tokens.reshape(B, N_tokens, -1).to(dtype=dtype)  # (B, N_img, d_llm)
+            results.append(gt_v)
+
+        return results  # list[V] of (B, N_img, d_llm)
+
+    def _extract_gt_image_tokens_history(
+        self,
+        rgb_history: "List | None",   # list[K] of list[V](B, 3, H, W)
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> "List | None":
+        """Extract GT tokens for dense supervision history.
+
+        Returns list[K] of list[V](B, N_img, d_llm) or None.
+        """
+        if rgb_history is None:
+            return None
+        if self.seer_joint_decoder._future_decoder_type != "dit":
+            return None
+        return [
+            self._extract_gt_image_tokens(rgb_k, device, dtype)
+            for rgb_k in rgb_history
+        ]
+
+    # ------------------------------------------------------------------
     #  Training forward
     # ------------------------------------------------------------------
 
@@ -571,6 +666,14 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         future_rgb_history  = self._collect_future_rgb_history(examples, device, dtype)
         action_history      = self._collect_action_history(examples)
 
+        # GT image tokens for FutureDiTBranch (frozen Qwen ViT, no gradient here)
+        gt_img_tokens         = self._extract_gt_image_tokens(
+            future_rgb_list or [], device, dtype
+        )
+        gt_img_tokens_history = self._extract_gt_image_tokens_history(
+            future_rgb_history, device, dtype
+        )
+
         gt_actions = [e["action"] for e in examples]
         with torch.autocast("cuda", dtype=torch.float32):
             actions = torch.as_tensor(
@@ -596,6 +699,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
                 future_rgb_history=future_rgb_history,
                 qwen_frame_ends=qwen_frame_ends,
                 state_token_positions=state_token_positions,
+                gt_img_tokens=gt_img_tokens_history if future_rgb_history else gt_img_tokens,
             )
 
         log_metrics = {
