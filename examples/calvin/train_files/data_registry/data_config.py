@@ -180,12 +180,33 @@ class CalvinDT_K14DataConfig(CalvinDT_K10DataConfig):
     # [-13, ..., 0, 1, 2]  — 16 delta indices
 
 
+class CalvinDT_K10_H8DataConfig(CalvinDT_K10DataConfig):
+    """DT config for Calvin finetune with K=10 history, action_horizon=8.
+
+    For UamGR00T_DT: K=10 history frames, 8-step action chunk,
+    future_rgb at t+8 (action_horizon steps ahead).
+
+    Window: history(9) + current(1) + future(8) = 18 frames total.
+    """
+    action_horizon = 8
+    future_offset  = 8           # future_rgb = t + action_horizon
+
+    _h = CalvinDT_K10DataConfig._history_k_minus_1  # = 9
+
+    # 18 frames: [-9,...,0,...,8]
+    observation_indices = list(range(-_h, future_offset + 1))
+
+    # 17 delta indices: [-9,...,0,...,7]
+    action_indices = list(range(-_h, action_horizon))
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "uamvla_calvin_franka": UamVLACalvinDataConfig(),
     "uamvla_calvin_franka_h8": UamVLACalvinH8DataConfig(),
     "calvin_abc_d_franka_h8": CalvinABCLeRobotV21H8DataConfig(),
     "calvin_dt_k10": CalvinDT_K10DataConfig(),
     "calvin_dt_k14": CalvinDT_K14DataConfig(),
+    "calvin_dt_k10_h8": CalvinDT_K10_H8DataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
@@ -194,6 +215,7 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "calvin_abc_d_franka_h8": EmbodimentTag.FRANKA,
     "calvin_dt_k10": EmbodimentTag.FRANKA,
     "calvin_dt_k14": EmbodimentTag.FRANKA,
+    "calvin_dt_k10_h8": EmbodimentTag.FRANKA,
 }
 
 DATASET_NAMED_MIXTURES = {
@@ -249,6 +271,13 @@ DATASET_NAMED_MIXTURES = {
         ("task_ABC_D_scene_A_lerobot_lt", 1.0, "calvin_dt_k10"),
         ("task_ABC_D_scene_B_lerobot_lt", 1.0, "calvin_dt_k10"),
         ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_dt_k10"),
+    ],
+
+    # K=10, action_horizon=8, future_offset=8 — for UamGR00T_DT (new architecture)
+    "calvin_abc_dt_k10_h8": [
+        ("task_ABC_D_scene_A_lerobot_lt", 1.0, "calvin_dt_k10_h8"),
+        ("task_ABC_D_scene_B_lerobot_lt", 1.0, "calvin_dt_k10_h8"),
+        ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_dt_k10_h8"),
     ],
 
     # K=14 counterpart used when finetuning the K=14 pretrained architecture

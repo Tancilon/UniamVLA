@@ -453,6 +453,11 @@ class VLATrainer(TrainerUtils):
                 else np.asarray(a)
                 for a in actions
             ])
+            # Seer/DT-style data configs store a dense action window
+            # (history + future), so actions may be (B, T_total, D).
+            # Slice the last action_horizon steps to align with predict_action output.
+            action_horizon = self.config.datasets.vla_data.action_horizon
+            actions = actions[:, -action_horizon:, :]
             num_pots = np.prod(actions.shape)
             score = TrainerUtils.euclidean_distance(normalized_actions, actions)
             step_metrics["mse_score"] = score / num_pots
