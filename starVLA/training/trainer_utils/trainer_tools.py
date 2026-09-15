@@ -165,6 +165,7 @@ class TrainerUtils:
           - model:
         """
         frozen = []
+        is_main_process = not dist.is_initialized() or dist.get_rank() == 0
         print("#"*30)
         print(freeze_modules)
         if freeze_modules and type(freeze_modules) == str:
@@ -182,13 +183,23 @@ class TrainerUtils:
                     for param in module.parameters():
                         param.requires_grad = False
                     frozen.append(path)
+                    if is_main_process:
+                        total_params = sum(param.numel() for param in module.parameters())
+                        trainable_params = sum(
+                            param.numel() for param in module.parameters() if param.requires_grad
+                        )
+                        status = "FROZEN" if trainable_params == 0 else "TRAINABLE"
+                        print(
+                            f"[FreezeAudit] module={path} status={status} "
+                            f"trainable={trainable_params} total={total_params}"
+                        )
                 except AttributeError:
                     # if the attribute does not exist, skip and print warning
                     print(f"⚠️ module path does not exist, cannot freeze: {path}")
                     continue
 
         # accelerator.wait_for_everyone()  # synchronize when distributed training
-        if dist.get_rank == 0:
+        if is_main_process:
             print(f"🔒 Frozen modules with re pattern: {frozen}")
         return model
 

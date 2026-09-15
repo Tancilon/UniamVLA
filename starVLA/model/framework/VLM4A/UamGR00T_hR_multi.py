@@ -51,14 +51,16 @@ _CFG_TO_HEAD_KEY: dict[str, str] = {
     "action_conditioned_future": "action_conditioned_future",
 }
 
-# Default placeholder token per head (all single-token emojis; verified at runtime)
+# Default placeholder token per head — all verified single-token in Qwen3.5 tokenizer.
+# Scanned via: tok(symbol, add_special_tokens=False)["input_ids"] must have len==1.
+# Qwen3.5-4B token ids:  ◇=158871  ●=42493  ○=153089  ✨=169379  ▲=169006  ▶=169199
 _DEFAULT_HEAD_TOKENS: dict[str, str] = {
-    "grounding": "🟨",
-    "affordance": "🟩",
-    "recon": "🎯",
-    "depth": "✨",
-    "future": "🟧",
-    "action_conditioned_future": "🔶",
+    "grounding":               "◇",   # U+25C7  white diamond
+    "affordance":              "●",   # U+25CF  black circle (contact point)
+    "recon":                   "○",   # U+25CB  white circle (reconstruction target)
+    "depth":                   "✨",  # U+2728  sparkle (geometry / depth)
+    "future":                  "▲",   # U+25B2  black up-pointing triangle (ahead)
+    "action_conditioned_future": "▶", # U+25B6  black right-pointing triangle (action)
 }
 
 

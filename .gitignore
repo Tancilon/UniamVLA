@@ -265,3 +265,5 @@ ckpt/
 core.*
 
 uv.lock
+
+codegraph

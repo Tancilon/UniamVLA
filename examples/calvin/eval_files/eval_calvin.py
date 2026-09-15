@@ -141,6 +141,9 @@ class CalvinPolicyClient:
         self._uamvla_gr00t_dt_image_history = deque(
             maxlen=self._uamvla_gr00t_dt_num_history_frames
         )
+        self._uamvla_gr00t_dt_state_history = deque(
+            maxlen=self._uamvla_gr00t_dt_num_history_frames
+        )
         self._uamvla_gr00t_state_norm_mode = None
         self._uamvla_gr00t_state_stat_a = None
         self._uamvla_gr00t_state_stat_b = None
@@ -184,7 +187,7 @@ class CalvinPolicyClient:
     def _client_uses_uamvla_gr00t_raw_state(cls, client) -> bool:
         config = getattr(client, "model_config", None)
         framework_name = cls._nested_config_get(config, "framework", "name")
-        state_dim = cls._nested_config_get(config, "framework", "action_model", "state_dim")
+        state_dim = cls._nested_config_get(config, "framework", "state_dim")
         indices = cls._gr00t_state_indices_from_config(config)
         try:
             state_dim = int(state_dim or 0)
@@ -304,6 +307,38 @@ class CalvinPolicyClient:
             )
         return robot_obs[state_indices].reshape(1, len(state_indices))
 
+    @staticmethod
+    def _extract_uamgr00t_dt_state(obs: dict, state_indices: list[int]) -> np.ndarray:
+        """Map CALVIN robot_obs to the 8-D StarVLA state used for DT training.
+
+        CALVIN stores ``[eef_xyz(3), eef_rpy(3), gripper_width(1),
+        joint_pos(7), gripper_action(1)]``.  The DT training datasets instead
+        store ``[x, y, z, roll, pitch, yaw, pad, gripper]``, where ``pad`` is
+        gripper width and ``gripper`` is the final CALVIN gripper action.
+        ``gr00t_state_indices`` indexes this packed training representation,
+        never the raw 15-D CALVIN observation.
+        """
+        robot_obs = np.asarray(obs["robot_obs"], dtype=np.float32).reshape(-1)
+        if robot_obs.shape[0] < 15:
+            raise ValueError(
+                "Expected 15-D CALVIN robot_obs "
+                "[eef_xyz, eef_rpy, gripper_width, joint_pos, gripper_action], "
+                f"got {robot_obs.shape}."
+            )
+        if not state_indices:
+            raise ValueError("gr00t_state_indices must contain at least one index.")
+
+        starvla_state = np.concatenate(
+            [robot_obs[:6], robot_obs[6:7], robot_obs[14:15]], axis=0
+        )
+        max_index = max(state_indices)
+        if starvla_state.shape[0] <= max_index:
+            raise ValueError(
+                f"Expected StarVLA state with at least {max_index + 1} dims, "
+                f"got {starvla_state.shape}."
+            )
+        return starvla_state[state_indices].reshape(1, len(state_indices))
+
     def _extract_uamvla_gr00t_state(self, obs: dict) -> np.ndarray:
         state = self._extract_raw_uamvla_gr00t_state(
             obs,
@@ -344,6 +379,7 @@ class CalvinPolicyClient:
         self.step_count = 0
         if clear_history:
             self._uamvla_gr00t_dt_image_history.clear()
+            self._uamvla_gr00t_dt_state_history.clear()
 
     @staticmethod
     def _copy_image_pair(image_pair: list[np.ndarray]) -> list[np.ndarray]:
@@ -394,6 +430,27 @@ class CalvinPolicyClient:
     def _append_uamvla_gr00t_dt_history(self, current_images: list[np.ndarray]) -> None:
         self._uamvla_gr00t_dt_image_history.append(self._copy_image_pair(current_images))
 
+    def _uamvla_gr00t_dt_state_for_example(self, current_state: np.ndarray) -> np.ndarray:
+        """Return K raw DT states ordered from oldest history to current state."""
+        num_history_frames = self._uamvla_gr00t_dt_num_history_frames
+        current = np.asarray(current_state, dtype=np.float32).reshape(-1)
+        history = [np.array(state, copy=True) for state in self._uamvla_gr00t_dt_state_history]
+
+        if not history:
+            history = [np.array(current, copy=True) for _ in range(num_history_frames)]
+        elif len(history) < num_history_frames:
+            history = [
+                np.array(history[0], copy=True)
+                for _ in range(num_history_frames - len(history))
+            ] + history
+
+        return np.stack(history + [current], axis=0)
+
+    def _append_uamvla_gr00t_dt_state_history(self, current_state: np.ndarray) -> None:
+        self._uamvla_gr00t_dt_state_history.append(
+            np.asarray(current_state, dtype=np.float32).reshape(-1).copy()
+        )
+
     def step(self, obs: dict, lang_annotation: str) -> np.ndarray:
         """
         Query policy for action given observation and language instruction.
@@ -401,7 +458,8 @@ class CalvinPolicyClient:
         Args:
             obs: Calvin observation dict with keys:
                 - rgb_obs: dict with 'rgb_static' (200x200x3) and 'rgb_gripper' (84x84x3)
-                - robot_obs: (15,) proprioceptive state [ee_pos(3), ee_ori(3), gripper(2), joint_pos(7)]
+                - robot_obs: (15,) [eef_xyz(3), eef_rpy(3), gripper_width(1),
+                  joint_pos(7), gripper_action(1)]
             lang_annotation: Natural language task description
             get_action: If True, query model for new action chunk
 
@@ -416,10 +474,11 @@ class CalvinPolicyClient:
             "lang": lang_annotation,
         }
         if self.send_uamvla_gr00t_raw_state:
-            example["state"] = self._extract_raw_uamvla_gr00t_state(
+            current_state = self._extract_uamgr00t_dt_state(
                 obs,
                 self._uamvla_gr00t_state_indices,
             )
+            example["state"] = self._uamvla_gr00t_dt_state_for_example(current_state)
         elif self.send_uamvla_gr00t_state:
             example["state"] = self._extract_uamvla_gr00t_state(obs)
         if self.send_uamvla_gr00t_dt_history:
@@ -440,6 +499,8 @@ class CalvinPolicyClient:
         model_output = self.client.step(example=example, step=self.step_count)
         if self.send_uamvla_gr00t_dt_history:
             self._append_uamvla_gr00t_dt_history(current_images)
+        if self.send_uamvla_gr00t_raw_state:
+            self._append_uamvla_gr00t_dt_state_history(current_state)
         raw_action = model_output["raw_action"]
         world_vector = np.asarray(raw_action.get("world_vector"), dtype=np.float32).reshape(-1)
         rotation_delta = np.asarray(raw_action.get("rotation_delta"), dtype=np.float32).reshape(-1)
@@ -684,7 +745,10 @@ def rollout(
     lang_annotation = lang_annotation.split("\n")[0]
     if "\u2019" in lang_annotation:
         lang_annotation.replace("\u2019", "'")
-    policy.reset(clear_history=robot_obs is not None and scene_obs is not None)
+    # Each CALVIN language segment is an independent training episode. Reset
+    # temporal context at every subtask boundary so the first policy input is
+    # padded from that subtask's initial observation, exactly as in training.
+    policy.reset(clear_history=True)
     start_info = env.get_info()
 
     if debug:

@@ -177,7 +177,6 @@ class SeerJointDecoder(nn.Module):
             self.future_dit_branches = nn.ModuleList([
                 FutureDiTBranch(
                     d_model=d_model,
-                    num_obs_tokens=num_obs_tokens,
                     num_img_tokens=dit_num_img_tokens,
                     image_size=image_size,
                     dit_hidden=dit_hidden_dim,

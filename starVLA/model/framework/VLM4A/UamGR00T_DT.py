@@ -3,11 +3,14 @@
 Architecture:
   1. K history frames + state tokens (injected before each frame via Option-A hook)
      are fed into Qwen3-VL as a single multi-image sequence.
+     With visual resampling enabled, a learnable frame embedding is added to
+     each frame's state and compressed visual tokens before the Qwen LLM.
   2. N_future = num_views × future_tokens_per_view learnable future_query_tokens
      (nn.Parameter) are appended at sequence end via a second embed_tokens hook.
      With causal attention they attend to the full K-frame context.
   3. Qwen full hidden (B, T_orig + N_future, D) is passed directly to the GR00T
-     FlowmatchingActionHead for action prediction.
+     FlowmatchingActionHead for action prediction. Robot state reaches the action
+     head only through Qwen; the direct GR00T state-encoder path is disabled.
   4. The last N_future positions serve as conditions for FutureDiTBranch, supervised
      by GT image tokens from a frozen Qwen visual encoder + pixel-level MSE.
 
@@ -164,7 +167,6 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             [
                 FutureDiTBranch(
                     d_model=d_llm,
-                    num_obs_tokens=fut_per_view,
                     num_img_tokens=int(fq_cfg.get("dit_num_img_tokens", 49)),
                     image_size=int(fq_cfg.get("image_size", 224)),
                     dit_hidden=int(fq_cfg.get("dit_hidden_dim", 512)),
@@ -191,8 +193,13 @@ class UamVLAGR00T_DT(UamVLAGR00T):
                 num_latents=self._n_vis_compressed,
                 max_num_media=None,
             )
+            # Relative slots are ordered oldest-to-current. Zero initialization
+            # preserves the pretrained Qwen input distribution at step zero.
+            self.temporal_frame_embedding = nn.Embedding(self._history_frames, d_llm)
+            nn.init.zeros_(self.temporal_frame_embedding.weight)
         else:
             self.visual_resampler = None
+            self.temporal_frame_embedding = None
 
         logger.info(
             "[UamGR00T_DT] K=%d  views=%d  future/view=%d  state_dim=%d  " "vis_resampler=%s  vis_tokens=%d→%d",
@@ -215,6 +222,24 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         if not views:
             raise RuntimeError("datasets.vla_data.obs contains no video.* keys")
         return len(views)
+
+    def _qwen_state_batch_or_none(self, examples: List[dict], device, dtype):
+        """Batch proprioceptive state for Qwen's per-frame state tokens."""
+        state_dim = int(self.config.framework.get("state_dim", 0) or 0)
+        if state_dim <= 0 or not examples or "state" not in examples[0]:
+            return None
+        if any("state" not in example for example in examples):
+            raise RuntimeError("Every example must provide state when framework.state_dim is enabled.")
+
+        state = torch.stack(
+            [torch.as_tensor(example["state"], device=device, dtype=dtype) for example in examples],
+            dim=0,
+        )
+        if state.shape[-1] != state_dim:
+            raise RuntimeError(
+                f"Expected Qwen state dimension {state_dim}, got state shape {tuple(state.shape)}."
+            )
+        return state
 
     # ------------------------------------------------------------------
     #  Qwen forward with state + future token injection
@@ -319,7 +344,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         visual = self.qwen_vl_interface.model.model.visual
         vis_dtype = next(visual.parameters()).dtype
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            vis_flat = visual(
+            vis_flat, _ = visual(
                 qwen_inputs["pixel_values"].to(device=device, dtype=vis_dtype),
                 grid_thw=qwen_inputs["image_grid_thw"].to(device=device),
             )  # (B * N_img * n_vis_orig, d_llm)
@@ -347,14 +372,15 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         # ── Step 4: build inputs_embeds from text tokens + compressed visual ──
         embed_fn = self.qwen_vl_interface.model.get_input_embeddings()
         inputs_embeds, new_mask = self._build_compressed_inputs_embeds(
-            input_ids=qwen_inputs["input_ids"].to(device),
-            attention_mask=qwen_inputs["attention_mask"].to(device),
+            input_ids=qwen_inputs["input_ids"],
+            attention_mask=qwen_inputs["attention_mask"],
             compressed_vis=compressed.to(dtype=torch.bfloat16),
             embed_fn=embed_fn,
             n_orig=n_orig,
             n_comp=n_comp,
             num_views=self._num_views_from_config(),
             state_embs=state_embs,
+            temporal_frame_embs=self.temporal_frame_embedding.weight,
             device=device,
         )
 
@@ -421,6 +447,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         n_comp: int,
         num_views: int,
         state_embs: "torch.Tensor | None",
+        temporal_frame_embs: torch.Tensor,
         device: torch.device,
     ):
         """Rebuild the Qwen input sequence with compressed visual tokens.
@@ -440,6 +467,8 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             num_views:      number of camera views per time-step.
             state_embs:     (B, K, d_llm) or None — state embeddings to inject
                             before the first view of each frame.
+            temporal_frame_embs: (K, d_llm) learnable relative frame embeddings,
+                            ordered from the oldest frame to the current frame.
             device:         target device.
 
         Returns:
@@ -448,86 +477,121 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         """
         VIS_START = 151652  # <|vision_start|>
         VIS_END = 151653  # <|vision_end|>
-        emb_dtype = next(embed_fn.parameters()).dtype
+        if input_ids.ndim != 2 or attention_mask.shape != input_ids.shape:
+            raise RuntimeError(
+                f"Expected matching rank-2 input_ids and attention_mask, got "
+                f"{tuple(input_ids.shape)} and {tuple(attention_mask.shape)}."
+            )
+        if num_views <= 0:
+            raise RuntimeError(f"num_views must be positive, got {num_views}.")
 
-        B = input_ids.shape[0]
-        new_embeds_list: list = []
-        new_mask_list: list = []
+        ids_cpu = input_ids.detach().to(device="cpu", dtype=torch.long)
+        mask_cpu = attention_mask.detach().to(device="cpu").bool()
+        B = ids_cpu.shape[0]
+        if compressed_vis.ndim != 4 or compressed_vis.shape[0] != B or compressed_vis.shape[2] != n_comp:
+            raise RuntimeError(
+                f"Expected compressed_vis shape (B, N_img, {n_comp}, D) with B={B}, "
+                f"got {tuple(compressed_vis.shape)}."
+            )
 
-        for b in range(B):
-            ids = input_ids[b]
-            mask = attention_mask[b]
-            T = ids.shape[0]
-
-            parts_e: list = []  # embedding tensors
-            parts_m: list = []  # mask tensors (long)
-
-            img_idx = 0  # which compressed image slot we are on
-            i = 0
-            while i < T:
-                # Skip left-padding (mask == 0 outside any vision span)
-                if mask[i].item() == 0:
-                    i += 1
-                    continue
-
-                tok_id = ids[i].item()
-
-                if tok_id == VIS_START:
-                    # ── optional state injection before frame boundary ──
-                    if state_embs is not None:
-                        frame_idx = img_idx // num_views
-                        view_idx = img_idx % num_views
-                        if view_idx == 0 and frame_idx < state_embs.shape[1]:
-                            s = state_embs[b, frame_idx].unsqueeze(0)  # (1, d)
-                            parts_e.append(s.to(device=device, dtype=emb_dtype))
-                            parts_m.append(ids.new_ones(1))
-
-                    # vision_start embedding
-                    vs_emb = embed_fn(ids[i : i + 1])  # (1, d)
-                    parts_e.append(vs_emb)
-                    parts_m.append(ids.new_ones(1))
-                    i += 1
-
-                    # skip original n_orig vision tokens in input_ids
-                    i += n_orig
-
-                    # insert compressed tokens for this image
-                    comp = compressed_vis[b, img_idx].to(device=device, dtype=emb_dtype)
-                    parts_e.append(comp)  # (n_comp, d)
-                    parts_m.append(ids.new_ones(n_comp))
-                    img_idx += 1
-
-                    # vision_end (next real token after the skipped span)
-                    if i < T and ids[i].item() == VIS_END:
-                        ve_emb = embed_fn(ids[i : i + 1])
-                        parts_e.append(ve_emb)
-                        parts_m.append(ids.new_ones(1))
-                        i += 1
-
-                else:
-                    # regular text token
-                    tok_emb = embed_fn(ids[i : i + 1])
-                    parts_e.append(tok_emb)
-                    parts_m.append(mask[i : i + 1])
-                    i += 1
-
-            new_embeds_list.append(torch.cat(parts_e, dim=0))  # (T_new_b, d)
-            new_mask_list.append(torch.cat(parts_m, dim=0))  # (T_new_b,)
-
-        # Left-pad to uniform length so the batch can be stacked
-        max_len = max(e.shape[0] for e in new_embeds_list)
-        d_llm = new_embeds_list[0].shape[-1]
-        dtype = new_embeds_list[0].dtype
-
-        padded_e = torch.zeros(B, max_len, d_llm, device=device, dtype=dtype)
-        padded_m = torch.zeros(B, max_len, dtype=torch.long, device=device)
+        n_images = compressed_vis.shape[1]
+        sequence_ids: list[torch.Tensor] = []
+        visual_positions: list[tuple[int, int, int]] = []
+        state_positions: list[tuple[int, int, int]] = []
 
         for b in range(B):
-            L = new_embeds_list[b].shape[0]
-            padded_e[b, max_len - L :] = new_embeds_list[b]
-            padded_m[b, max_len - L :] = new_mask_list[b]
+            valid_ids = ids_cpu[b][mask_cpu[b]]
+            starts = (valid_ids == VIS_START).nonzero(as_tuple=False).flatten().tolist()
+            if len(starts) != n_images:
+                raise RuntimeError(
+                    f"Sample {b} contains {len(starts)} vision spans, but compressed_vis "
+                    f"contains {n_images} images per sample."
+                )
 
-        return padded_e, padded_m
+            parts: list[torch.Tensor] = []
+            cursor = 0
+            output_pos = 0
+            for img_idx, start in enumerate(starts):
+                end = start + n_orig + 1
+                if start < cursor or end >= valid_ids.numel() or int(valid_ids[end]) != VIS_END:
+                    raise RuntimeError(
+                        f"Sample {b} vision span {img_idx} does not contain exactly "
+                        f"{n_orig} tokens between vision_start and vision_end."
+                    )
+
+                prefix = valid_ids[cursor:start]
+                parts.append(prefix)
+                output_pos += prefix.numel()
+
+                frame_idx = img_idx // num_views
+                if frame_idx >= temporal_frame_embs.shape[0]:
+                    raise RuntimeError(
+                        f"Image sequence contains frame index {frame_idx}, but only "
+                        f"{temporal_frame_embs.shape[0]} temporal embeddings are configured."
+                    )
+                if state_embs is not None and img_idx % num_views == 0 and frame_idx < state_embs.shape[1]:
+                    parts.append(valid_ids.new_zeros(1))
+                    state_positions.append((b, output_pos, frame_idx))
+                    output_pos += 1
+
+                parts.append(valid_ids[start : start + 1])
+                output_pos += 1
+                parts.append(valid_ids.new_zeros(n_comp))
+                visual_positions.append((b, output_pos, frame_idx))
+                output_pos += n_comp
+                parts.append(valid_ids[end : end + 1])
+                output_pos += 1
+                cursor = end + 1
+
+            suffix = valid_ids[cursor:]
+            parts.append(suffix)
+            sequence_ids.append(torch.cat(parts))
+
+        max_len = max(ids.numel() for ids in sequence_ids)
+        template_ids = torch.zeros(B, max_len, dtype=torch.long)
+        new_mask = torch.zeros(B, max_len, dtype=torch.long)
+        left_padding: list[int] = []
+        for b, ids in enumerate(sequence_ids):
+            pad = max_len - ids.numel()
+            left_padding.append(pad)
+            template_ids[b, pad:] = ids
+            new_mask[b, pad:] = 1
+
+        inputs_embeds = embed_fn(template_ids.to(device=device))
+        inputs_embeds = inputs_embeds * new_mask.to(device=device, dtype=inputs_embeds.dtype).unsqueeze(-1)
+        emb_dtype = inputs_embeds.dtype
+        d_llm = inputs_embeds.shape[-1]
+        flat_embeds = inputs_embeds.reshape(B * max_len, d_llm)
+
+        visual_flat_indices: list[int] = []
+        for b, pos, _ in visual_positions:
+            start = b * max_len + left_padding[b] + pos
+            visual_flat_indices.extend(range(start, start + n_comp))
+        visual_indices = torch.tensor(visual_flat_indices, device=device, dtype=torch.long)
+        frame_indices = torch.arange(n_images, device=device) // num_views
+        frame_embs = temporal_frame_embs.index_select(0, frame_indices).to(device=device, dtype=emb_dtype)
+        visual_values = compressed_vis.to(device=device, dtype=emb_dtype) + frame_embs[None, :, None, :]
+        flat_embeds = flat_embeds.index_copy(0, visual_indices, visual_values.reshape(-1, d_llm))
+
+        if state_positions:
+            state_flat_indices = torch.tensor(
+                [b * max_len + left_padding[b] + pos for b, pos, _ in state_positions],
+                device=device,
+                dtype=torch.long,
+            )
+            state_batch_indices = torch.tensor(
+                [b for b, _, _ in state_positions], device=device, dtype=torch.long
+            )
+            state_frame_indices = torch.tensor(
+                [frame_idx for _, _, frame_idx in state_positions], device=device, dtype=torch.long
+            )
+            state_values = state_embs[
+                state_batch_indices, state_frame_indices
+            ] + temporal_frame_embs.index_select(0, state_frame_indices)
+            state_values = state_values.to(device=device, dtype=emb_dtype)
+            flat_embeds = flat_embeds.index_copy(0, state_flat_indices, state_values)
+
+        return flat_embeds.view(B, max_len, d_llm), new_mask.to(device=device)
 
     @staticmethod
     def _collect_future_rgb(examples, device, dtype):
@@ -558,18 +622,32 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         visual = self.qwen_vl_interface.model.model.visual
         proc = self.qwen_vl_interface.processor.image_processor
         vis_dtype = next(visual.parameters()).dtype
-        results = []
-        for v in range(V):
-            pils = [to_pil_image((rgb_list[v][b].float().clamp(0, 1) * 255).byte().cpu()) for b in range(B)]
-            with torch.no_grad():
-                inp = proc(images=pils, return_tensors="pt")
-                pv = inp["pixel_values"].to(device=device, dtype=vis_dtype)
-                gt = inp["image_grid_thw"].to(device=device)
-                tok = visual(pv, grid_thw=gt)
-                if isinstance(tok, tuple):
-                    tok = tok[0]
-            results.append(tok.reshape(B, tok.shape[0] // B, -1).to(dtype=dtype))
-        return results
+        if any(rgb.shape[0] != B for rgb in rgb_list):
+            raise RuntimeError("All future RGB views must have the same batch size.")
+
+        rgb_uint8 = [
+            (rgb.float().clamp(0, 1) * 255).byte().cpu()
+            for rgb in rgb_list
+        ]
+        pils = [to_pil_image(rgb_uint8[v][b]) for v in range(V) for b in range(B)]
+        with torch.no_grad():
+            inp = proc(images=pils, return_tensors="pt")
+            grid_thw_cpu = inp["image_grid_thw"]
+            split_sizes = (
+                grid_thw_cpu.prod(-1) // visual.spatial_merge_size**2
+            ).tolist()
+            if len(split_sizes) != V * B or len(set(split_sizes)) != 1:
+                raise RuntimeError(
+                    f"Expected {V * B} future images with equal visual token counts, "
+                    f"got split sizes {split_sizes}."
+                )
+            pv = inp["pixel_values"].to(device=device, dtype=vis_dtype)
+            gt = grid_thw_cpu.to(device=device)
+            tok, _ = visual(pv, grid_thw=gt)
+
+        per_image = torch.stack(torch.split(tok, split_sizes), dim=0)
+        tokens = per_image.reshape(V, B, split_sizes[0], -1).to(dtype=dtype)
+        return list(tokens.unbind(dim=0))
 
     # ------------------------------------------------------------------
     #  Training forward
@@ -578,10 +656,9 @@ class UamVLAGR00T_DT(UamVLAGR00T):
     def forward(self, examples: List[dict], **kwargs) -> dict:
         examples = self._prepare_examples(examples)
         _dev = next(self.parameters()).device
-        state_pre = self._state_batch_or_none(examples, _dev, torch.float32)
+        state_pre = self._qwen_state_batch_or_none(examples, _dev, torch.float32) # [B, K, state_dim]
         examples, qwen_inputs, hidden, future_hidden = self._encode_qwen_hidden(examples, state=state_pre)
         device, dtype = hidden.device, hidden.dtype
-        state = state_pre.to(device=device, dtype=dtype) if state_pre is not None else None
 
         # GR00T action loss
         gt_actions = [e["action"] for e in examples]
@@ -599,7 +676,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             action_loss = self.action_model(
                 hidden.repeat(rep, 1, 1),
                 actions_target.repeat(rep, 1, 1),
-                state.repeat(rep, 1, 1) if state is not None else None,
+                None,
                 encoder_attention_mask=(enc_mask.repeat(rep, 1) if enc_mask is not None else None),
             )
 
@@ -633,14 +710,12 @@ class UamVLAGR00T_DT(UamVLAGR00T):
             examples = [examples]
         examples = self._prepare_examples(examples)
         _dev = next(self.parameters()).device
-        state_pre = self._state_batch_or_none(examples, _dev, torch.float32)
+        state_pre = self._qwen_state_batch_or_none(examples, _dev, torch.float32)
         examples, qwen_inputs, hidden, _ = self._encode_qwen_hidden(examples, state=state_pre)
-        device, dtype = hidden.device, hidden.dtype
-        state = state_pre.to(device=device, dtype=dtype) if state_pre is not None else None
         with torch.autocast("cuda", dtype=torch.float32):
             pred = self.action_model.predict_action(
                 hidden,
-                state,
+                None,
                 encoder_attention_mask=self._encoder_attention_mask(qwen_inputs),
             )
         pred_np = pred.detach().cpu().numpy()
@@ -687,7 +762,7 @@ class UamVLAGR00T_DT(UamVLAGR00T):
         try:
             examples = self._prepare_examples(batch[:limit])
             _dev = next(self.parameters()).device
-            state_pre = self._state_batch_or_none(examples, _dev, torch.float32)
+            state_pre = self._qwen_state_batch_or_none(examples, _dev, torch.float32)
             _, qwen_inputs, _, future_hidden = self._encode_qwen_hidden(examples, state=state_pre)
             device, dtype = future_hidden.device, future_hidden.dtype
             num_views = self._num_views_from_config()

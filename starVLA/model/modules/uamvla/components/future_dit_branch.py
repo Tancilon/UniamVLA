@@ -192,7 +192,6 @@ class FutureDiTBranch(nn.Module):
 
     Args:
         d_model:           Qwen LLM hidden size (= GT token dim).
-        num_obs_tokens:    Future query tokens per view (= SeerViTDecoder num_obs_tokens).
         num_img_tokens:    Qwen image tokens per view (49 for 224px / patch16 / merge2).
         image_size:        Image side in pixels (224).
         dit_hidden:        DiT internal width (lightweight, default 256).
@@ -208,7 +207,6 @@ class FutureDiTBranch(nn.Module):
     def __init__(
         self,
         d_model: int,
-        num_obs_tokens: int = 9,
         num_img_tokens: int = 49,
         image_size: int = 224,
         dit_hidden: int = 256,

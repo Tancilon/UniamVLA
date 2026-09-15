@@ -267,6 +267,69 @@ def test_calvin_policy_client_normalizes_uamgr00t_starvla_state_with_q99_indices
     np.testing.assert_allclose(sent_state, expected_state)
 
 
+def test_calvin_policy_client_passes_dt_raw_state_history(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class UamGR00TDTModelClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model_config = {
+                "framework": {
+                    "name": "UamGR00T_DT",
+                    "state_dim": 7,
+                    # DT intentionally disables the action-head state branch.
+                    "action_model": {"state_dim": 0},
+                    "history_frames": 10,
+                },
+                "datasets": {
+                    "vla_data": {
+                        "gr00t_state_indices": [0, 1, 2, 3, 4, 5, 7],
+                    },
+                },
+            }
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", UamGR00TDTModelClient)
+    policy = eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1",
+        port=8000,
+        pretrained_path="fake.pt",
+        unnorm_key="franka",
+    )
+
+    def obs_at(step):
+        robot_obs = np.arange(15, dtype=np.float32) + step * 100.0
+        return {
+            "rgb_obs": {
+                "rgb_static": np.zeros((200, 200, 3), dtype=np.uint8),
+                "rgb_gripper": np.zeros((84, 84, 3), dtype=np.uint8),
+            },
+            "robot_obs": robot_obs,
+        }
+
+    expected_states = []
+    for step in range(10):
+        policy.step(obs_at(step), "push the drawer")
+        expected_states.append(obs_at(step)["robot_obs"][[0, 1, 2, 3, 4, 5, 14]])
+        if step == 0:
+            np.testing.assert_allclose(
+                policy.client.last_example["state"],
+                np.repeat(expected_states[0][None], 10, axis=0),
+            )
+            assert policy.client.last_example["state"][0, -1] == obs_at(0)["robot_obs"][14]
+
+    sent_state = policy.client.last_example["state"]
+    assert sent_state.shape == (10, 7)
+    assert sent_state.dtype == np.float32
+    np.testing.assert_allclose(sent_state, np.stack(expected_states))
+
+    policy.reset(clear_history=True)
+    policy.step(obs_at(10), "push the drawer")
+    np.testing.assert_allclose(
+        policy.client.last_example["state"],
+        np.repeat(expected_states[-1][None], 10, axis=0) + 100.0,
+    )
+
+
 def test_calvin_policy_client_does_not_pass_robot_state_to_other_frameworks(monkeypatch):
     eval_calvin = _load_eval_calvin(monkeypatch)
 
@@ -377,3 +440,45 @@ def test_limit_eval_sequences_respects_requested_count(monkeypatch):
 
     assert eval_calvin._limit_eval_sequences(sequences, 2) == sequences[:2]
     assert eval_calvin._limit_eval_sequences(sequences, 10) == sequences
+
+
+def test_rollout_clears_temporal_history_at_every_subtask_boundary(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class FakePolicy:
+        def __init__(self):
+            self.reset_calls = []
+
+        def reset(self, clear_history=True):
+            self.reset_calls.append(clear_history)
+
+        def step(self, obs, lang_annotation):
+            return np.zeros(7, dtype=np.float32)
+
+    class FakeEnv:
+        def get_obs(self):
+            return {"rgb_obs": {"rgb_static": np.zeros((1, 1, 3), dtype=np.uint8)}}
+
+        def get_info(self):
+            return {"step": 0}
+
+        def step(self, action):
+            return self.get_obs(), 0.0, False, {"step": 1}
+
+    class SuccessfulTaskOracle:
+        def get_task_info_for_set(self, start_info, current_info, tasks):
+            return tasks
+
+    policy = FakePolicy()
+    success = eval_calvin.rollout(
+        env=FakeEnv(),
+        policy=policy,
+        task_oracle=SuccessfulTaskOracle(),
+        subtask="open_drawer",
+        val_annotations={"open_drawer": ["pull the handle to open the drawer"]},
+        plans={},
+        debug=False,
+    )
+
+    assert success is True
+    assert policy.reset_calls == [True]

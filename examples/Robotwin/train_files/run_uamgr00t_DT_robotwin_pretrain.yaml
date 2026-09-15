@@ -33,6 +33,8 @@ framework:
 
   # K=14 history frames for pretrain (longer context → richer future supervision).
   history_frames: 14
+  # Robot state is injected into Qwen only; the direct action-head state path is disabled.
+  state_dim: 14
   history_encoder:
     num_latents: 10
     resampler_depth: 3
@@ -67,7 +69,7 @@ framework:
     add_pos_embed: true
     max_seq_len: 1024
     action_dim: 14              # Agilex bimanual: 7L + 7R
-    state_dim: 14
+    state_dim: 0
     action_horizon: 16          # RoboTwin convention
     future_action_window_size: 15
     past_action_window_size: 0

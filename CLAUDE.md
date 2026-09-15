@@ -15,6 +15,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `starVLA/training/` — `train_starvla.py` (SFT), `train_starvla_cotrain.py` (multi-benchmark), `train_starvlm.py` (VLM-only)
 - `starVLA/config/` — YAML configs for training and DeepSpeed (ZeRO-2/3)
 
+**Key documentation** (reference when needed):
+- `docs/starVLA_guideline.md` — Complete quick-start walkthrough (installation → training → evaluation)
+- `docs/model_zoo.md` — Released checkpoints and pretrained weights
+- `docs/WM4A.md` — World Model for Action architecture (Cosmos-Predict2, Wan backbones)
+- `docs/faq.md` — Common configuration questions
+- `examples/<benchmark>/` — Per-benchmark training and eval launchers (LIBERO, Calvin, RoboCasa, etc.)
+
 ## Framework Class Hierarchy
 
 Frameworks follow a strict single-responsibility inheritance chain. Knowing the ancestry prevents redundant file reads:
@@ -105,6 +112,8 @@ pip install -e ".[dev]"       # adds Black, Ruff, pre-commit, gpustat
 ```bash
 CUDA_VISIBLE_DEVICES=0 python starVLA/model/framework/VLM4A/QwenGR00T.py --config_yaml starVLA/config/training/<config>.yaml
 CUDA_VISIBLE_DEVICES=0 python starVLA/dataloader/lerobot_datasets.py --config_yaml starVLA/config/training/<config>.yaml
+# WM4A (world model) example:
+CUDA_VISIBLE_DEVICES=0 python starVLA/model/framework/WM4A/CosmoPredict2GR00T.py
 ```
 
 **Training** (standard SFT):
@@ -119,7 +128,27 @@ WANDB_MODE=offline accelerate launch \
   2>&1 | tee "logs/train_$(date +%Y%m%d_%H%M%S).log"
 ```
 
+**Multi-benchmark co-training**:
+```bash
+mkdir -p logs && set -o pipefail
+WANDB_MODE=offline accelerate launch \
+  --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+  --num_processes 8 \
+  starVLA/training/train_starvla_cotrain.py \
+  --config_yaml ./starVLA/config/training/<cotrain_config>.yaml \
+  "$@" \
+  2>&1 | tee "logs/cotrain_$(date +%Y%m%d_%H%M%S).log"
+```
+
 **Resume training**: append `--trainer.is_resume true` via `"$@"` — no script editing needed.
+
+**Evaluation**: Each benchmark has its own eval script in `examples/<benchmark>/eval_files/`. Example:
+```bash
+# LIBERO evaluation
+python examples/LIBERO/eval_files/eval_libero.py \
+  --ckpt_path ./results/Checkpoints/steps_50000_pytorch_model.pt \
+  --config_yaml ./starVLA/config/training/<config>.yaml
+```
 
 **Tests**:
 ```bash
@@ -128,8 +157,9 @@ pytest tests/test_aux_loss_control.py  # single file
 pytest tests/ -k "libero"             # filter by keyword
 pytest tests/framework/               # framework-specific tests
 pytest tests/dataloader/              # dataloader-specific tests
+pytest -x                             # stop on first failure
 ```
-Use `-x` to stop on first failure. Use `pytest.importorskip(...)` for optional heavy deps.
+Use `pytest.importorskip(...)` for optional heavy deps.
 
 **Lint / format**:
 ```bash
@@ -161,6 +191,28 @@ Key directories beyond `starVLA/` and `examples/`:
 - `docs/` — comprehensive documentation (branching strategy, PR guidelines, FAQ, model zoo, WM4A guide)
 - `examples/<benchmark>/` — per-benchmark `train_files/` and `eval_files/` launchers (LIBERO, Calvin, RoboCasa, RoboTwin, DOMINO, BEHAVIOR, SimplerEnv, Franka, VLA-Arena)
 - `**/bar/` — git-ignored; safe place for local custom scripts without polluting the repo
+
+## Benchmarks and Examples
+
+StarVLA supports multiple robotics benchmarks, each with its own training/eval setup in `examples/<benchmark>/`:
+
+**Simulation benchmarks**:
+- **LIBERO** — Multi-task manipulation (10 tasks across 4 suites)
+- **Calvin** — Long-horizon language-conditioned tasks
+- **RoboCasa** — Kitchen manipulation tasks
+- **RoboTwin** — Twin-robot coordination
+- **SimplerEnv** — Simplified OpenAI Gym-style tasks
+- **DOMINO** — Dynamic manipulation with moving objects
+- **BEHAVIOR** — Complex household tasks
+- **VLA-Arena** — Multi-benchmark evaluation suite
+
+**Real robot**:
+- **Franka** — Complete real-robot development case with Franka Emika Panda
+
+Each benchmark directory contains:
+- `train_files/run_*.sh` and `run_*.yaml` — Training launchers and configs
+- `eval_files/eval_*.py` — Evaluation scripts
+- `README.md` — Benchmark-specific instructions and results
 
 ## Git Workflow
 
@@ -225,3 +277,34 @@ Claude 自己跑任何需要 GPU 的命令时必须遵守：
 4. **使用前显式指定卡号** — 用 `CUDA_VISIBLE_DEVICES=N python ...` 绑定到空闲卡，不要让 PyTorch 自动占用 GPU 0。
 
 用户明确覆盖规则 3（"用 GPU 0 也行"）时按用户指示执行；规则 1/2/4 不可覆盖。
+
+## Debugging and Development Tips
+
+**When adding a new framework**:
+1. Inherit from the appropriate parent (see Framework Class Hierarchy above)
+2. Register with `@FRAMEWORK_REGISTRY.register("YourName")`
+3. Add a `if __name__ == "__main__"` smoke test at the bottom
+4. Test standalone: `python starVLA/model/framework/VLM4A/YourFramework.py --config_yaml <config>.yaml`
+5. Verify it works in training: use a minimal config with 1-2 training steps
+
+**When debugging dataloaders**:
+1. Run standalone: `python starVLA/dataloader/<your_loader>.py --config_yaml <config>.yaml`
+2. Check returned dict keys match what your framework expects
+3. Verify image shapes, action dimensions, and data types
+4. Use `--datasets.vla_data.batch_size 1` for easier debugging
+
+**Common config mistakes**:
+- `framework.name` doesn't match the registered name (case-sensitive)
+- `datasets.vla_data.obs` view count doesn't match framework expectations
+- `action_dim` / `state_dim` mismatch between config and dataset
+- Missing or incorrect `base_vlm` path for VLM backbones
+
+**When model checkpoint loading fails**:
+- Check if you need `--trainer.reload_modules` to specify which modules to load
+- Verify the checkpoint was saved from the same framework class
+- Use `print(model)` to inspect module names for selective loading
+
+**Performance profiling**:
+- Training logs include step time; look for anomalies
+- Use `gpustat -i 1` to monitor GPU utilization during training
+- Check `docs/faq.md` for preprocessing time analysis (it's <1% so kept in framework)
