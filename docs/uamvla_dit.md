@@ -9,7 +9,7 @@ into this architecture; start a new run from `ckpt/RynnBrain-CoP-8B`.
 
 RynnBrain encodes two current camera images and H historical pairs. Set
 `datasets.vla_data.num_history_frames` (H) and `history_interval` (S) to positive
-integers. History offsets are `[-H*S, ..., -S]`, oldest to newest, excluding
+integers for historical fusion (H may also be zero for the baseline). History offsets are `[-H*S, ..., -S]`, oldest to newest, excluding
 the current frame. Defaults H=5, S=5 give `[-25,-20,-15,-10,-5]`; H=3, S=4
 gives `[-12,-8,-4]`. Training sampling and evaluation read the same settings. Each camera's history is fused independently into the
 three native Qwen3-VL DeepStack maps. The latest historical frame queries all
@@ -115,3 +115,20 @@ frames. It samples history before appending the current frame, including on step
 that reuse cached actions, and repeats frame zero when history is insufficient.
 Both fields are required; older configs missing history_interval need an explicit
 value. History length does not change learned parameter shapes.
+
+## Current-frame baseline
+
+Run `bash examples/calvin/train_files/run_uamvla_DiT_baseline.sh` to use the
+separate baseline YAML. It sets `num_history_frames: 0` and omits the
+`history_fusion` learning-rate group. `history_interval: 5` is retained but has
+no sampling effect when H=0. Logs and checkpoints use the distinct
+`uamvla_dit_baseline_calvin_abc_` prefix with a timestamp.
+
+The baseline samples only video offset `[0]`, constructs no history fusion
+parameters, and needs no history images or episode step. Current-image native
+Qwen3-VL DeepStack features are injected unchanged; historical attention,
+gates and episode-time encoding are absent. VLM weights, processor, action
+prompt, projector, DiT and training hyperparameters stay the same. Evaluation
+reads H=0 from the checkpoint config and does not cache or send history.
+Train a separate baseline checkpoint; historical-fusion checkpoints have extra
+parameters and cannot be strictly loaded as baseline checkpoints.

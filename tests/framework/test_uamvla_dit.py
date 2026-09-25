@@ -39,13 +39,13 @@ def tiny_interface(config):
     return interface
 
 
-@pytest.fixture(scope='module', params=[(5, 5), (3, 4)])
+@pytest.fixture(scope='module', params=[(5, 5), (3, 4), (0, 5)])
 def model(request):
     torch.set_num_threads(4)
     module = importlib.import_module('starVLA.model.framework.VLM4A.UamVLA_DiT')
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(module, 'get_vlm_model', tiny_interface)
-        config = OmegaConf.load(RECIPE)
+        config = OmegaConf.load(RECIPE if request.param[0] else 'examples/calvin/train_files/run_uamvla_DiT_baseline.yaml')
         config.datasets.vla_data.num_history_frames, config.datasets.vla_data.history_interval = request.param
         config.framework.action_model.action_hidden_dim = 4096
         instance = build_framework(wrap_config(config))
@@ -58,9 +58,13 @@ def model(request):
 def examples(num_history_frames):
     rng = np.random.default_rng(3)
     pair = [Image.fromarray(rng.integers(0, 256, (224, 224, 3), dtype=np.uint8)) for _ in range(2)]
-    return [dict(image=pair, image_history=[pair] * num_history_frames, step=30,
+    batch = [dict(image=pair, image_history=[pair] * num_history_frames, step=30,
                  lang=lang, action=rng.normal(size=(8, 7)).astype(np.float32))
             for lang in ('push the drawer', 'move the red block to the left side of the blue block')]
+    if not num_history_frames:
+        for sample in batch:
+            del sample['image_history'], sample['step']
+    return batch
 
 
 def test_condition_padding_and_two_step_backward(model):
@@ -84,7 +88,13 @@ def test_condition_padding_and_two_step_backward(model):
         assert torch.isfinite(loss)
         loss.backward()
         optimizer.step()
-    for module in (model.qwen_vl_interface, model.history_fusion, model.action_condition_projector, model.action_model):
+    modules = [model.qwen_vl_interface, model.action_condition_projector, model.action_model]
+    if model.num_history_frames:
+        modules.append(model.history_fusion)
+    else:
+        assert not hasattr(model, "history_fusion")
+        assert not any("history_fusion" in name for name in model.state_dict())
+    for module in modules:
         grads = [p.grad for p in module.parameters() if p.grad is not None]
         assert grads and all(torch.isfinite(g).all() for g in grads)
         assert any(g.abs().max() > 0 for g in grads)
@@ -121,7 +131,11 @@ def test_lr_groups_and_strict_roundtrip(model, tmp_path):
     groups = build_param_lr_groups(model, model.config)
     rates = {g['name']: g['lr'] for g in groups}
     assert rates['action_model'] == 5e-5
-    assert rates['qwen_vl_interface'] == rates['history_fusion'] == 5e-6
+    assert rates['qwen_vl_interface'] == 5e-6
+    if model.num_history_frames:
+        assert rates['history_fusion'] == 5e-6
+    else:
+        assert 'history_fusion' not in rates
     assert rates['base'] == 1e-5
     assert 'action_condition_projector' not in rates
     base_params = {id(p) for g in groups if g['name'] == 'base' for p in g['params']}
@@ -156,7 +170,7 @@ def test_lr_groups_and_strict_roundtrip(model, tmp_path):
     assert restored.patches_per_view == 64
 
 
-@pytest.mark.parametrize('h,s,offsets', [(5, 5, [-25,-20,-15,-10,-5,0]), (3, 4, [-12,-8,-4,0]), (1, 1, [-1,0])])
+@pytest.mark.parametrize('h,s,offsets', [(5, 5, [-25,-20,-15,-10,-5,0]), (3, 4, [-12,-8,-4,0]), (1, 1, [-1,0]), (0, 5, [0])])
 def test_dataset_offsets_and_no_labels(monkeypatch, h, s, offsets):
     from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
     config = OmegaConf.load(RECIPE).datasets.vla_data
@@ -179,9 +193,11 @@ def test_dataset_offsets_and_no_labels(monkeypatch, h, s, offsets):
     data[reader._modality_keys['language'][0]] = ['push the drawer']
     packed = reader._pack_sample(data)
     assert 'state' not in packed and 'future_rgb' not in packed
-    assert [int(np.asarray(pair[0])[0, 0, 0]) for pair in packed['image_history']] == list(range(h))
+    assert [int(np.asarray(pair[0])[0, 0, 0]) for pair in packed.get('image_history', [])] == list(range(h))
+    if h == 0:
+        assert 'image_history' not in packed
     assert int(np.asarray(packed['image'][0])[0, 0, 0]) == h
-    assert len(packed['image_history']) == h and packed['action'].shape == (8, 7)
+    assert len(packed.get('image_history', [])) == h and packed['action'].shape == (8, 7)
 
 
 def test_shared_action_head_default_conditions_and_bf16_training():
@@ -200,7 +216,7 @@ def test_shared_action_head_default_conditions_and_bf16_training():
 
 def test_processor_matches_original_for_current_and_history(model):
     prepared = model._prepare_examples(examples(model.num_history_frames)[:1])
-    images = prepared[0]['image'] + [im for pair in prepared[0]['image_history'] for im in pair]
+    images = prepared[0]['image'] + [im for pair in prepared[0].get('image_history', []) for im in pair]
     assert len(images) == 2 * (model.num_history_frames + 1) and all(im.size == (224, 224) for im in images)
     original = AutoProcessor.from_pretrained('ckpt/RynnBrain-CoP-8B', local_files_only=True)
     expected = original.image_processor(images=images, return_tensors='pt')
@@ -213,6 +229,27 @@ def test_processor_matches_original_for_current_and_history(model):
         history, current, _ = args
         seen.append((tuple(history.shape), tuple(current.shape)))
 
+    if not model.num_history_frames:
+        # Native current-frame features must reach the language model unchanged.
+        backbone = model.qwen_vl_interface.model.model
+        with pytest.MonkeyPatch.context() as patch:
+            original_features = backbone.get_image_features
+            captured = []
+            def capture_features(*args, **kwargs):
+                result = original_features(*args, **kwargs)
+                captured.append(result[1])
+                return result
+            def check_native(module, args, kwargs):
+                assert kwargs['deepstack_visual_embeds'] is captured[0]
+            patch.setattr(backbone, 'get_image_features', capture_features)
+            handle = backbone.language_model.register_forward_pre_hook(check_native, with_kwargs=True)
+            try:
+                with torch.inference_mode():
+                    model._encode_qwen_hidden(prepared)
+            finally:
+                handle.remove()
+            assert len(captured) == 1
+        return
     handle = model.history_fusion.register_forward_pre_hook(record_shapes)
     try:
         with torch.inference_mode():

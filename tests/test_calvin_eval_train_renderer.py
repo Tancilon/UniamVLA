@@ -134,7 +134,7 @@ def test_calvin_policy_client_uses_train_renderer_images(monkeypatch):
     assert action.shape == (7,)
 
 
-@pytest.mark.parametrize('h,s', [(5, 5), (3, 4), (1, 1)])
+@pytest.mark.parametrize('h,s', [(5, 5), (3, 4), (1, 1), (0, 5)])
 def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch, h, s):
     eval_calvin = _load_eval_calvin(monkeypatch)
 
@@ -164,6 +164,10 @@ def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch
         sent = policy.client.last_example
         assert "state" not in sent
         frames.append([image.copy() for image in sent["image"]])
+        if h == 0:
+            assert 'image_history' not in sent and 'step' not in sent
+            assert not policy._dit_image_history
+            continue
         for actual, expected in zip(policy._dit_image_history[-1], frames[-1]):
             np.testing.assert_array_equal(actual, expected)
             assert not np.shares_memory(actual, expected)

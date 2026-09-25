@@ -136,8 +136,10 @@ class CalvinPolicyClient:
         if self._uses_history_dit:
             self._dit_num_history_frames = self._nested_config_get(model_config, "datasets", "vla_data", "num_history_frames")
             self._dit_history_interval = self._nested_config_get(model_config, "datasets", "vla_data", "history_interval")
-            if any(type(value) is not int or value <= 0 for value in (self._dit_num_history_frames, self._dit_history_interval)):
-                raise ValueError("num_history_frames and history_interval must be positive integers")
+            if (type(self._dit_num_history_frames) is not int or self._dit_num_history_frames < 0
+                    or type(self._dit_history_interval) is not int or self._dit_history_interval <= 0):
+                raise ValueError("num_history_frames must be a nonnegative integer and history_interval a positive integer")
+            self._uses_history_dit = self._dit_num_history_frames > 0
             self._dit_image_history = deque(maxlen=self._dit_num_history_frames * self._dit_history_interval)
         self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(model_config)
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)

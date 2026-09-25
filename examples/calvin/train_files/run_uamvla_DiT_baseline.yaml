@@ -1,4 +1,4 @@
-run_id: uamvla_dit
+run_id: uamvla_dit_baseline
 run_root_dir: playground/Checkpoints
 seed: 42
 wandb_entity: tancilon1-fudan-university-school-of-management
@@ -33,7 +33,7 @@ datasets:
     action_dim: 7
     action_horizon: 8
     action_type: delta_qpos
-    num_history_frames: 5
+    num_history_frames: 0
     history_interval: 5
     future_offset: 0
     image_resize: 224
@@ -53,7 +53,6 @@ trainer:
     base: 1.0e-05
     qwen_vl_interface: 5.0e-06
     action_model: 5.0e-05
-    history_fusion: 5.0e-06
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06

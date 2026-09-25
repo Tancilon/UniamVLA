@@ -19,8 +19,9 @@ class UamVLA_DiT(baseframework):
         data = config.datasets.vla_data
         self.num_history_frames = data.num_history_frames
         self.history_interval = data.history_interval
-        if any(type(value) is not int or value <= 0 for value in (self.num_history_frames, self.history_interval)):
-            raise ValueError("num_history_frames and history_interval must be positive integers")
+        if (type(self.num_history_frames) is not int or self.num_history_frames < 0
+                or type(self.history_interval) is not int or self.history_interval <= 0):
+            raise ValueError("num_history_frames must be a nonnegative integer and history_interval a positive integer")
         action = config.framework.action_model
         action.action_hidden_dim = DIT_CONDITION_DIMS[action.action_model_type]
         self.action_horizon = int(action.action_horizon)
@@ -39,7 +40,8 @@ class UamVLA_DiT(baseframework):
         vision_stride = int(backbone.config.vision_config.patch_size) * int(backbone.visual.spatial_merge_size)
         self.patches_per_view = (self.qwen_image_size // vision_stride) ** 2
         dim = backbone.config.text_config.hidden_size
-        self.history_fusion = DeepStackHistoryFusion(dim)
+        if self.num_history_frames > 0:
+            self.history_fusion = DeepStackHistoryFusion(dim)
         self.action_condition_projector = torch.nn.Linear(dim, action.action_hidden_dim)
         self.action_model = get_action_model(config=config)
         self.action_token = "🔍"
@@ -59,16 +61,16 @@ class UamVLA_DiT(baseframework):
             examples = [examples]
         prepared = []
         for sample in examples:
-            history = sample["image_history"]
-            if len(history) != self.num_history_frames or len(sample["image"]) != 2 or any(len(frame) != 2 for frame in history):
-                raise ValueError(f"Expected two current views and {self.num_history_frames} pairs of historical views")
-            step = sample["__base_index"] if "__trajectory_id" in sample else sample["step"]
-            prepared.append({
-                **sample,
-                "image": [self._prepare_image(im) for im in sample["image"]],
-                "image_history": [[self._prepare_image(im) for im in frame] for frame in history],
-                "step": int(step),
-            })
+            if len(sample["image"]) != 2:
+                raise ValueError("Expected two current views")
+            item = {**sample, "image": [self._prepare_image(im) for im in sample["image"]]}
+            if self.num_history_frames > 0:
+                history = sample["image_history"]
+                if len(history) != self.num_history_frames or any(len(frame) != 2 for frame in history):
+                    raise ValueError(f"Expected {self.num_history_frames} pairs of historical views")
+                item["image_history"] = [[self._prepare_image(im) for im in frame] for frame in history]
+                item["step"] = int(sample["__base_index"] if "__trajectory_id" in sample else sample["step"])
+            prepared.append(item)
         return prepared
 
     def _prepare_image(self, image):
@@ -89,14 +91,16 @@ class UamVLA_DiT(baseframework):
             instructions=[sample["lang"] + self.action_prompt_suffix for sample in examples],
         )
         device = inputs["input_ids"].device
-        history_images = [im for sample in examples for frame in sample["image_history"] for im in frame]
-        history_inputs = interface.processor.image_processor(
-            images=history_images,
-            return_tensors="pt",
-        ).to(device)
         b = len(examples)
         n = self.patches_per_view
-        for grid, count in ((inputs["image_grid_thw"], b * 2), (history_inputs["image_grid_thw"], b * self.num_history_frames * 2)):
+        grids = [(inputs["image_grid_thw"], b * 2)]
+        if self.num_history_frames > 0:
+            history_images = [im for sample in examples for frame in sample["image_history"] for im in frame]
+            history_inputs = interface.processor.image_processor(
+                images=history_images, return_tensors="pt",
+            ).to(device)
+            grids.append((history_inputs["image_grid_thw"], b * self.num_history_frames * 2))
+        for grid, count in grids:
             tokens = grid.prod(-1) // backbone.visual.spatial_merge_size**2
             if len(grid) != count or not torch.all(tokens == n):
                 raise ValueError("Current/history image grids must match the configured image size")
@@ -106,13 +110,16 @@ class UamVLA_DiT(baseframework):
                 inputs["pixel_values"],
                 inputs["image_grid_thw"],
             )
-            _, history_levels = backbone.get_image_features(
-                history_inputs["pixel_values"],
-                history_inputs["image_grid_thw"],
-            )
-            current = torch.stack([x.reshape(b, 2, n, -1) for x in current_levels], dim=1)
-            history = torch.stack([x.reshape(b, self.num_history_frames, 2, n, -1) for x in history_levels], dim=1)
-            fused = self.history_fusion(history, current, [sample["step"] for sample in examples])
+            deepstack_visual_embeds = current_levels
+            if self.num_history_frames > 0:
+                _, history_levels = backbone.get_image_features(
+                    history_inputs["pixel_values"],
+                    history_inputs["image_grid_thw"],
+                )
+                current = torch.stack([x.reshape(b, 2, n, -1) for x in current_levels], dim=1)
+                history = torch.stack([x.reshape(b, self.num_history_frames, 2, n, -1) for x in history_levels], dim=1)
+                fused = self.history_fusion(history, current, [sample["step"] for sample in examples])
+                deepstack_visual_embeds = [fused[:, i].reshape(-1, fused.shape[-1]) for i in range(3)]
 
             embeds = backbone.get_input_embeddings()(inputs["input_ids"])
             image_features = torch.cat(image_features).to(embeds.dtype)
@@ -133,7 +140,7 @@ class UamVLA_DiT(baseframework):
                 attention_mask=inputs["attention_mask"],
                 position_ids=positions,
                 visual_pos_masks=visual_mask,
-                deepstack_visual_embeds=[fused[:, i].reshape(-1, fused.shape[-1]) for i in range(3)],
+                deepstack_visual_embeds=deepstack_visual_embeds,
                 use_cache=False,
                 return_dict=True,
             )

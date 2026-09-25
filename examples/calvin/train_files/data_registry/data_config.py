@@ -128,8 +128,9 @@ class CalvinDiTDataConfig(CalvinABCLeRobotV21H8DataConfig):
     """Configured sparse historical pairs and current images for action diffusion."""
 
     def modality_config(self, *, num_history_frames, history_interval):
-        if any(type(value) is not int or value <= 0 for value in (num_history_frames, history_interval)):
-            raise ValueError("num_history_frames and history_interval must be positive integers")
+        if (type(num_history_frames) is not int or num_history_frames < 0
+                or type(history_interval) is not int or history_interval <= 0):
+            raise ValueError("num_history_frames must be a nonnegative integer and history_interval a positive integer")
         config = super().modality_config()
         config["video"] = ModalityConfig(
             delta_indices=list(range(-num_history_frames * history_interval, 1, history_interval)),
