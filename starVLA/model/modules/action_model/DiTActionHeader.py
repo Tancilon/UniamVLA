@@ -87,6 +87,7 @@ class ActionModel(nn.Module):
         past_action_window_size,
         diffusion_steps=100,
         noise_schedule="squaredcos_cap_v2",
+        n_condition_token=64,
     ):
         """
         Initialize diffusion model and backbone.
@@ -99,6 +100,7 @@ class ActionModel(nn.Module):
             past_action_window_size: Number of past steps possibly encoded (for context).
             diffusion_steps: Total diffusion timesteps.
             noise_schedule: Scheduler type string.
+            n_condition_token: Number of conditioning tokens supplied to the DiT.
         """
         super().__init__()
         self.in_channels = in_channels
@@ -126,6 +128,7 @@ class ActionModel(nn.Module):
             learn_sigma=learn_sigma,
             future_action_window_size=future_action_window_size,
             past_action_window_size=past_action_window_size,
+            n_conditon_token=n_condition_token,
         )
 
     def forward(self, gt_action, condition, **kwargs):
@@ -151,7 +154,10 @@ class ActionModel(nn.Module):
         x_t = self.diffusion.q_sample(gt_action, timestep, noise)
 
         # predict noise from x_t
-        noise_pred = self.net(x_t, timestep, condition)
+        # Gaussian diffusion coefficients promote q_sample to FP32. Match the
+        # network weights when training with BF16 parameters as well.
+        model_dtype = next(self.net.parameters()).dtype
+        noise_pred = self.net(x_t.to(model_dtype), timestep, condition.to(model_dtype))
 
         assert noise_pred.shape == noise.shape == gt_action.shape
 
@@ -223,4 +229,7 @@ def get_action_model(model_typ="DiT-B", config=None):
         in_channels=action_dim,  # Input channel size
         future_action_window_size=future_action_window_size,  # Future action window size
         past_action_window_size=past_action_window_size,  # Past action window size
+        n_condition_token=int(action_model_cfg.get("n_condition_token", 64)),
+        diffusion_steps=int(action_model_cfg.get("diffusion_steps", 100)),
+        noise_schedule=action_model_cfg.get("noise_schedule", "squaredcos_cap_v2"),
     )

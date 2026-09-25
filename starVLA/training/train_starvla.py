@@ -392,6 +392,7 @@ class VLATrainer(TrainerUtils):
 
     def train(self):
         """Execute training loop."""
+        self.model.train()
         self._log_training_config()
         self._create_data_iterators()
         progress_bar = tqdm(

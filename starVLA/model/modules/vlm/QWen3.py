@@ -45,9 +45,7 @@ def _resolve_square_obs_image_size(config) -> int | None:
     if value is None:
         return None
     if isinstance(value, (list, tuple)) or (
-        not isinstance(value, (str, bytes))
-        and hasattr(value, "__len__")
-        and hasattr(value, "__getitem__")
+        not isinstance(value, (str, bytes)) and hasattr(value, "__len__") and hasattr(value, "__getitem__")
     ):
         if len(value) != 2:
             raise ValueError(f"obs_image_size must be [S, S], got {value}")
@@ -120,7 +118,7 @@ class _QWen3_VL_Interface(nn.Module):
             model_id,
             attn_implementation=attn_implementation,
             dtype=torch.bfloat16,
-            ignore_mismatched_sizes=True, # resize image no longer needed? @TODO check bug
+            ignore_mismatched_sizes=True,  # resize image no longer needed? @TODO check bug
         )
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
@@ -141,9 +139,7 @@ class _QWen3_VL_Interface(nn.Module):
 
         if enable_grad_ckpt:
             try:
-                self.model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
+                self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
                 if hasattr(self.model, "enable_input_require_grads"):
                     self.model.enable_input_require_grads()
             except Exception as exc:
@@ -195,12 +191,12 @@ class _QWen3_VL_Interface(nn.Module):
             )
         return generation_output
 
-    def build_qwenvl_inputs(self, images, instructions, solutions=None,
-                             num_views_per_frame: int | None = None, **kwargs):
+    def build_qwenvl_inputs(
+        self, images, instructions, solutions=None, num_views_per_frame: int | None = None, **kwargs
+    ):
         """
         Build model inputs from raw data (images + instructions + optional solutions).
-        Follow Official Qwen3-VL Instruct format: text BEFORE images.
-        https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+        Images BEFORE text (content = [images..., text]).
 
         Args:
             num_views_per_frame: When set, insert temporal frame markers between each
@@ -209,6 +205,7 @@ class _QWen3_VL_Interface(nn.Module):
                                    "Frame t-8:" [img_v0] [img_v1]
                                    ...
                                    "Current frame:" [img_v0] [img_v1]
+                                   [instruction text]
                                  Enables prompt-based timestep block simulation.
                                  Controlled by framework.use_temporal_markers in YAML.
         """
@@ -223,15 +220,13 @@ class _QWen3_VL_Interface(nn.Module):
             else:
                 prompt = instruction
 
-            # Instruction tokens prepended before image tokens so that image tokens
-            # can attend to instruction via causal attention (ReconVLA §3.2).
-            content = [{"type": "text", "text": prompt}]
+            content = []
 
             if num_views_per_frame is not None and num_views_per_frame > 0:
                 # Interleave temporal markers with image groups.
                 n_frames = len(imgs) // num_views_per_frame
                 for frame_i in range(n_frames):
-                    rel_t = frame_i - (n_frames - 1)   # e.g., -9, -8, ..., 0
+                    rel_t = frame_i - (n_frames - 1)  # e.g., -9, -8, ..., 0
                     label = f"Frame t{rel_t}:" if rel_t < 0 else "Current frame:"
                     content.append({"type": "text", "text": label})
                     for view_i in range(num_views_per_frame):
@@ -248,6 +243,9 @@ class _QWen3_VL_Interface(nn.Module):
                         image_content["min_pixels"] = self.fixed_image_pixels
                         image_content["max_pixels"] = self.fixed_image_pixels
                     content.append(image_content)
+
+            # Instruction tokens appended after image tokens (hybridVLA order).
+            content.append({"type": "text", "text": prompt})
 
             msg = [{"role": "user", "content": content}]
 
@@ -307,6 +305,7 @@ if __name__ == "__main__":
 
     if os.getenv("DEBUGPY_ENABLE", "0") == "1":
         import debugpy
+
         debugpy.listen(("0.0.0.0", 10092))
         print("Rank 0 waiting for debugger attach on port 10092...")
         debugpy.wait_for_client()

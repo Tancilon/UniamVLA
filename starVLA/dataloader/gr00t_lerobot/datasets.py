@@ -1459,14 +1459,16 @@ class LeRobotSingleDataset(Dataset):
             sample["image_history"] = image_history
 
             # ------------------------------------------------------------------
-            # future_rgb (single, backward compat): frame at delta=future_offset
-            # future_frame_idx = current_frame_idx + future_offset (NOT +1)
-            # because observation_indices = [-K+1,...,0,1,...,future_offset].
+            # Resolve the temporal offset through modality metadata. Array
+            # positions are not time offsets when history/future is sparse.
             # ------------------------------------------------------------------
             if future_offset > 0:
-                future_frame_idx = current_frame_idx + future_offset
                 future_rgb = []
                 for video_key in self.modality_keys["video"]:
+                    matches = np.flatnonzero(self.delta_indices[video_key] == future_offset)
+                    if len(matches) != 1:
+                        raise ValueError(f"{video_key} must contain future offset {future_offset} exactly once")
+                    future_frame_idx = int(matches[0])
                     frame = data[video_key][future_frame_idx]
                     tensor = torch.from_numpy(frame.copy()).float() / 255.0
                     tensor = tensor.permute(2, 0, 1)

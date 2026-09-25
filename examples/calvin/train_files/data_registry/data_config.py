@@ -124,6 +124,16 @@ class CalvinABCLeRobotV21H8DataConfig:
         ])
 
 
+class CalvinDiTDataConfig(CalvinABCLeRobotV21H8DataConfig):
+    """Five sparse historical pairs and current images for action diffusion."""
+    observation_indices = [-25, -20, -15, -10, -5, 0]
+
+    def modality_config(self):
+        config = super().modality_config()
+        config["language"] = ModalityConfig(delta_indices=[0], modality_keys=self.language_keys)
+        return config
+
+
 class CalvinDT_K10DataConfig(CalvinABCLeRobotV21H8DataConfig):
     """Seer-style DT config for Calvin finetune (K=10, Seer sequence_length=10).
 
@@ -201,6 +211,7 @@ class CalvinDT_K10_H8DataConfig(CalvinDT_K10DataConfig):
 
 
 ROBOT_TYPE_CONFIG_MAP = {
+    "calvin_dit": CalvinDiTDataConfig(),
     "uamvla_calvin_franka": UamVLACalvinDataConfig(),
     "uamvla_calvin_franka_h8": UamVLACalvinH8DataConfig(),
     "calvin_abc_d_franka_h8": CalvinABCLeRobotV21H8DataConfig(),
@@ -210,6 +221,7 @@ ROBOT_TYPE_CONFIG_MAP = {
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
+    "calvin_dit": EmbodimentTag.FRANKA,
     "uamvla_calvin_franka": EmbodimentTag.FRANKA,
     "uamvla_calvin_franka_h8": EmbodimentTag.FRANKA,
     "calvin_abc_d_franka_h8": EmbodimentTag.FRANKA,
@@ -219,6 +231,11 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
+    "calvin_abc_dit": [
+        ("task_ABC_D_scene_A_lerobot_lt", 1.0, "calvin_dit"),
+        ("task_ABC_D_scene_B_lerobot_lt", 1.0, "calvin_dit"),
+        ("task_ABC_D_scene_C_lerobot_lt", 1.0, "calvin_dit"),
+    ],
     # Three-scene CALVIN ABC LeRobot v2.1 datasets under datasets/.
     "calvin_abc_lerobot_h8": [
         ("task_ABC_D_scene_A_lerobot", 1.0, "calvin_abc_d_franka_h8"),

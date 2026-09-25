@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 def _install_eval_calvin_import_stubs(monkeypatch):
@@ -90,8 +91,9 @@ class _FakeModelClient:
 class _FakeTrainRenderer:
     def __init__(self):
         self.calls = []
-        self.static = np.full((256, 256, 3), 17, dtype=np.uint8)
-        self.wrist = np.full((256, 256, 3), 29, dtype=np.uint8)
+        rng = np.random.default_rng(42)
+        self.static = rng.integers(0, 256, (256, 256, 3), dtype=np.uint8)
+        self.wrist = rng.integers(0, 256, (256, 256, 3), dtype=np.uint8)
 
     def render_cameras(self, width: int, height: int) -> dict:
         self.calls.append((width, height))
@@ -122,11 +124,58 @@ def test_calvin_policy_client_uses_train_renderer_images(monkeypatch):
 
     assert renderer.calls == [(256, 256)]
     sent_images = policy.client.last_example["image"]
-    assert sent_images[0].shape == (256, 256, 3)
-    assert sent_images[1].shape == (256, 256, 3)
-    assert np.array_equal(sent_images[0], renderer.static)
-    assert np.array_equal(sent_images[1], renderer.wrist)
+    for sent, rendered in zip(sent_images, (renderer.static, renderer.wrist)):
+        assert sent.shape == (224, 224, 3)
+        assert sent.dtype == np.uint8
+        # Use the training reader's exact operation as the reference.
+        expected = np.array(Image.fromarray(rendered).resize((224, 224)))
+        np.testing.assert_array_equal(sent, expected)
     assert action.shape == (7,)
+
+
+def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch):
+    eval_calvin = _load_eval_calvin(monkeypatch)
+
+    class DiTClient(_FakeModelClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model_config = {"framework": {"name": "UamVLA_DiT"}}
+            self.query_steps = []
+
+        def step(self, example, step=0):
+            if step % 8 == 0:
+                self.query_steps.append(step)
+            return super().step(example, step)
+
+    monkeypatch.setattr(eval_calvin, "ModelClient", DiTClient)
+    renderer = _FakeTrainRenderer()
+    policy = eval_calvin.CalvinPolicyClient(
+        host="127.0.0.1", port=8000, pretrained_path="fake.pt",
+        unnorm_key="franka", train_renderer=renderer,
+    )
+    obs = {"robot_obs": np.zeros(15, dtype=np.float32)}
+    frames = []
+    for step in range(31):
+        renderer.static = np.roll(renderer.static, 1, axis=0)
+        renderer.wrist = np.roll(renderer.wrist, 1, axis=1)
+        policy.step(obs, "push the drawer")
+        sent = policy.client.last_example
+        assert "state" not in sent
+        frames.append([image.copy() for image in sent["image"]])
+        for actual, expected in zip(policy._dit_image_history[-1], frames[-1]):
+            np.testing.assert_array_equal(actual, expected)
+            assert not np.shares_memory(actual, expected)
+        for pair, offset in zip(sent["image_history"], (-25, -20, -15, -10, -5)):
+            for actual, expected in zip(pair, frames[max(step + offset, 0)]):
+                np.testing.assert_array_equal(actual, expected)
+                assert actual.shape == (224, 224, 3)
+
+    assert renderer.calls == [(256, 256)] * 31
+    assert policy.client.query_steps == [0, 8, 16, 24]
+    assert len(policy._dit_image_history) == 31
+    policy.reset(clear_history=True)
+    assert not policy._dit_image_history
+    assert policy.step_count == 0
 
 
 def test_calvin_policy_client_normalizes_uamvla_gr00t_robot_state(monkeypatch, tmp_path):

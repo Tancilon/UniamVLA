@@ -46,6 +46,7 @@ from calvin_agent.evaluation.utils import (
 )
 from moviepy.editor import ImageSequenceClip
 from omegaconf import OmegaConf
+from PIL import Image
 from termcolor import colored
 from tqdm import tqdm
 
@@ -72,7 +73,7 @@ class Args:
     host: str = "127.0.0.1"
     port: int = 8000
     resize_size: int = 224
-    replan_steps: int = 5  # 0 means use the model checkpoint's default action horizon
+    replan_steps: int = 0  # 0 means use the model checkpoint's default action horizon
     pretrained_path: str = ""
     unnorm_key: str = ""
     
@@ -107,7 +108,7 @@ class CalvinPolicyClient:
         self,
         host: str,
         port: int,
-        resize_size: int = 256,
+        resize_size: int = 224,
         replan_steps: int = 0,
         pretrained_path: str = "",
         unnorm_key: str = "",
@@ -130,6 +131,8 @@ class CalvinPolicyClient:
         self.step_count = 0
         self.train_renderer = train_renderer
         model_config = getattr(self.client, "model_config", None)
+        self._uses_history_dit = self._nested_config_get(model_config, "framework", "name") == "UamVLA_DiT"
+        self._dit_image_history = deque(maxlen=50)
         self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(model_config)
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
         self.send_uamvla_gr00t_raw_state = self._client_uses_uamvla_gr00t_raw_state(self.client)
@@ -378,6 +381,7 @@ class CalvinPolicyClient:
         """Reset action plan buffer."""
         self.step_count = 0
         if clear_history:
+            self._dit_image_history.clear()
             self._uamvla_gr00t_dt_image_history.clear()
             self._uamvla_gr00t_dt_state_history.clear()
 
@@ -390,11 +394,20 @@ class CalvinPolicyClient:
         # identical preprocessing.
         if self.train_renderer is not None:
             rendered = self.train_renderer.render_cameras(
-                width=self.resize_size,
-                height=self.resize_size,
+                width=256,
+                height=256,
             )
-            image = image_tools.convert_to_uint8(rendered["rgb_static"])
-            wrist_image = image_tools.convert_to_uint8(rendered["rgb_wrist"])
+            # Match the training reader's PIL RGB resize before either the
+            # current observation or the history cache consumes these images.
+            image, wrist_image = [
+                np.array(
+                    Image.fromarray(image_tools.convert_to_uint8(rendered[key])).resize(
+                        (self.resize_size, self.resize_size),
+                        resample=Image.Resampling.BICUBIC,
+                    )
+                )
+                for key in ("rgb_static", "rgb_wrist")
+            ]
         else:
             rgb_static = obs["rgb_obs"]["rgb_static"]  # (200, 200, 3) uint8
             rgb_gripper = obs["rgb_obs"]["rgb_gripper"]  # (84, 84, 3) uint8
@@ -406,6 +419,16 @@ class CalvinPolicyClient:
                 image_tools.resize_with_pad(rgb_gripper, self.resize_size, self.resize_size)
             )
         return [image, wrist_image]
+
+    def _dit_history_for_example(self, current_images):
+        """Sample t-25,...,t-5 before appending t; clamp early steps to frame 0."""
+        history = list(self._dit_image_history)
+        if not history:
+            return [self._copy_image_pair(current_images) for _ in range(5)]
+        return [
+            self._copy_image_pair(history[max(len(history) + offset, 0)])
+            for offset in (-25, -20, -15, -10, -5)
+        ]
 
     def _uamvla_gr00t_dt_history_for_example(
         self,
@@ -483,6 +506,9 @@ class CalvinPolicyClient:
             example["state"] = self._extract_uamvla_gr00t_state(obs)
         if self.send_uamvla_gr00t_dt_history:
             example["image_history"] = self._uamvla_gr00t_dt_history_for_example(current_images)
+        if self._uses_history_dit:
+            example["image_history"] = self._dit_history_for_example(current_images)
+            example["step"] = self.step_count
 
         # Spec parallel of LIBERO state-passthrough: hand the inner ModelClient
         # the raw 15-D CALVIN robot_obs only when ModelClient successfully
@@ -497,6 +523,8 @@ class CalvinPolicyClient:
 
         # Query model
         model_output = self.client.step(example=example, step=self.step_count)
+        if self._uses_history_dit:
+            self._dit_image_history.append(self._copy_image_pair(current_images))
         if self.send_uamvla_gr00t_dt_history:
             self._append_uamvla_gr00t_dt_history(current_images)
         if self.send_uamvla_gr00t_raw_state:

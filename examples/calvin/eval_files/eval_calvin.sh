@@ -5,13 +5,14 @@ set -euo pipefail
 # === Please modify the following paths according to your environment ===
 export PYTHONPATH=$(pwd):${PYTHONPATH:-} # let Calvin client find websocket tools from main repo
 export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/matplotlib-calvin}
+export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-egl}
 # NOTE: activate the calvin conda env before running this script.
 
 host=${HOST:-127.0.0.1}
 base_port=${PORT:-5694}
 unnorm_key=${UNNORM_KEY:-franka}
 your_ckpt=${CKPT_PATH:-ckpt/StarVLA-QwenGR00T_Qwen2.5-VL-3B-Instruct-Action_calvin_D_D/checkpoints/steps_30000_pytorch_model.pt}
-dataset_path=${DATASET_PATH:-datasets/calvin/task_D_D}
+dataset_path=${DATASET_PATH:-datasets/calvin/task_ABC_D}
 calvin_config_path=${CALVIN_CONFIG_PATH:-third_party/calvin/calvin_models/conf}
 eval_sequences_path=${EVAL_SEQUENCES_PATH:-examples/calvin/eval_files/eval_sequences.json}
 num_sequences=${NUM_SEQUENCES:-1000}
@@ -33,6 +34,4 @@ python ./examples/calvin/eval_files/eval_calvin.py \
     --args.eval_sequences_path "${eval_sequences_path}" \
     --args.num_sequences "$num_sequences" \
     --args.eval_log_dir "${LOG_DIR}" \
-    --args.replan-steps 5 \
-    --args.resize-size 224 \
     "$@"

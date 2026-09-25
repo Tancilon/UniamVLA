@@ -6,7 +6,7 @@ def get_vlm_model(config):
         from .QWen2_5 import _QWen_VL_Interface
 
         return _QWen_VL_Interface(config)
-    elif "Qwen3-VL" in vlm_name:
+    elif "Qwen3-VL" in vlm_name or "rynnbrain" in vlm_name.lower():
         # Use h_R interface when dedicated reconstructive tokens are enabled
         qwenvl_cfg = getattr(config.framework, "qwenvl", {})
         use_hr = getattr(qwenvl_cfg, "use_hR_interface", False) or (
