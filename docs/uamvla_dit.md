@@ -7,10 +7,13 @@ into this architecture; start a new run from `ckpt/RynnBrain-CoP-8B`.
 
 ## Model and data
 
-RynnBrain encodes two current camera images and five historical pairs at offsets
-`[-25,-20,-15,-10,-5]`. Each camera's history is fused independently into the
+RynnBrain encodes two current camera images and H historical pairs. Set
+`datasets.vla_data.num_history_frames` (H) and `history_interval` (S) to positive
+integers. History offsets are `[-H*S, ..., -S]`, oldest to newest, excluding
+the current frame. Defaults H=5, S=5 give `[-25,-20,-15,-10,-5]`; H=3, S=4
+gives `[-12,-8,-4]`. Training sampling and evaluation read the same settings. Each camera's history is fused independently into the
 three native Qwen3-VL DeepStack maps. The latest historical frame queries all
-five historical frames; a learned sigmoid gate blends the result with current
+H historical frames; a learned sigmoid gate blends the result with current
 features plus episode-step encoding. History does not extend the text sequence.
 Observations remain 224×224 (`obs_image_size` and dataset `image_resize`). The
 processor alone resizes them to 256×256 (`qwen_image_size`), producing 64 merged
@@ -32,8 +35,8 @@ The future RGB denoiser module remains in the repository for later work but is
 not imported or constructed by this framework. There are no future queries,
 future labels, auxiliary losses, or future-image visualizations.
 
-The `calvin_abc_dit` mixture uses scenes A/B/C. Video offsets are now
-`[-25,-20,-15,-10,-5,0]`; the recipe sets `include_state: false` and
+The `calvin_abc_dit` mixture uses scenes A/B/C. Video offsets are generated from H and S with a final current-frame offset 0
+(default `[-25,-20,-15,-10,-5,0]`); the recipe sets `include_state: false` and
 `future_offset: 0`. Early history clamps to frame zero. Action offsets remain
 0 through 7, with the existing dataset normalization and boundary padding.
 No action validity mask is introduced.
@@ -106,3 +109,9 @@ Replanning defaults to the checkpoint horizon of
 8 actions; `--args.replan-steps` can explicitly override the interval.
 History updates on every environment step and clears at subtask boundaries.
 No robot state or future images are sent for this framework.
+
+Evaluation reads H and S from the checkpoint config and keeps H*S prior environment
+frames. It samples history before appending the current frame, including on steps
+that reuse cached actions, and repeats frame zero when history is insufficient.
+Both fields are required; older configs missing history_interval need an explicit
+value. History length does not change learned parameter shapes.

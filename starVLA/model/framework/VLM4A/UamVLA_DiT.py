@@ -16,6 +16,11 @@ class UamVLA_DiT(baseframework):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        data = config.datasets.vla_data
+        self.num_history_frames = data.num_history_frames
+        self.history_interval = data.history_interval
+        if any(type(value) is not int or value <= 0 for value in (self.num_history_frames, self.history_interval)):
+            raise ValueError("num_history_frames and history_interval must be positive integers")
         action = config.framework.action_model
         action.action_hidden_dim = DIT_CONDITION_DIMS[action.action_model_type]
         self.action_horizon = int(action.action_horizon)
@@ -55,8 +60,8 @@ class UamVLA_DiT(baseframework):
         prepared = []
         for sample in examples:
             history = sample["image_history"]
-            if len(history) != 5 or len(sample["image"]) != 2 or any(len(frame) != 2 for frame in history):
-                raise ValueError("Expected two current views and five pairs of historical views")
+            if len(history) != self.num_history_frames or len(sample["image"]) != 2 or any(len(frame) != 2 for frame in history):
+                raise ValueError(f"Expected two current views and {self.num_history_frames} pairs of historical views")
             step = sample["__base_index"] if "__trajectory_id" in sample else sample["step"]
             prepared.append({
                 **sample,
@@ -91,7 +96,7 @@ class UamVLA_DiT(baseframework):
         ).to(device)
         b = len(examples)
         n = self.patches_per_view
-        for grid, count in ((inputs["image_grid_thw"], b * 2), (history_inputs["image_grid_thw"], b * 10)):
+        for grid, count in ((inputs["image_grid_thw"], b * 2), (history_inputs["image_grid_thw"], b * self.num_history_frames * 2)):
             tokens = grid.prod(-1) // backbone.visual.spatial_merge_size**2
             if len(grid) != count or not torch.all(tokens == n):
                 raise ValueError("Current/history image grids must match the configured image size")
@@ -106,7 +111,7 @@ class UamVLA_DiT(baseframework):
                 history_inputs["image_grid_thw"],
             )
             current = torch.stack([x.reshape(b, 2, n, -1) for x in current_levels], dim=1)
-            history = torch.stack([x.reshape(b, 5, 2, n, -1) for x in history_levels], dim=1)
+            history = torch.stack([x.reshape(b, self.num_history_frames, 2, n, -1) for x in history_levels], dim=1)
             fused = self.history_fusion(history, current, [sample["step"] for sample in examples])
 
             embeds = backbone.get_input_embeddings()(inputs["input_ids"])

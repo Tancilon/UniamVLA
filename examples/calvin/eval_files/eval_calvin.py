@@ -132,7 +132,13 @@ class CalvinPolicyClient:
         self.train_renderer = train_renderer
         model_config = getattr(self.client, "model_config", None)
         self._uses_history_dit = self._nested_config_get(model_config, "framework", "name") == "UamVLA_DiT"
-        self._dit_image_history = deque(maxlen=50)
+        self._dit_image_history = deque()
+        if self._uses_history_dit:
+            self._dit_num_history_frames = self._nested_config_get(model_config, "datasets", "vla_data", "num_history_frames")
+            self._dit_history_interval = self._nested_config_get(model_config, "datasets", "vla_data", "history_interval")
+            if any(type(value) is not int or value <= 0 for value in (self._dit_num_history_frames, self._dit_history_interval)):
+                raise ValueError("num_history_frames and history_interval must be positive integers")
+            self._dit_image_history = deque(maxlen=self._dit_num_history_frames * self._dit_history_interval)
         self._uamvla_gr00t_state_indices = self._gr00t_state_indices_from_config(model_config)
         self.send_uamvla_gr00t_state = self._client_uses_uamvla_gr00t_state(self.client)
         self.send_uamvla_gr00t_raw_state = self._client_uses_uamvla_gr00t_raw_state(self.client)
@@ -421,13 +427,13 @@ class CalvinPolicyClient:
         return [image, wrist_image]
 
     def _dit_history_for_example(self, current_images):
-        """Sample t-25,...,t-5 before appending t; clamp early steps to frame 0."""
+        """Sample configured historical offsets before appending t; clamp to frame 0."""
         history = list(self._dit_image_history)
         if not history:
-            return [self._copy_image_pair(current_images) for _ in range(5)]
+            return [self._copy_image_pair(current_images) for _ in range(self._dit_num_history_frames)]
         return [
             self._copy_image_pair(history[max(len(history) + offset, 0)])
-            for offset in (-25, -20, -15, -10, -5)
+            for offset in range(-self._dit_num_history_frames * self._dit_history_interval, 0, self._dit_history_interval)
         ]
 
     def _uamvla_gr00t_dt_history_for_example(

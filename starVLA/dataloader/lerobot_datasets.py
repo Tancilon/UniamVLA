@@ -37,7 +37,13 @@ def make_LeRobotSingleDataset(
     """
     
     data_config = ROBOT_TYPE_CONFIG_MAP[robot_type]
-    modality_config = data_config.modality_config()
+    if robot_type == "calvin_dit":
+        modality_config = data_config.modality_config(
+            num_history_frames=data_cfg["num_history_frames"],
+            history_interval=data_cfg["history_interval"],
+        )
+    else:
+        modality_config = data_config.modality_config()
     transforms = data_config.transform()
     dataset_path = data_root_dir / data_name
     if robot_type not in ROBOT_TYPE_TO_EMBODIMENT_TAG:

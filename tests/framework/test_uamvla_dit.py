@@ -39,13 +39,14 @@ def tiny_interface(config):
     return interface
 
 
-@pytest.fixture(scope='module')
-def model():
+@pytest.fixture(scope='module', params=[(5, 5), (3, 4)])
+def model(request):
     torch.set_num_threads(4)
     module = importlib.import_module('starVLA.model.framework.VLM4A.UamVLA_DiT')
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(module, 'get_vlm_model', tiny_interface)
         config = OmegaConf.load(RECIPE)
+        config.datasets.vla_data.num_history_frames, config.datasets.vla_data.history_interval = request.param
         config.framework.action_model.action_hidden_dim = 4096
         instance = build_framework(wrap_config(config))
         assert isinstance(instance, module.UamVLA_DiT)
@@ -54,17 +55,17 @@ def model():
     yield instance.to('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def examples():
+def examples(num_history_frames):
     rng = np.random.default_rng(3)
     pair = [Image.fromarray(rng.integers(0, 256, (224, 224, 3), dtype=np.uint8)) for _ in range(2)]
-    return [dict(image=pair, image_history=[pair] * 5, step=30,
+    return [dict(image=pair, image_history=[pair] * num_history_frames, step=30,
                  lang=lang, action=rng.normal(size=(8, 7)).astype(np.float32))
             for lang in ('push the drawer', 'move the red block to the left side of the blue block')]
 
 
 def test_condition_padding_and_two_step_backward(model):
     model.train()
-    batch = examples()
+    batch = examples(model.num_history_frames)
     prepared, inputs, hidden = model._encode_qwen_hidden(model._prepare_examples(batch))
     assert inputs['image_grid_thw'].tolist() == [[1, 16, 16]] * 4
     assert ((inputs['input_ids'] == 151655).sum(dim=1) == 128).all()
@@ -107,7 +108,7 @@ def test_sampling_cfg_and_ddim_cache(model):
             output = model._sample_dit_actions(condition, cfg_scale=scale, num_ddim_steps=steps)
             assert output.shape == (1, 8, 7) and torch.isfinite(output).all()
             assert model.action_model.ddim_diffusion.num_timesteps == steps
-        output = model.predict_action(examples()[:1])['normalized_actions']
+        output = model.predict_action(examples(model.num_history_frames)[:1])['normalized_actions']
         assert output.shape == (1, 8, 7) and np.isfinite(output).all()
         model.to(torch.bfloat16)
         for scale in (1.0, 1.5):
@@ -130,6 +131,8 @@ def test_lr_groups_and_strict_roundtrip(model, tmp_path):
     assert set(params) == {id(p) for p in model.parameters() if p.requires_grad}
     model.config.save_accessed_config(tmp_path / 'config.yaml', use_original_values=False)
     saved_config = OmegaConf.load(tmp_path / 'config.yaml')
+    assert saved_config.datasets.vla_data.num_history_frames == model.num_history_frames
+    assert saved_config.datasets.vla_data.history_interval == model.history_interval
     assert saved_config.framework.name == 'UamVLA_DiT'
     assert saved_config.framework.action_model.n_condition_token == 8
     assert saved_config.framework.action_model.action_hidden_dim == 768
@@ -142,6 +145,8 @@ def test_lr_groups_and_strict_roundtrip(model, tmp_path):
         restored = build_framework(saved_config)
     restored.load_state_dict(state, strict=True)
     assert restored.cfg_scale == 1.5 and restored.num_inference_timesteps == 10
+    assert restored.num_history_frames == model.num_history_frames
+    assert restored.history_interval == model.history_interval
     assert restored.action_horizon == 8
     assert restored.repeated_diffusion_steps == 4
     assert restored.action_model.net.num_cond_tokens == restored.action_horizon
@@ -151,21 +156,32 @@ def test_lr_groups_and_strict_roundtrip(model, tmp_path):
     assert restored.patches_per_view == 64
 
 
-def test_dataset_offsets_and_no_labels():
-    from starVLA.dataloader.gr00t_lerobot.registry import ROBOT_TYPE_CONFIG_MAP
+@pytest.mark.parametrize('h,s,offsets', [(5, 5, [-25,-20,-15,-10,-5,0]), (3, 4, [-12,-8,-4,0]), (1, 1, [-1,0])])
+def test_dataset_offsets_and_no_labels(monkeypatch, h, s, offsets):
     from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
     config = OmegaConf.load(RECIPE).datasets.vla_data
-    modalities = ROBOT_TYPE_CONFIG_MAP['calvin_dit'].modality_config()
-    assert modalities['video'].delta_indices == [-25, -20, -15, -10, -5, 0]
+    from pathlib import Path
+    from starVLA.dataloader import lerobot_datasets
+    config.num_history_frames = h
+    config.history_interval = s
+    # Exercise production factory routing without opening video files.
+    monkeypatch.setattr(lerobot_datasets, 'LeRobotSingleDataset', lambda **kwargs: kwargs)
+    built = lerobot_datasets.make_LeRobotSingleDataset(Path('.'), 'fake', 'calvin_dit', data_cfg=config)
+    modalities = built['modality_configs']
+    assert modalities['video'].delta_indices == offsets
+    assert modalities['language'].delta_indices == [0]
+    assert modalities['action'].delta_indices == list(range(8))
     reader = LeRobotSingleDataset.__new__(LeRobotSingleDataset)
     reader.data_cfg = config
     reader._modality_keys = {k: list(v.modality_keys) for k, v in modalities.items()}
-    data = {key: np.zeros((6, 256, 256, 3), dtype=np.uint8) for key in reader._modality_keys['video']}
+    data = {key: np.stack([np.full((256, 256, 3), i, dtype=np.uint8) for i in range(h + 1)]) for key in reader._modality_keys['video']}
     data.update({key: np.zeros((8, 1), dtype=np.float32) for key in reader._modality_keys['action']})
     data[reader._modality_keys['language'][0]] = ['push the drawer']
     packed = reader._pack_sample(data)
     assert 'state' not in packed and 'future_rgb' not in packed
-    assert len(packed['image_history']) == 5 and packed['action'].shape == (8, 7)
+    assert [int(np.asarray(pair[0])[0, 0, 0]) for pair in packed['image_history']] == list(range(h))
+    assert int(np.asarray(packed['image'][0])[0, 0, 0]) == h
+    assert len(packed['image_history']) == h and packed['action'].shape == (8, 7)
 
 
 def test_shared_action_head_default_conditions_and_bf16_training():
@@ -183,13 +199,13 @@ def test_shared_action_head_default_conditions_and_bf16_training():
 
 
 def test_processor_matches_original_for_current_and_history(model):
-    prepared = model._prepare_examples(examples()[:1])
+    prepared = model._prepare_examples(examples(model.num_history_frames)[:1])
     images = prepared[0]['image'] + [im for pair in prepared[0]['image_history'] for im in pair]
-    assert len(images) == 12 and all(im.size == (224, 224) for im in images)
+    assert len(images) == 2 * (model.num_history_frames + 1) and all(im.size == (224, 224) for im in images)
     original = AutoProcessor.from_pretrained('ckpt/RynnBrain-CoP-8B', local_files_only=True)
     expected = original.image_processor(images=images, return_tensors='pt')
     actual = model.qwen_vl_interface.processor.image_processor(images=images, return_tensors='pt')
-    assert actual['image_grid_thw'].tolist() == [[1, 16, 16]] * 12
+    assert actual['image_grid_thw'].tolist() == [[1, 16, 16]] * len(images)
     torch.testing.assert_close(actual['pixel_values'], expected['pixel_values'], rtol=0, atol=0)
     seen = []
 
@@ -203,4 +219,4 @@ def test_processor_matches_original_for_current_and_history(model):
             model._encode_qwen_hidden(prepared)
     finally:
         handle.remove()
-    assert seen == [((1, 3, 5, 2, 64, 64), (1, 3, 2, 64, 64))]
+    assert seen == [((1, 3, model.num_history_frames, 2, 64, 64), (1, 3, 2, 64, 64))]

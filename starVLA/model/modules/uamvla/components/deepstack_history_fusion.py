@@ -36,7 +36,7 @@ class HistoryAttention(nn.Module):
 
 
 class DeepStackHistoryFusion(nn.Module):
-    """Five oldest-to-newest history frames -> three current-sized feature maps.
+    """H oldest-to-newest history frames -> three current-sized feature maps.
 
     Each level has independent parameters. Cameras share those parameters but
     attend only within their own history. No state persists between calls.
@@ -51,9 +51,9 @@ class DeepStackHistoryFusion(nn.Module):
 
     def forward(self, history, current, steps):
         if history.ndim != 6 or current.ndim != 5:
-            raise ValueError("Expected history [B,3,5,2,N,D], current [B,3,2,N,D]")
+            raise ValueError("Expected history [B,3,H,2,N,D], current [B,3,2,N,D]")
         b, levels, t, views, n, d = history.shape
-        if (levels, t, views) != (3, 5, 2) or current.shape != (b, levels, views, n, d):
+        if (levels, views) != (3, 2) or t < 1 or current.shape != (b, levels, views, n, d):
             raise ValueError(f"Invalid history/current shapes: {history.shape}, {current.shape}")
         steps = torch.as_tensor(steps, device=current.device, dtype=torch.float32)
         if steps.shape != (b,) or (steps < 0).any():

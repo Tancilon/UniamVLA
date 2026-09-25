@@ -34,6 +34,7 @@ datasets:
     action_horizon: 8
     action_type: delta_qpos
     num_history_frames: 5
+    history_interval: 5
     future_offset: 0
     image_resize: 224
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."

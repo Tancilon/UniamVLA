@@ -6,6 +6,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 import numpy as np
 from PIL import Image
 
@@ -133,13 +134,14 @@ def test_calvin_policy_client_uses_train_renderer_images(monkeypatch):
     assert action.shape == (7,)
 
 
-def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch):
+@pytest.mark.parametrize('h,s', [(5, 5), (3, 4), (1, 1)])
+def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch, h, s):
     eval_calvin = _load_eval_calvin(monkeypatch)
 
     class DiTClient(_FakeModelClient):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.model_config = {"framework": {"name": "UamVLA_DiT"}}
+            self.model_config = {"framework": {"name": "UamVLA_DiT"}, "datasets": {"vla_data": {"num_history_frames": h, "history_interval": s}}}
             self.query_steps = []
 
         def step(self, example, step=0):
@@ -165,14 +167,15 @@ def test_dit_history_caches_resized_images_on_every_environment_step(monkeypatch
         for actual, expected in zip(policy._dit_image_history[-1], frames[-1]):
             np.testing.assert_array_equal(actual, expected)
             assert not np.shares_memory(actual, expected)
-        for pair, offset in zip(sent["image_history"], (-25, -20, -15, -10, -5)):
+        assert len(sent["image_history"]) == h
+        for pair, offset in zip(sent["image_history"], range(-h * s, 0, s)):
             for actual, expected in zip(pair, frames[max(step + offset, 0)]):
                 np.testing.assert_array_equal(actual, expected)
                 assert actual.shape == (224, 224, 3)
 
     assert renderer.calls == [(256, 256)] * 31
     assert policy.client.query_steps == [0, 8, 16, 24]
-    assert len(policy._dit_image_history) == 31
+    assert len(policy._dit_image_history) == min(31, h * s)
     policy.reset(clear_history=True)
     assert not policy._dit_image_history
     assert policy.step_count == 0
